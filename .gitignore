@@ -1,0 +1,4 @@
+node_modules/
+
+# Live user data — never commit
+data/

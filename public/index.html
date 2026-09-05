@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anandas's Notes</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <button id="header-toggle-btn" class="header-toggle-btn" title="Hide header" aria-label="Hide header" aria-pressed="false">▲</button>
+
+  <header class="topbar">
+    <h1></h1>
+    <div class="search" style="margin-left: 10px;">
+      <input type="text" id="search-input" placeholder="Jump to note…" autocomplete="off" />
+      <div id="search-results" class="search-results hidden"></div>
+    </div>
+    <button id="new-note-btn">+ New note</button>
+    <div class="header-controls">
+      <div class="zoom-controls">
+        <button id="zoom-out-btn" class="icon-btn" title="Zoom out" aria-label="Zoom out">−</button>
+        <button id="zoom-reset-btn" class="icon-btn zoom-level" title="Reset zoom">100%</button>
+        <button id="zoom-in-btn" class="icon-btn" title="Zoom in" aria-label="Zoom in">+</button>
+      </div>
+      <div class="zoom-controls" title="Nested grid depth">
+        <button id="depth-out-btn" class="icon-btn" title="Collapse nested grids" aria-label="Collapse nested grids">−</button>
+        <button id="depth-reset-btn" class="icon-btn zoom-level" title="Reset grid depth">1</button>
+        <button id="depth-in-btn" class="icon-btn" title="Expand neighbor cells into grids" aria-label="Expand neighbor cells into grids">+</button>
+      </div>
+      <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🎨</button>
+      <button id="insights-btn" class="icon-btn" title="Insights" aria-label="Open insights">📊</button>
+      <button id="fullscreen-btn" class="icon-btn" title="Toggle fullscreen" aria-label="Toggle fullscreen">⛶</button>
+      <button id="account-btn" class="icon-btn" title="Account" aria-label="Account">👤</button>
+    </div>
+  </header>
+
+  <nav id="tabbar" class="tabbar"></nav>
+  <nav id="pinbar" class="tabbar pinbar hidden"></nav>
+
+  <main id="grid" class="grid">
+    <!-- 9 cells: index 4 is the center note, others are neighbors -->
+  </main>
+
+  <div id="note-overlay" class="overlay hidden">
+    <div class="note-fullscreen">
+      <button id="note-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <div id="note-overlay-body" class="note-fullscreen-body"></div>
+    </div>
+  </div>
+
+  <div id="picker-overlay" class="overlay hidden">
+    <div class="picker">
+      <h2>Create a note</h2>
+
+      <div class="picker-style-row" id="picker-style-row">
+        <button type="button" class="picker-style-btn active" data-style="text">📝 Text</button>
+        <button type="button" class="picker-style-btn" data-style="image">📷 Photo</button>
+        <button type="button" class="picker-style-btn" data-style="audio">🎤 Audio</button>
+        <button type="button" class="picker-style-btn" data-style="contact">👤 Contact</button>
+        <button type="button" class="picker-style-btn" data-style="app">🔗 App link</button>
+      </div>
+
+      <input type="text" id="picker-new-title" placeholder="New note title…" />
+
+      <input type="file" id="picker-photo-input" class="hidden" accept="image/*" capture="environment" />
+
+      <div id="picker-audio-row" class="hidden picker-field-row">
+        <button type="button" id="picker-record-btn">🎤 Start recording</button>
+        <span id="picker-record-status" class="picker-hint"></span>
+      </div>
+
+      <div id="picker-contact-row" class="hidden picker-field-column">
+        <input type="text" id="picker-contact-name" placeholder="Contact name" />
+        <input type="text" id="picker-contact-phone" placeholder="Phone (optional)" />
+        <input type="text" id="picker-contact-email" placeholder="Email (optional)" />
+        <button type="button" id="picker-contact-pick-btn" class="hidden secondary">Pick from phone contacts</button>
+      </div>
+
+      <input type="text" id="picker-app-uri" class="hidden" placeholder="App link (intent://… or https://…)" />
+
+      <div id="picker-connect-section">
+        <div class="picker-divider">or connect note</div>
+        <input type="text" id="picker-search" placeholder="Search existing notes…" autocomplete="off" />
+        <div id="picker-results" class="picker-results"></div>
+      </div>
+
+      <div class="picker-actions">
+        <button id="picker-create-btn">Create &amp; connect</button>
+        <button id="picker-cancel-btn" class="secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="insights-overlay" class="overlay hidden">
+    <div class="picker insights-panel">
+      <button id="insights-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <h2>Insights</h2>
+      <div id="insights-body" class="insights-body"></div>
+    </div>
+  </div>
+
+  <div id="login-overlay" class="overlay hidden">
+    <div class="picker">
+      <h2>Sign in</h2>
+      <p class="picker-hint" style="margin: 0 0 0.6rem;">Enter your email to load your notes. No password yet.</p>
+      <input type="email" id="login-email" placeholder="you@example.com" autocomplete="email" />
+      <div id="login-error" class="picker-hint" style="color: var(--danger);"></div>
+      <div class="picker-actions">
+        <button id="login-btn">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

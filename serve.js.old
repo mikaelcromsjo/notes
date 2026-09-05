@@ -1,0 +1,49 @@
+const http = require('http');
+
+const port = 8040;
+const hostname = '127.0.0.1';
+
+const server = http.createServer((req, res) => {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Nico's Server</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+        }
+        h1 { color: #333; margin: 0 0 0.5rem 0; }
+        .status { color: #667eea; font-size: 1.1rem; margin: 1rem 0; }
+        .time { color: #999; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Nico's Server</h1>
+        <p class="status">Live on port 8040</p>
+        <p class="time">${new Date().toLocaleString()}</p>
+    </div>
+</body>
+</html>
+  `);
+});
+
+server.listen(port, hostname, () => {
+  console.log(`Nico's server running at http://${hostname}:${port}/`);
+});
