@@ -4,6 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Anandas's Notes</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#4f6df5" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="Notes" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -22,13 +29,11 @@
         <button id="zoom-reset-btn" class="icon-btn zoom-level" title="Reset zoom">100%</button>
         <button id="zoom-in-btn" class="icon-btn" title="Zoom in" aria-label="Zoom in">+</button>
       </div>
-      <div class="zoom-controls" title="Nested grid depth">
-        <button id="depth-out-btn" class="icon-btn" title="Collapse nested grids" aria-label="Collapse nested grids">−</button>
-        <button id="depth-reset-btn" class="icon-btn zoom-level" title="Reset grid depth">1</button>
-        <button id="depth-in-btn" class="icon-btn" title="Expand neighbor cells into grids" aria-label="Expand neighbor cells into grids">+</button>
-      </div>
+      <button id="depth-cycle-btn" class="icon-btn" title="Nested grid depth" aria-label="Cycle nested grid depth">🔲</button>
       <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🎨</button>
+      <button id="map-btn" class="icon-btn" title="Map of notes" aria-label="Open map of notes">🗺️</button>
       <button id="insights-btn" class="icon-btn" title="Insights" aria-label="Open insights">📊</button>
+      <button id="history-btn" class="icon-btn" title="History &amp; undo" aria-label="Open history">↩️</button>
       <button id="fullscreen-btn" class="icon-btn" title="Toggle fullscreen" aria-label="Toggle fullscreen">⛶</button>
       <button id="account-btn" class="icon-btn" title="Account" aria-label="Account">👤</button>
     </div>
@@ -36,6 +41,7 @@
 
   <nav id="tabbar" class="tabbar"></nav>
   <nav id="pinbar" class="tabbar pinbar hidden"></nav>
+  <nav id="alarmbar" class="tabbar alarmbar hidden"></nav>
 
   <main id="grid" class="grid">
     <!-- 9 cells: index 4 is the center note, others are neighbors -->
@@ -91,11 +97,32 @@
     </div>
   </div>
 
+  <div id="map-overlay" class="overlay hidden">
+    <div class="map-fullscreen">
+      <button id="map-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <div id="map-status" class="map-status"></div>
+      <div class="map-modes" id="map-modes">
+        <button data-mode="off">Plain</button>
+        <button data-mode="note">Heat</button>
+        <button data-mode="cluster">Clusters</button>
+      </div>
+      <div id="map"></div>
+    </div>
+  </div>
+
   <div id="insights-overlay" class="overlay hidden">
     <div class="picker insights-panel">
       <button id="insights-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
       <h2>Insights</h2>
       <div id="insights-body" class="insights-body"></div>
+    </div>
+  </div>
+
+  <div id="history-overlay" class="overlay hidden">
+    <div class="note-fullscreen history-panel">
+      <button id="history-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <h2>History</h2>
+      <div id="history-body" class="history-body"></div>
     </div>
   </div>
 
@@ -111,6 +138,39 @@
     </div>
   </div>
 
+  <div id="alarm-overlay" class="overlay hidden">
+    <div class="picker alarm-editor">
+      <h2>Alarm</h2>
+      <input type="time" id="alarm-time-input" class="alarm-time-input" />
+      <div class="alarm-repeat-label">Repeat</div>
+      <div class="alarm-days-row" id="alarm-days-row"></div>
+      <div id="alarm-date-wrap">
+        <div class="picker-divider">one-time on</div>
+        <input type="date" id="alarm-date-input" />
+      </div>
+      <div class="picker-actions">
+        <button id="alarm-save-btn">Save</button>
+        <button id="alarm-remove-btn" class="secondary hidden">Remove</button>
+        <button id="alarm-cancel-btn" class="secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="alarm-popup-overlay" class="overlay hidden">
+    <div class="picker alarm-popup">
+      <h2>⏰ Alarm</h2>
+      <div id="alarm-popup-list"></div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
+  </script>
 </body>
 </html>

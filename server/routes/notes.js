@@ -3,6 +3,7 @@ const path = require('path');
 const express = require('express');
 const multer = require('multer');
 const db = require('../db');
+const history = require('../history');
 
 const router = express.Router();
 
@@ -11,15 +12,41 @@ const now = () => new Date().toISOString();
 const uploadsDir = path.join(__dirname, '..', '..', 'data', 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
+// Stored extension comes from an allowlist keyed to the uploaded MIME type, never
+// from the client-supplied filename — otherwise an `x.html` / `x.svg` "image"
+// lands under /uploads and executes as script on this origin. SVG is excluded
+// deliberately (it can carry script).
+const IMAGE_EXT = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/heic': '.heic',
+  'image/heif': '.heif',
+};
+const AUDIO_EXT = {
+  'audio/webm': '.webm',
+  'audio/ogg': '.ogg',
+  'audio/mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/aac': '.aac',
+  'audio/wav': '.wav',
+  'audio/x-wav': '.wav',
+  'audio/wave': '.wav',
+};
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadsDir),
     filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname || '');
+      const ext = IMAGE_EXT[file.mimetype] || AUDIO_EXT[file.mimetype] || '.bin';
       cb(null, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
     },
   }),
   limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    cb(null, Boolean(IMAGE_EXT[file.mimetype] || AUDIO_EXT[file.mimetype]));
+  },
 });
 
 // Coerce a lat/lon pair from request body into finite numbers, or null if absent/invalid.
@@ -45,7 +72,7 @@ const decaySum = `SUM(pow(0.5, (julianday('now') - julianday(created_at)) / ${HA
 router.get('/', (req, res) => {
   const notes = db
     .prepare(
-      `SELECT id, title, updated_at, pinned, type, status
+      `SELECT id, title, updated_at, pinned, type, status, lat, lon
        FROM notes WHERE user_id = ? AND status != 'deleted'
        ORDER BY updated_at DESC`
     )
@@ -89,6 +116,7 @@ router.post('/', (req, res) => {
 
   const id = create();
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+  history.record(req.userId, 'create', { noteId: id, title: note.title }, `Created "${note.title}"`);
   res.status(201).json(note);
 });
 
@@ -117,6 +145,13 @@ router.put('/:id', (req, res) => {
     now(),
     req.params.id
   );
+  history.recordUpdate(
+    req.userId,
+    note.id,
+    { title: note.title, content: note.content },
+    { title: newTitle, content: newContent },
+    `Edited "${newTitle}"`
+  );
   res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
 });
 
@@ -142,7 +177,9 @@ router.put('/:id/pin', (req, res) => {
     .prepare('UPDATE notes SET pinned = 1 WHERE id = ? AND user_id = ?')
     .run(req.params.id, req.userId);
   if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
+  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
+  history.record(req.userId, 'pin', { noteId: note.id }, `Pinned "${note.title}"`);
+  res.json(note);
 });
 
 router.delete('/:id/pin', (req, res) => {
@@ -150,20 +187,44 @@ router.delete('/:id/pin', (req, res) => {
     .prepare('UPDATE notes SET pinned = 0 WHERE id = ? AND user_id = ?')
     .run(req.params.id, req.userId);
   if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
+  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
+  history.record(req.userId, 'unpin', { noteId: note.id }, `Unpinned "${note.title}"`);
+  res.json(note);
 });
 
 const NOTE_STATUSES = new Set(['active', 'done', 'deleted']);
+
+const STATUS_VERB = {
+  deleted: 'Deleted',
+  done: 'Completed',
+  active: 'Reopened',
+};
 
 router.put('/:id/status', (req, res) => {
   const { status } = req.body;
   if (!NOTE_STATUSES.has(status)) {
     return res.status(400).json({ error: `status must be one of: ${[...NOTE_STATUSES].join(', ')}` });
   }
-  const info = db
-    .prepare('UPDATE notes SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?')
-    .run(status, now(), req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
+  const prev = db
+    .prepare('SELECT id, title, status FROM notes WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.userId);
+  if (!prev) return res.status(404).json({ error: 'not found' });
+
+  db.prepare('UPDATE notes SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?').run(
+    status,
+    now(),
+    req.params.id,
+    req.userId
+  );
+
+  if (status !== prev.status) {
+    history.record(
+      req.userId,
+      'status',
+      { noteId: prev.id, from: prev.status, to: status },
+      `${STATUS_VERB[status] || 'Changed'} "${prev.title}"`
+    );
+  }
   res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
 });
 
@@ -190,7 +251,9 @@ router.get('/:id/neighbors', (req, res) => {
     )
     .all(id, id, id, uid);
 
-  if (linked.length === 0) return res.json({ parent: null, neighbors: [] });
+  if (linked.length === 0) return res.json({ parent: null, neighbors: [], linkCount: 0, links: [] });
+
+  const links = linked.map((r) => ({ id: r.id, title: r.title, type: r.type, status: r.status }));
 
   const weightMap = (rows) => new Map(rows.map((r) => [r.nid, r.w]));
 
@@ -256,12 +319,19 @@ router.get('/:id/neighbors', (req, res) => {
   }
 
   const parentId = parent ? parent.id : null;
+  // 'done' neighbours always rank below active ones, so they're the first to be
+  // dropped when the grid can only show NEIGHBOR_LIMIT links.
   const neighbors = scored
     .filter((r) => r.id !== parentId)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      const ad = a.status === 'done' ? 1 : 0;
+      const bd = b.status === 'done' ? 1 : 0;
+      if (ad !== bd) return ad - bd;
+      return b.score - a.score;
+    })
     .slice(0, parent ? NEIGHBOR_LIMIT - 1 : NEIGHBOR_LIMIT);
 
-  res.json({ parent, neighbors });
+  res.json({ parent, neighbors, linkCount: linked.length, links });
 });
 
 const ATTACHMENT_TYPES = new Set(['image', 'audio', 'contact', 'app']);
@@ -289,7 +359,14 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
   let defaultTitle = 'Attachment';
 
   if (type === 'image' || type === 'audio') {
-    if (!req.file) return res.status(400).json({ error: 'file is required for image/audio attachments' });
+    if (!req.file) {
+      return res.status(400).json({ error: 'a supported image or audio file is required' });
+    }
+    const kind = req.file.mimetype.split('/')[0];
+    if (kind !== type) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: `file type does not match "${type}"` });
+    }
     attachmentPath = `/uploads/${req.file.filename}`;
     defaultTitle = type === 'image' ? 'Photo' : 'Recording';
   } else if (type === 'contact') {
@@ -332,6 +409,12 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
 
   const id = create();
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+  history.record(
+    req.userId,
+    'create',
+    { noteId: id, title: note.title },
+    `Added ${type} "${note.title}"`
+  );
   res.status(201).json(note);
 });
 

@@ -7,10 +7,15 @@
   const newNoteBtn = document.getElementById('new-note-btn');
 
   const colorModeBtn = document.getElementById('color-mode-btn');
+  const mapBtn = document.getElementById('map-btn');
   const insightsBtn = document.getElementById('insights-btn');
   const insightsOverlay = document.getElementById('insights-overlay');
   const insightsClose = document.getElementById('insights-close');
   const insightsBody = document.getElementById('insights-body');
+  const historyBtn = document.getElementById('history-btn');
+  const historyOverlay = document.getElementById('history-overlay');
+  const historyClose = document.getElementById('history-close');
+  const historyBody = document.getElementById('history-body');
   const accountBtn = document.getElementById('account-btn');
   const loginOverlay = document.getElementById('login-overlay');
   const loginEmail = document.getElementById('login-email');
@@ -40,22 +45,36 @@
   const noteOverlayBody = document.getElementById('note-overlay-body');
   const noteOverlayClose = document.getElementById('note-overlay-close');
 
+  const alarmbar = document.getElementById('alarmbar');
+  const alarmOverlay = document.getElementById('alarm-overlay');
+  const alarmTimeInput = document.getElementById('alarm-time-input');
+  const alarmDaysRow = document.getElementById('alarm-days-row');
+  const alarmDateWrap = document.getElementById('alarm-date-wrap');
+  const alarmDateInput = document.getElementById('alarm-date-input');
+  const alarmSaveBtn = document.getElementById('alarm-save-btn');
+  const alarmRemoveBtn = document.getElementById('alarm-remove-btn');
+  const alarmCancelBtn = document.getElementById('alarm-cancel-btn');
+  const alarmPopupOverlay = document.getElementById('alarm-popup-overlay');
+  const alarmPopupList = document.getElementById('alarm-popup-list');
+
   const zoomOutBtn = document.getElementById('zoom-out-btn');
   const zoomInBtn = document.getElementById('zoom-in-btn');
   const zoomResetBtn = document.getElementById('zoom-reset-btn');
   const fullscreenBtn = document.getElementById('fullscreen-btn');
   const headerToggleBtn = document.getElementById('header-toggle-btn');
-  const depthOutBtn = document.getElementById('depth-out-btn');
-  const depthInBtn = document.getElementById('depth-in-btn');
-  const depthResetBtn = document.getElementById('depth-reset-btn');
+  const depthCycleBtn = document.getElementById('depth-cycle-btn');
 
   let currentId = null;
   let currentNote = null;
   let neighbors = [];
   let parentNeighbor = null;
+  let allLinks = [];
+  let linkCount = 0;
+  const LINK_LIST_THRESHOLD = 8;
   let allNotesCache = [];
   let saveTimer = null;
   let currentUser = null;
+  let widgetToken = null;
 
   const TYPE_ICON = { image: '🖼️', audio: '🎤', contact: '👤', app: '🔗' };
 
@@ -72,6 +91,8 @@
     const data = await api.getNeighbors(id);
     neighbors = (data && data.neighbors) || [];
     parentNeighbor = (data && data.parent) || null;
+    allLinks = (data && data.links) || [];
+    linkCount = (data && data.linkCount) || 0;
   }
 
   async function afterAttach() {
@@ -80,10 +101,91 @@
     await refreshColorData();
     renderPinbar();
     await render();
+    if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
   }
 
   let tabs = [];
   let activeTabId = null;
+
+  // --- Alarms ---
+  let alarms = [];
+  let triggeredAlarmIds = new Set();
+  const alarmDismissed = new Set(); // "✕" on the popup — clears when it next rings, or on reload
+  const alarmNotified = new Set(); // fired a Notification this cycle already
+  let alarmEditNote = null;
+
+  const ALARM_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const ALARM_DAY_NUM = [1, 2, 3, 4, 5, 6, 0]; // JS getDay() for each chip
+
+  // Most recent scheduled datetime at or before `ref`, in the viewer's local
+  // timezone, or null if none applies. Mirrors the (now removed) server logic —
+  // computed here so "07:00" means 07:00 where the user is, not on the server.
+  function mostRecentAlarmTrigger(a, ref) {
+    if (!a.time || !/^\d{2}:\d{2}$/.test(a.time)) return null;
+    const [h, m] = a.time.split(':').map(Number);
+
+    if (a.days && a.days.length) {
+      for (let back = 0; back < 8; back += 1) {
+        const d = new Date(ref);
+        d.setDate(d.getDate() - back);
+        d.setHours(h, m, 0, 0);
+        if (d > ref) continue;
+        if (a.days.includes(d.getDay())) return d;
+      }
+      return null;
+    }
+
+    if (a.date && /^\d{4}-\d{2}-\d{2}$/.test(a.date)) {
+      const d = new Date(`${a.date}T${a.time}:00`);
+      return d <= ref ? d : null;
+    }
+    return null;
+  }
+
+  function alarmTriggered(a, ref) {
+    const t = mostRecentAlarmTrigger(a, ref);
+    if (!t) return false;
+    return !a.ackAt || new Date(a.ackAt) < t;
+  }
+
+  // Next scheduled datetime strictly after `ref`, in the viewer's timezone, or
+  // null (a one-time alarm whose date/time has already passed). Sent to the
+  // server as an absolute instant so the push scheduler knows when to ring.
+  function nextAlarmOccurrence(a, ref) {
+    if (!a.time || !/^\d{2}:\d{2}$/.test(a.time)) return null;
+    const [h, m] = a.time.split(':').map(Number);
+
+    if (a.days && a.days.length) {
+      for (let fwd = 0; fwd < 8; fwd += 1) {
+        const d = new Date(ref);
+        d.setDate(d.getDate() + fwd);
+        d.setHours(h, m, 0, 0);
+        if (d <= ref) continue;
+        if (a.days.includes(d.getDay())) return d;
+      }
+      return null;
+    }
+
+    if (a.date && /^\d{4}-\d{2}-\d{2}$/.test(a.date)) {
+      const d = new Date(`${a.date}T${a.time}:00`);
+      return d > ref ? d : null;
+    }
+    return null;
+  }
+
+  const isoOrNull = (d) => (d ? d.toISOString() : null);
+
+  function alarmWhenText(a) {
+    if (a.days && a.days.length) {
+      if (a.days.length === 7) return `Every day · ${a.time}`;
+      const labels = ALARM_DAY_NUM.map((num, i) => (a.days.includes(num) ? ALARM_DAYS[i] : null)).filter(
+        Boolean
+      );
+      return `${labels.join(' ')} · ${a.time}`;
+    }
+    if (a.date) return `${a.date} · ${a.time}`;
+    return a.time || '';
+  }
 
   const GRID_DEPTH_MIN = 1;
   const GRID_DEPTH_MAX = 2;
@@ -108,6 +210,8 @@
 
   const api = {
     listNotes: () => fetch('/api/notes').then((r) => r.json()),
+    rotateWidgetToken: () =>
+      fetch('/api/session/widget-token', { method: 'POST' }).then((r) => r.json()),
     getNote: (id) => fetch(`/api/notes/${id}`).then((r) => (r.ok ? r.json() : null)),
     createNote: async (data) => {
       const loc = await getLocation();
@@ -144,11 +248,11 @@
     pinNote: (id) => fetch(`/api/notes/${id}/pin`, { method: 'PUT' }).then((r) => r.json()),
     unpinNote: (id) => fetch(`/api/notes/${id}/pin`, { method: 'DELETE' }).then((r) => r.json()),
     getNeighbors: (id) => fetch(`/api/notes/${id}/neighbors`).then((r) => r.json()),
-    link: (a, b) =>
+    link: (a, b, rehomeFrom) =>
       fetch('/api/links', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ a, b }),
+        body: JSON.stringify(rehomeFrom ? { a, b, rehomeFrom } : { a, b }),
       }),
     unlink: (a, b) =>
       fetch('/api/links', {
@@ -190,6 +294,42 @@
     getNoteHeat: () => fetch('/api/stats/note-heat').then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
     getClusters: () => fetch('/api/stats/clusters').then((r) => (r.ok ? r.json() : { clusters: {} })).catch(() => ({ clusters: {} })),
     getInsights: () => fetch('/api/stats/insights').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    getHistory: () => fetch('/api/history').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    undoHistory: (id) =>
+      fetch(`/api/history/${id}/undo`, { method: 'POST' })
+        .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
+        .catch(() => ({ ok: false, error: 'network error' })),
+    redoHistory: (id) =>
+      fetch(`/api/history/${id}/redo`, { method: 'POST' })
+        .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
+        .catch(() => ({ ok: false, error: 'network error' })),
+    listAlarms: () => fetch('/api/alarms').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    setAlarm: (id, data) =>
+      fetch(`/api/alarms/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }).then((r) => r.json()),
+    removeAlarm: (id) => fetch(`/api/alarms/${id}`, { method: 'DELETE' }),
+    ackAlarm: (id, nextAt) =>
+      fetch(`/api/alarms/${id}/ack`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ at: new Date().toISOString(), nextAt: nextAt || null }),
+      }),
+    scheduleAlarm: (id, nextAt) =>
+      fetch(`/api/alarms/${id}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nextAt: nextAt || null }),
+      }).catch(() => {}),
+    getPushKey: () => fetch('/api/push/key').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    subscribePush: (sub) =>
+      fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sub),
+      }).catch(() => {}),
   };
 
   // Pull whatever the current colour mode needs (nothing for off/path).
@@ -207,24 +347,27 @@
     }
   }
 
-  // Paint one grid cell for the active colour mode (no-op when off).
+  // The translucent tint for a note under the active colour mode, or null.
+  function tintFor(note) {
+    if (colorMode === 'off' || !note) return null;
+    if (colorMode === 'path') {
+      const p = typeof note.p === 'number' ? note.p : 0;
+      if (p > 0) return `color-mix(in srgb, var(--accent) ${Math.round(p * 55)}%, transparent)`;
+    } else if (colorMode === 'note') {
+      const h = noteHeat[note.id] || 0;
+      if (h > 0) return `color-mix(in srgb, var(--pin) ${Math.round(h * 55)}%, transparent)`;
+    } else if (colorMode === 'cluster') {
+      const cid = clusters[note.id];
+      if (cid != null) return `hsl(${clusterHues[cid] || 0} 70% 88% / 0.75)`;
+    }
+    return null;
+  }
+
+  // Paint one grid cell (outer or mini) for the active colour mode (no-op when off).
   function applyCellColor(cell, note) {
     cell.removeAttribute('data-tint');
     cell.style.removeProperty('--cell-tint');
-    if (colorMode === 'off' || !note) return;
-
-    let tint = null;
-    if (colorMode === 'path') {
-      const p = typeof note.p === 'number' ? note.p : 0;
-      if (p > 0) tint = `color-mix(in srgb, var(--accent) ${Math.round(p * 55)}%, transparent)`;
-    } else if (colorMode === 'note') {
-      const h = noteHeat[note.id] || 0;
-      if (h > 0) tint = `color-mix(in srgb, var(--pin) ${Math.round(h * 55)}%, transparent)`;
-    } else if (colorMode === 'cluster') {
-      const cid = clusters[note.id];
-      if (cid != null) tint = `hsl(${clusterHues[cid] || 0} 70% 88% / 0.75)`;
-    }
-
+    const tint = tintFor(note);
     if (tint) {
       cell.style.setProperty('--cell-tint', tint);
       cell.setAttribute('data-tint', '');
@@ -316,10 +459,19 @@
       return;
     }
     currentUser = sess.user;
+    widgetToken = sess.widgetToken || null;
     accountBtn.title = `Signed in as ${currentUser.email}`;
     allNotesCache = await api.listNotes();
     const tabsList = await api.listTabs();
     await refreshFromTabs(tabsList);
+    await checkAlarms();
+    ensurePushSubscription();
+    setInterval(() => checkAlarms(), 30000);
+    // Re-check the moment the app is foregrounded again — a backgrounded PWA's
+    // timers are throttled, so an alarm that came due while away rings now.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) checkAlarms();
+    });
   }
 
   function renderEmptyState() {
@@ -443,9 +595,60 @@
     return line;
   }
 
-  // Builds the editable UI for the current center note — attachment preview,
-  // title + content with autosave, meta line, and the pin / 🗑 delete / ✅ done
-  // footer. Shared by the grid center cell and the fullscreen overlay.
+  // Scrollable list of every note linked to the current one, each row a
+  // click-to-open title plus an ✕ to sever that connection. Only shown in the
+  // fullscreen view, and only once the grid can no longer surface every link
+  // (see LINK_LIST_THRESHOLD).
+  function buildLinksPanel() {
+    const panel = document.createElement('div');
+    panel.className = 'center-links';
+
+    const heading = document.createElement('div');
+    heading.className = 'center-links-heading';
+    heading.textContent = `Links (${allLinks.length})`;
+    panel.appendChild(heading);
+
+    const list = document.createElement('div');
+    list.className = 'center-links-list';
+
+    allLinks.forEach((link) => {
+      const row = document.createElement('div');
+      row.className = 'center-links-row' + (link.status === 'done' ? ' dimmed' : '');
+
+      const name = document.createElement('button');
+      name.className = 'center-links-name';
+      const icon = TYPE_ICON[link.type];
+      name.textContent = icon ? `${icon} ${link.title}` : link.title;
+      name.title = link.title;
+      name.addEventListener('click', () => {
+        closeNoteFullscreen();
+        goTo(link.id, 'link-list');
+      });
+
+      const x = document.createElement('button');
+      x.className = 'center-links-x';
+      x.textContent = '✕';
+      x.title = 'Remove connection';
+      x.addEventListener('click', async () => {
+        await api.unlink(currentId, link.id);
+        await loadNeighbors(currentId);
+        await refreshColorData();
+        await render();
+        renderNoteFullscreen();
+      });
+
+      row.appendChild(name);
+      row.appendChild(x);
+      list.appendChild(row);
+    });
+
+    panel.appendChild(list);
+    return panel;
+  }
+
+  // Builds the editable UI for the fullscreen note view — attachment preview,
+  // title + content with autosave, the meta line, and the pin / 🗑 delete / ✅
+  // done footer. (The grid center cell renders a read-only version, not this.)
   // `onRerender` runs after a pin/done toggle; `afterDelete` after a soft-delete.
   function buildNoteEditor({ onRerender, afterDelete }) {
     const frag = document.createDocumentFragment();
@@ -463,40 +666,9 @@
     content.value = currentNote.content;
     content.placeholder = 'Write here…';
 
-    const footer = document.createElement('div');
-    footer.className = 'center-footer';
     const status = document.createElement('span');
     status.className = 'save-status';
     status.textContent = '';
-
-    const actions = document.createElement('div');
-    actions.className = 'footer-actions';
-
-    const pinBtn = document.createElement('button');
-    pinBtn.className = 'pin-btn' + (currentNote.pinned ? ' active' : '');
-    pinBtn.textContent = '📌';
-    pinBtn.title = currentNote.pinned ? 'Unpin note' : 'Pin note';
-    pinBtn.setAttribute('aria-pressed', String(Boolean(currentNote.pinned)));
-
-    const isDone = currentNote.status === 'done';
-
-    const doneBtn = document.createElement('button');
-    doneBtn.className = 'done-btn' + (isDone ? ' active' : '');
-    doneBtn.textContent = '✅';
-    doneBtn.title = isDone ? 'Mark not done' : 'Mark done';
-    doneBtn.setAttribute('aria-pressed', String(isDone));
-
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'delete-btn';
-    deleteBtn.textContent = '🗑️';
-    deleteBtn.disabled = Boolean(currentNote.pinned);
-    deleteBtn.title = currentNote.pinned ? 'Unpin before deleting' : 'Delete note';
-
-    actions.appendChild(pinBtn);
-    actions.appendChild(deleteBtn);
-    actions.appendChild(doneBtn);
-    footer.appendChild(status);
-    footer.appendChild(actions);
 
     function scheduleSave() {
       status.textContent = 'Saving…';
@@ -521,6 +693,58 @@
 
     title.addEventListener('input', scheduleSave);
     content.addEventListener('input', scheduleSave);
+
+    frag.appendChild(title);
+    frag.appendChild(content);
+
+    if (linkCount > LINK_LIST_THRESHOLD) frag.appendChild(buildLinksPanel());
+
+    const isDone = currentNote.status === 'done';
+
+    const footer = document.createElement('div');
+    footer.className = 'center-footer';
+
+    const actions = document.createElement('div');
+    actions.className = 'footer-actions';
+
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'pin-btn' + (currentNote.pinned ? ' active' : '');
+    pinBtn.textContent = '📌';
+    pinBtn.title = currentNote.pinned ? 'Unpin note' : 'Pin note';
+    pinBtn.setAttribute('aria-pressed', String(Boolean(currentNote.pinned)));
+
+    const doneBtn = document.createElement('button');
+    doneBtn.className = 'done-btn' + (isDone ? ' active' : '');
+    doneBtn.textContent = '✅';
+    doneBtn.title = isDone ? 'Mark not done' : 'Mark done';
+    doneBtn.setAttribute('aria-pressed', String(isDone));
+
+    const alarmBtn = document.createElement('button');
+    const hasAlarm = alarms.some((a) => a.id === currentId);
+    alarmBtn.className = 'alarm-btn' + (hasAlarm ? ' active' : '');
+    alarmBtn.textContent = '⏰';
+    alarmBtn.title = hasAlarm ? 'Edit alarm' : 'Set alarm';
+    alarmBtn.addEventListener('click', () => openAlarmEditor(currentNote));
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.textContent = '🗑️';
+    deleteBtn.disabled = Boolean(currentNote.pinned);
+    deleteBtn.title = currentNote.pinned ? 'Unpin before deleting' : 'Delete note';
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'add-link-btn';
+    addBtn.textContent = '➕';
+    addBtn.title = 'Add a linked note';
+    addBtn.addEventListener('click', () => openPicker());
+
+    actions.appendChild(addBtn);
+    actions.appendChild(pinBtn);
+    actions.appendChild(alarmBtn);
+    actions.appendChild(deleteBtn);
+    actions.appendChild(doneBtn);
+    footer.appendChild(status);
+    footer.appendChild(actions);
 
     pinBtn.addEventListener('click', async () => {
       currentNote = currentNote.pinned
@@ -547,38 +771,180 @@
       await afterDelete();
     });
 
-    frag.appendChild(title);
-    frag.appendChild(content);
     frag.appendChild(buildMetaLine(currentNote));
     frag.appendChild(footer);
     return frag;
   }
 
+  // The grid center cell is a read-only preview — attachment, title, text.
+  // A click anywhere opens the fullscreen editor, focused on whichever of
+  // title / text was clicked. Attachment links stay live.
   function makeCenterCell() {
     const cell = document.createElement('div');
-    cell.className = 'cell center' + (currentNote.status === 'done' ? ' dimmed' : '');
+    cell.className =
+      'cell center' +
+      (currentNote.status === 'done' ? ' dimmed' : '') +
+      (triggeredAlarmIds.has(currentNote.id) ? ' alarm-triggered' : '');
     cell.style.gridColumn = '2';
     cell.style.gridRow = '2';
 
     applyCellColor(cell, currentNote);
 
-    cell.appendChild(
-      buildNoteEditor({
-        onRerender: render,
-        afterDelete: async () => {
-          const tabsList = await api.listTabs();
-          await refreshFromTabs(tabsList);
-        },
-      })
-    );
+    const preview = buildAttachmentPreview(currentNote);
+    if (preview) cell.appendChild(preview);
 
-    // Click on the cell chrome (not the inputs/buttons/links) opens this note fullscreen.
+    const title = document.createElement('div');
+    title.className = 'center-title readonly';
+    title.textContent = currentNote.title || 'Untitled';
+
+    const content = document.createElement('div');
+    content.className = 'center-content readonly' + (currentNote.content ? '' : ' placeholder');
+    content.textContent = currentNote.content || 'Write here…';
+
+    cell.appendChild(title);
+    cell.appendChild(content);
+
+    if (linkCount > LINK_LIST_THRESHOLD) {
+      const badge = document.createElement('div');
+      badge.className = 'center-link-badge';
+      badge.textContent = `+${linkCount - LINK_LIST_THRESHOLD}`;
+      badge.title = `${linkCount} links — open the note to manage them`;
+      cell.appendChild(badge);
+    }
+
     cell.addEventListener('click', (e) => {
-      if (e.target.closest('input, textarea, button, a')) return;
-      openNoteFullscreen();
+      if (e.target.closest('a, audio')) return;
+      const focus = e.target.closest('.center-title')
+        ? 'title'
+        : e.target.closest('.center-content')
+        ? 'content'
+        : null;
+      openNoteFullscreen(focus);
     });
 
     return cell;
+  }
+
+  // --- Drag a neighbor card onto another card to re-home its connection:
+  // it unlinks from the centered note and links to the drop-target note.
+  // Pointer Events so the same path works for mouse and Android touch. ---
+  const DRAG_THRESHOLD = 8;
+
+  function makeDragGhost(cell, grabX, grabY) {
+    const r = cell.getBoundingClientRect();
+    const ghost = cell.cloneNode(true);
+    ghost.classList.add('drag-ghost');
+    ghost.classList.remove('dragging', 'drop-target');
+    // Set layout inline: stylesheet `.cell.neighbor` rules outrank `.drag-ghost`
+    // and would otherwise pin it `position: relative` at the end of <body>.
+    ghost.style.cssText +=
+      `;position:fixed;margin:0;z-index:60;pointer-events:none;` +
+      `width:${r.width}px;height:${r.height}px;`;
+    // Offset so the card holds its grab point under the pointer.
+    ghost._ox = Math.min(Math.max(grabX - r.left, 0), r.width);
+    ghost._oy = Math.min(Math.max(grabY - r.top, 0), r.height);
+    document.body.appendChild(ghost);
+    return ghost;
+  }
+
+  function moveGhost(ghost, x, y) {
+    if (!ghost) return;
+    ghost.style.left = `${x - ghost._ox}px`;
+    ghost.style.top = `${y - ghost._oy}px`;
+  }
+
+  function dropTargetAt(x, y, sourceCell) {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return null;
+    const cell = el.closest('.cell.neighbor');
+    if (!cell || cell === sourceCell || !cell.dataset.noteId) return null;
+    return cell;
+  }
+
+  async function rehomeCard(cardId, fromId, toId) {
+    if (!toId || cardId === toId || fromId === toId) return;
+    // The server links (toId ↔ cardId), drops (fromId ↔ cardId), and logs the
+    // pair as one undoable "moved" entry — all in one transaction.
+    await api.link(toId, cardId, fromId);
+    await loadNeighbors(currentId);
+    await refreshColorData();
+    await render();
+  }
+
+  function attachCardDrag(cell, note) {
+    cell.dataset.noteId = String(note.id);
+
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let dragging = false;
+    let ghost = null;
+    let hovered = null;
+
+    const clearHover = () => {
+      if (hovered) hovered.classList.remove('drop-target');
+      hovered = null;
+    };
+
+    cell.addEventListener('pointerdown', (e) => {
+      if (!e.isPrimary || (e.button != null && e.button > 0)) return;
+      if (e.target.closest('.unlink-btn')) return;
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      dragging = false;
+    });
+
+    cell.addEventListener('pointermove', (e) => {
+      if (pointerId == null || e.pointerId !== pointerId) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+
+      if (!dragging) {
+        if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        dragging = true;
+        try { cell.setPointerCapture(pointerId); } catch {}
+        cell.classList.add('dragging');
+        ghost = makeDragGhost(cell, startX, startY);
+      }
+
+      e.preventDefault();
+      moveGhost(ghost, e.clientX, e.clientY);
+      const target = dropTargetAt(e.clientX, e.clientY, cell);
+      if (target !== hovered) {
+        clearHover();
+        if (target) target.classList.add('drop-target');
+        hovered = target;
+      }
+    });
+
+    const finish = (e, cancelled) => {
+      if (pointerId == null || (e.pointerId != null && e.pointerId !== pointerId)) return;
+      const wasDragging = dragging;
+      const target = hovered;
+
+      try {
+        if (cell.hasPointerCapture(pointerId)) cell.releasePointerCapture(pointerId);
+      } catch {}
+      pointerId = null;
+      dragging = false;
+      cell.classList.remove('dragging');
+      if (ghost) { ghost.remove(); ghost = null; }
+      clearHover();
+
+      if (!wasDragging) return;
+
+      // Swallow the click this drag would otherwise synthesize.
+      const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+      document.addEventListener('click', swallow, true);
+      setTimeout(() => document.removeEventListener('click', swallow, true), 60);
+
+      if (cancelled || !target) return;
+      rehomeCard(note.id, currentId, Number(target.dataset.noteId));
+    };
+
+    cell.addEventListener('pointerup', (e) => finish(e, false));
+    cell.addEventListener('pointercancel', (e) => finish(e, true));
   }
 
   // subNeighbors, when given, renders this cell as its own nested 3x3
@@ -591,9 +957,11 @@
       'cell neighbor' +
       (subNeighbors ? ' nested' : '') +
       (isBack ? ' back' : '') +
-      (neighbor.status === 'done' ? ' dimmed' : '');
+      (neighbor.status === 'done' ? ' dimmed' : '') +
+      (triggeredAlarmIds.has(neighbor.id) ? ' alarm-triggered' : '');
 
     applyCellColor(cell, neighbor);
+    attachCardDrag(cell, neighbor);
 
     const unlinkBtn = document.createElement('button');
     unlinkBtn.className = 'unlink-btn';
@@ -616,6 +984,7 @@
       miniCenter.className = 'mini-cell mini-center' + (neighbor.status === 'done' ? ' dimmed' : '');
       miniCenter.textContent = (isBack ? '↩ ' : '') + neighbor.title;
       miniCenter.title = neighbor.title;
+      applyCellColor(miniCenter, neighbor);
       miniCenter.addEventListener('click', (e) => {
         e.stopPropagation();
         goTo(neighbor.id, navVia);
@@ -631,6 +1000,7 @@
           const icon = TYPE_ICON[sub.type];
           miniCell.textContent = icon ? `${icon} ${sub.title}` : sub.title;
           miniCell.title = sub.title;
+          applyCellColor(miniCell, sub);
           miniCell.addEventListener('click', (e) => {
             e.stopPropagation();
             goTo(sub.id, 'neighbor');
@@ -656,9 +1026,9 @@
     return cell;
   }
 
-  // Fullscreen view of the current center note — the same editor as the grid
-  // center cell (title/content, meta, pin/delete/done), just larger.
-  function renderNoteFullscreen() {
+  // Fullscreen editor for the current center note (title/content, meta,
+  // pin/delete/done). `focus` optionally puts the caret in 'title' or 'content'.
+  function renderNoteFullscreen(focus) {
     noteOverlayBody.innerHTML = '';
     const inner = document.createElement('div');
     inner.className = 'cell center' + (currentNote.status === 'done' ? ' dimmed' : '');
@@ -676,13 +1046,22 @@
       })
     );
     noteOverlayBody.appendChild(inner);
+
+    if (focus === 'title' || focus === 'content') {
+      const el = inner.querySelector(focus === 'title' ? '.center-title' : '.center-content');
+      if (el) {
+        el.focus();
+        const end = el.value.length;
+        try { el.setSelectionRange(end, end); } catch {}
+      }
+    }
   }
 
-  async function openNoteFullscreen() {
+  async function openNoteFullscreen(focus) {
     if (!currentId) return;
     currentNote = await api.getNote(currentId);
     if (!currentNote) return;
-    renderNoteFullscreen();
+    renderNoteFullscreen(focus);
     noteOverlay.classList.remove('hidden');
   }
 
@@ -714,6 +1093,7 @@
   }
 
   async function render() {
+    renderAlarmbar();
     const outerSlots = [0, 1, 2, 3, 5, 6, 7, 8];
     const BACK_SLOT = 1; // top-center: the probable-parent "back" cell
 
@@ -762,7 +1142,10 @@
 
     tabs.forEach((tab) => {
       const chip = document.createElement('div');
-      chip.className = 'tab' + (tab.id === activeTabId ? ' active' : '');
+      chip.className =
+        'tab' +
+        (tab.id === activeTabId ? ' active' : '') +
+        (triggeredAlarmIds.has(tab.note_id) ? ' alarm-triggered' : '');
 
       const title = document.createElement('span');
       title.className = 'tab-title';
@@ -811,7 +1194,10 @@
 
     pinned.forEach((note) => {
       const chip = document.createElement('div');
-      chip.className = 'tab' + (note.id === currentId ? ' active' : '');
+      chip.className =
+        'tab' +
+        (note.id === currentId ? ' active' : '') +
+        (triggeredAlarmIds.has(note.id) ? ' alarm-triggered' : '');
 
       const title = document.createElement('span');
       title.className = 'tab-title';
@@ -822,6 +1208,278 @@
       pinbar.appendChild(chip);
     });
   }
+
+  // --- Alarm bar: a row (like the pin bar) of every note that has an alarm ---
+  function renderAlarmbar() {
+    alarmbar.innerHTML = '';
+    alarmbar.classList.toggle('hidden', alarms.length === 0);
+
+    alarms.forEach((a) => {
+      const chip = document.createElement('div');
+      chip.className =
+        'tab' +
+        (a.id === currentId ? ' active' : '') +
+        (a.triggered ? ' alarm-triggered' : '');
+
+      const title = document.createElement('span');
+      title.className = 'tab-title';
+      title.textContent = `⏰ ${a.time} ${a.title}`;
+
+      chip.appendChild(title);
+      chip.addEventListener('click', () => jumpTo(a.id, 'alarm'));
+      alarmbar.appendChild(chip);
+    });
+  }
+
+  // Fetch alarms, decide (in the viewer's timezone) which are ringing, repaint
+  // the triggered tint, roll each alarm's next-ring instant forward on the
+  // server so the push scheduler stays armed, and surface the popup /
+  // notification for anything newly due.
+  async function checkAlarms({ popup = true } = {}) {
+    const ref = new Date();
+    alarms = (await api.listAlarms()).map((a) => ({ ...a, triggered: alarmTriggered(a, ref) }));
+    const next = new Set(alarms.filter((a) => a.triggered).map((a) => a.id));
+    const changed =
+      next.size !== triggeredAlarmIds.size || [...next].some((id) => !triggeredAlarmIds.has(id));
+
+    triggeredAlarmIds = next;
+    for (const id of [...alarmDismissed]) if (!next.has(id)) alarmDismissed.delete(id);
+    for (const id of [...alarmNotified]) if (!next.has(id)) alarmNotified.delete(id);
+
+    // Keep the server's alarm_next_at pointing at the upcoming occurrence.
+    for (const a of alarms) {
+      const want = isoOrNull(nextAlarmOccurrence(a, ref));
+      if (want !== (a.nextAt || null)) api.scheduleAlarm(a.id, want);
+    }
+
+    renderAlarmbar();
+    if (changed) {
+      renderTabbar();
+      renderPinbar();
+      if (currentId) await render();
+    }
+
+    const ringing = alarms.filter((a) => a.triggered && !alarmDismissed.has(a.id));
+    // Auto-open only at startup or when something newly fired — not on every
+    // poll while an alarm sits unacknowledged (the bar/grid tint show that).
+    if (popup && changed && ringing.length) showAlarmPopup(ringing);
+    notifyAlarms(ringing);
+  }
+
+  // Foreground fallback notification (the server push covers the background
+  // case). Android/installed PWAs reject `new Notification()`, so go through
+  // the service worker registration.
+  function notifyAlarms(ringing) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (!('serviceWorker' in navigator)) return;
+    const fresh = ringing.filter((a) => !alarmNotified.has(a.id));
+    if (!fresh.length) return;
+    navigator.serviceWorker.ready
+      .then((reg) => {
+        fresh.forEach((a) => {
+          alarmNotified.add(a.id);
+          reg.showNotification(`⏰ ${a.title}`, {
+            body: alarmWhenText(a),
+            tag: `alarm-${a.id}`,
+            renotify: true,
+            data: { url: `/#${a.id}` },
+          });
+        });
+      })
+      .catch(() => {});
+  }
+
+  function hideAlarmPopupRow(row) {
+    row.remove();
+    if (!alarmPopupList.childElementCount) alarmPopupOverlay.classList.add('hidden');
+  }
+
+  function showAlarmPopup(ringing) {
+    alarmPopupList.innerHTML = '';
+    ringing.forEach((a) => {
+      const row = document.createElement('div');
+      row.className = 'alarm-popup-item';
+
+      const info = document.createElement('div');
+      info.className = 'apo-info';
+      const t = document.createElement('div');
+      t.className = 'apo-title';
+      t.textContent = a.title;
+      const w = document.createElement('div');
+      w.className = 'apo-when';
+      w.textContent = alarmWhenText(a);
+      info.appendChild(t);
+      info.appendChild(w);
+
+      const ok = document.createElement('button');
+      ok.className = 'apo-ok';
+      ok.textContent = 'OK';
+      ok.title = "Don't show again until it next goes off";
+      ok.addEventListener('click', async () => {
+        await api.ackAlarm(a.id, isoOrNull(nextAlarmOccurrence(a, new Date())));
+        alarmDismissed.delete(a.id);
+        hideAlarmPopupRow(row);
+        await checkAlarms({ popup: false });
+      });
+
+      const x = document.createElement('button');
+      x.className = 'apo-x';
+      x.textContent = '✕';
+      x.title = 'Dismiss — show again on next start';
+      x.addEventListener('click', () => {
+        alarmDismissed.add(a.id);
+        hideAlarmPopupRow(row);
+      });
+
+      row.appendChild(info);
+      row.appendChild(ok);
+      row.appendChild(x);
+      alarmPopupList.appendChild(row);
+    });
+    alarmPopupOverlay.classList.remove('hidden');
+  }
+
+  // --- Alarm editor (Android-style: time wheel + weekday circles + one-time date) ---
+  function selectedAlarmDays() {
+    return [...alarmDaysRow.querySelectorAll('.alarm-day-btn.active')].map((b) => Number(b.dataset.day));
+  }
+
+  function syncAlarmDateVisibility() {
+    alarmDateWrap.classList.toggle('hidden', selectedAlarmDays().length > 0);
+  }
+
+  function defaultAlarmDate(hhmm) {
+    const [h, m] = (hhmm || '00:00').split(':').map(Number);
+    const d = new Date();
+    const at = new Date();
+    at.setHours(h, m, 0, 0);
+    if (at <= d) d.setDate(d.getDate() + 1);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+      d.getDate()
+    ).padStart(2, '0')}`;
+  }
+
+  function openAlarmEditor(note) {
+    alarmEditNote = note;
+    const existing = alarms.find((a) => a.id === note.id);
+
+    const d = new Date();
+    alarmTimeInput.value = existing
+      ? existing.time
+      : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+
+    const activeDays = new Set(existing ? existing.days : []);
+    alarmDaysRow.innerHTML = '';
+    ALARM_DAYS.forEach((label, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'alarm-day-btn' + (activeDays.has(ALARM_DAY_NUM[i]) ? ' active' : '');
+      b.textContent = label[0];
+      b.title = label;
+      b.dataset.day = String(ALARM_DAY_NUM[i]);
+      b.addEventListener('click', () => {
+        b.classList.toggle('active');
+        syncAlarmDateVisibility();
+      });
+      alarmDaysRow.appendChild(b);
+    });
+
+    alarmDateInput.value =
+      existing && existing.date ? existing.date : defaultAlarmDate(alarmTimeInput.value);
+    syncAlarmDateVisibility();
+    alarmRemoveBtn.classList.toggle('hidden', !existing);
+    alarmOverlay.classList.remove('hidden');
+  }
+
+  function closeAlarmEditor() {
+    alarmOverlay.classList.add('hidden');
+    alarmEditNote = null;
+  }
+
+  async function afterAlarmChange() {
+    await checkAlarms({ popup: false });
+    if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
+  }
+
+  // --- Web Push registration (so alarms ring when the app is closed) ---
+  function urlBase64ToUint8Array(base64) {
+    const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+    const b64 = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(b64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  let pushSyncing = false;
+  async function ensurePushSubscription() {
+    if (pushSyncing) return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    pushSyncing = true;
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        const keyData = await api.getPushKey();
+        if (!keyData || !keyData.key) return;
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(keyData.key),
+        });
+      }
+      await api.subscribePush(sub.toJSON());
+    } catch (err) {
+      // permission revoked, key rotated, or the browser refused — ignore
+    } finally {
+      pushSyncing = false;
+    }
+  }
+
+  // Ask for notification permission (once) then register for push.
+  async function enableAlarmDelivery() {
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch {}
+    }
+    await ensurePushSubscription();
+  }
+
+  alarmSaveBtn.addEventListener('click', async () => {
+    if (!alarmEditNote) return;
+    const time = alarmTimeInput.value;
+    if (!/^\d{2}:\d{2}$/.test(time)) return alert('Pick a time.');
+    const days = selectedAlarmDays();
+    const body = { time, days };
+    if (days.length === 0) {
+      if (!alarmDateInput.value) return alert('Pick a date, or choose repeat days.');
+      body.date = alarmDateInput.value;
+    }
+    // Seed the ack to this cycle's trigger so it doesn't ring the instant it's
+    // set; nextAt arms the server-side push scheduler.
+    const nowRef = new Date();
+    const scheduleShape = { time, days, date: body.date || null };
+    const seed = mostRecentAlarmTrigger(scheduleShape, nowRef);
+    body.ackAt = (seed || nowRef).toISOString();
+    body.nextAt = isoOrNull(nextAlarmOccurrence(scheduleShape, nowRef));
+    await api.setAlarm(alarmEditNote.id, body);
+    await enableAlarmDelivery();
+    closeAlarmEditor();
+    await afterAlarmChange();
+  });
+
+  alarmRemoveBtn.addEventListener('click', async () => {
+    if (!alarmEditNote) return;
+    await api.removeAlarm(alarmEditNote.id);
+    closeAlarmEditor();
+    await afterAlarmChange();
+  });
+
+  alarmCancelBtn.addEventListener('click', closeAlarmEditor);
+  alarmOverlay.addEventListener('click', (e) => {
+    if (e.target === alarmOverlay) closeAlarmEditor();
+  });
 
   // --- Topbar search (jump to note) ---
   searchInput.addEventListener('input', () => {
@@ -1007,24 +1665,21 @@
         await refreshColorData();
         closePicker();
         await render();
+        if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
       });
       pickerResults.appendChild(div);
     });
   });
 
+  let pickerCreating = false;
   pickerCreateBtn.addEventListener('click', async () => {
+    if (pickerCreating) return;
     const title = pickerNewTitle.value.trim();
 
+    const formData = new FormData();
     if (pickerStyle === 'text') {
       if (!title) return;
-      await api.createNote({ title, linkTo: pendingLinkTarget });
-      closePicker();
-      await afterAttach();
-      return;
-    }
-
-    const formData = new FormData();
-    if (pickerStyle === 'image') {
+    } else if (pickerStyle === 'image') {
       const file = pickerPhotoInput.files[0];
       if (!file) return alert('Choose a photo first.');
       formData.set('type', 'image');
@@ -1047,11 +1702,22 @@
       formData.set('appUri', uri);
       formData.set('appLabel', title);
     }
-    if (title) formData.set('title', title);
 
-    await api.createAttachment(pendingLinkTarget, formData);
-    closePicker();
-    await afterAttach();
+    pickerCreating = true;
+    pickerCreateBtn.disabled = true;
+    try {
+      if (pickerStyle === 'text') {
+        await api.createNote({ title, linkTo: pendingLinkTarget });
+      } else {
+        if (title) formData.set('title', title);
+        await api.createAttachment(pendingLinkTarget, formData);
+      }
+      closePicker();
+      await afterAttach();
+    } finally {
+      pickerCreating = false;
+      pickerCreateBtn.disabled = false;
+    }
   });
 
   window.addEventListener('hashchange', () => {
@@ -1088,28 +1754,22 @@
 
   applyZoom();
 
-  // --- Grid depth controls (expands each neighbor cell into its own 3x3) ---
-  depthResetBtn.textContent = String(gridDepth);
+  // --- Grid depth cycle button (expands each neighbor cell into its own 3x3) ---
+  // Same icon always; lights up like the palette toggle when depth is raised.
+  function paintDepthBtn() {
+    depthCycleBtn.classList.toggle('active', gridDepth > GRID_DEPTH_MIN);
+    depthCycleBtn.title = `Nested grid depth: ${gridDepth}`;
+  }
+  paintDepthBtn();
 
   async function applyGridDepth() {
-    depthResetBtn.textContent = String(gridDepth);
+    paintDepthBtn();
     localStorage.setItem('nico-notes-grid-depth', String(gridDepth));
     await render();
   }
 
-  depthInBtn.addEventListener('click', async () => {
-    if (gridDepth >= GRID_DEPTH_MAX) return;
-    gridDepth += 1;
-    await applyGridDepth();
-  });
-  depthOutBtn.addEventListener('click', async () => {
-    if (gridDepth <= GRID_DEPTH_MIN) return;
-    gridDepth -= 1;
-    await applyGridDepth();
-  });
-  depthResetBtn.addEventListener('click', async () => {
-    if (gridDepth === GRID_DEPTH_MIN) return;
-    gridDepth = GRID_DEPTH_MIN;
+  depthCycleBtn.addEventListener('click', async () => {
+    gridDepth = gridDepth >= GRID_DEPTH_MAX ? GRID_DEPTH_MIN : gridDepth + 1;
     await applyGridDepth();
   });
 
@@ -1254,10 +1914,250 @@
     );
   }
 
+  // --- Map overlay: every located note as a pin on OpenStreetMap ---
+  const mapOverlay = document.getElementById('map-overlay');
+  const mapOverlayClose = document.getElementById('map-overlay-close');
+  const mapStatusEl = document.getElementById('map-status');
+  const mapModesEl = document.getElementById('map-modes');
+  const mapEl = document.getElementById('map');
+
+  let leafletMap = null;
+  let mapMarkers = null;
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
+  // Leaflet writes fillColor as an SVG fill attribute, so resolve to a concrete
+  // rgb()/hsl() string here rather than a CSS var or color-mix().
+  function lerpHex(a, b, t) {
+    const pa = a.match(/\w\w/g).map((h) => parseInt(h, 16));
+    const pb = b.match(/\w\w/g).map((h) => parseInt(h, 16));
+    const m = pa.map((v, i) => Math.round(v + (pb[i] - v) * t));
+    return `rgb(${m[0]}, ${m[1]}, ${m[2]})`;
+  }
+
+  // Solid pin colour for the active colour mode (map has no "path" mode).
+  function mapColorFor(note) {
+    if (colorMode === 'note') {
+      return lerpHex('4f6df5', 'c9821a', noteHeat[note.id] || 0);
+    }
+    if (colorMode === 'cluster') {
+      const cid = clusters[note.id];
+      if (cid != null && clusterHues[cid] != null) return `hsl(${clusterHues[cid]} 65% 52%)`;
+      return '#9aa0a8';
+    }
+    return '#4f6df5';
+  }
+
+  async function drawMapMarkers() {
+    const geo = allNotesCache.filter(
+      (n) => Number.isFinite(n.lat) && Number.isFinite(n.lon)
+    );
+    mapStatusEl.textContent =
+      `${geo.length} mapped · ${allNotesCache.length - geo.length} without location`;
+
+    mapMarkers.clearLayers();
+    geo.forEach((note) => {
+      const icon = TYPE_ICON[note.type] ? `${TYPE_ICON[note.type]} ` : '';
+      L.circleMarker([note.lat, note.lon], {
+        radius: 8,
+        color: '#fff',
+        weight: 2,
+        fillColor: mapColorFor(note),
+        fillOpacity: 0.95,
+      })
+        .bindPopup(
+          `<b>${icon}${escapeHtml(note.title || 'Untitled')}</b><br />` +
+            `<a href="#${note.id}" data-note-id="${note.id}">Open note</a>`
+        )
+        .addTo(mapMarkers);
+    });
+
+    if (geo.length > 0) {
+      leafletMap.fitBounds(geo.map((n) => [n.lat, n.lon]), { padding: [40, 40], maxZoom: 16 });
+    } else {
+      const here = await getLocation();
+      if (here) {
+        leafletMap.setView([here.lat, here.lon], 13);
+        mapStatusEl.textContent = 'No located notes yet — showing your location';
+      } else {
+        leafletMap.setView([20, 0], 2);
+        mapStatusEl.textContent = 'No located notes yet';
+      }
+    }
+  }
+
+  function syncMapModes() {
+    mapModesEl.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.mode === colorMode);
+    });
+  }
+
+  async function openMap() {
+    mapOverlay.classList.remove('hidden');
+
+    if (!leafletMap) {
+      leafletMap = L.map('map');
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap contributors',
+      }).addTo(leafletMap);
+      leafletMap.setView([20, 0], 2);
+      mapMarkers = L.layerGroup().addTo(leafletMap);
+
+      mapEl.addEventListener('click', (e) => {
+        const a = e.target.closest('a[data-note-id]');
+        if (!a) return;
+        e.preventDefault();
+        closeMap();
+        goTo(Number(a.dataset.noteId), 'map');
+      });
+    }
+
+    // The container had zero size while hidden; Leaflet must re-measure it.
+    requestAnimationFrame(() => leafletMap.invalidateSize());
+
+    syncMapModes();
+    await refreshColorData();
+    await drawMapMarkers();
+  }
+
+  function closeMap() {
+    mapOverlay.classList.add('hidden');
+  }
+
+  mapBtn.addEventListener('click', openMap);
+  mapOverlayClose.addEventListener('click', closeMap);
+  mapOverlay.addEventListener('click', (e) => {
+    if (e.target === mapOverlay) closeMap();
+  });
+  mapModesEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    colorMode = btn.dataset.mode;
+    applyColorModeButton();
+    syncMapModes();
+    await refreshColorData();
+    await drawMapMarkers();
+    if (currentId) await render();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !mapOverlay.classList.contains('hidden')) closeMap();
+  });
+
   insightsBtn.addEventListener('click', openInsights);
   insightsClose.addEventListener('click', () => insightsOverlay.classList.add('hidden'));
   insightsOverlay.addEventListener('click', (e) => {
     if (e.target === insightsOverlay) insightsOverlay.classList.add('hidden');
+  });
+
+  // --- History / undo ---------------------------------------------------------
+  const HISTORY_ICON = {
+    link: '🔗',
+    unlink: '✂️',
+    rehome: '↔️',
+    create: '✨',
+    update: '✏️',
+    status: '✅',
+    pin: '📌',
+    unpin: '📌',
+  };
+
+  function closeHistory() {
+    historyOverlay.classList.add('hidden');
+  }
+
+  // Full app-state resync after an undo — the reversed op may have added/removed
+  // a link, flipped a status, or soft-deleted the centered note, so rebuild from
+  // the tab list (which drops tabs whose note is now deleted) and, if the
+  // fullscreen editor is open, refresh or dismiss it.
+  async function refreshAfterUndo() {
+    const editingId = noteOverlay.classList.contains('hidden') ? null : currentId;
+    allNotesCache = await api.listNotes();
+    const tabsList = await api.listTabs();
+    await refreshFromTabs(tabsList);
+    if (editingId != null) {
+      const n = currentId === editingId ? await api.getNote(currentId) : null;
+      if (n && n.status !== 'deleted') {
+        currentNote = n;
+        renderNoteFullscreen();
+      } else {
+        closeNoteFullscreen();
+      }
+    }
+  }
+
+  async function openHistory() {
+    historyBody.innerHTML = 'Loading…';
+    historyOverlay.classList.remove('hidden');
+    const rows = await api.getHistory();
+    historyBody.innerHTML = '';
+
+    if (!rows.length) {
+      const p = document.createElement('p');
+      p.className = 'muted';
+      p.textContent = 'Nothing to undo yet.';
+      historyBody.appendChild(p);
+      return;
+    }
+
+    rows.forEach((row) => {
+      const item = document.createElement('div');
+      item.className =
+        'history-item' + (row.undone_at ? ' undone' : '') + (row.stale ? ' stale' : '');
+
+      const icon = document.createElement('div');
+      icon.className = 'history-icon';
+      icon.textContent = HISTORY_ICON[row.action] || '•';
+
+      const info = document.createElement('div');
+      info.className = 'history-info';
+      const summary = document.createElement('div');
+      summary.className = 'history-summary';
+      summary.textContent = row.summary;
+      const undone = Boolean(row.undone_at);
+
+      const when = document.createElement('div');
+      when.className = 'history-when';
+      when.textContent = new Date(row.created_at).toLocaleString();
+      if (undone) when.textContent += row.stale ? ' · undone · can’t redo' : ' · undone';
+      else if (row.stale) when.textContent += ' · already reverted elsewhere';
+      info.appendChild(summary);
+      info.appendChild(when);
+
+      const btn = document.createElement('button');
+      btn.className = 'history-undo';
+      btn.textContent = undone ? '↻' : '↩';
+      btn.title = undone ? 'Redo this' : 'Undo this';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const res = undone ? await api.redoHistory(row.id) : await api.undoHistory(row.id);
+        if (!res.ok) {
+          when.textContent = res.error || (undone ? 'Could not redo' : 'Could not undo');
+          when.classList.add('history-error');
+          return;
+        }
+        await refreshAfterUndo();
+        await openHistory();
+      });
+
+      item.appendChild(icon);
+      item.appendChild(info);
+      item.appendChild(btn);
+      historyBody.appendChild(item);
+    });
+  }
+
+  historyBtn.addEventListener('click', openHistory);
+  historyClose.addEventListener('click', closeHistory);
+  historyOverlay.addEventListener('click', (e) => {
+    if (e.target === historyOverlay) closeHistory();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !historyOverlay.classList.contains('hidden')) closeHistory();
   });
 
   // --- Login / account (email identity only) ---
@@ -1287,9 +2187,24 @@
       showLogin();
       return;
     }
-    if (confirm(`Signed in as ${currentUser.email}.\nSwitch to a different user?`)) {
+    const widgetUrl = widgetToken
+      ? `${location.origin}/api/widget?token=${widgetToken}`
+      : '(unavailable — reload the page)';
+    const answer = prompt(
+      `Signed in as ${currentUser.email}.\n\n` +
+        `Home-screen widget feed URL (copy into your widget app):\n` +
+        `Type "switch" to sign in as someone else, or "reset widget" to\n` +
+        `invalidate this URL and get a new one.`,
+      widgetUrl
+    );
+    const cmd = answer && answer.trim().toLowerCase();
+    if (cmd === 'switch') {
       await api.logout();
       location.reload();
+    } else if (cmd === 'reset widget') {
+      const res = await api.rotateWidgetToken();
+      widgetToken = res.widgetToken || widgetToken;
+      alert(`New widget feed URL:\n${location.origin}/api/widget?token=${widgetToken}`);
     }
   });
 

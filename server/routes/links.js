@@ -1,10 +1,16 @@
 const express = require('express');
 const db = require('../db');
+const history = require('../history');
 
 const router = express.Router();
 
+const nowIso = () => new Date().toISOString();
+
+// Create a link. When `rehomeFrom` is given, this is a card being dragged from
+// one anchor to another: link (a ↔ b), drop (rehomeFrom ↔ b), and log the pair
+// as a single reversible "moved" entry. `b` is the card; `a` the new anchor.
 router.post('/', (req, res) => {
-  const { a, b } = req.body;
+  const { a, b, rehomeFrom } = req.body;
   if (!a || !b || a === b) {
     return res.status(400).json({ error: 'a and b (distinct note ids) are required' });
   }
@@ -18,9 +24,44 @@ router.post('/', (req, res) => {
     return res.status(404).json({ error: 'one or both notes not found' });
   }
 
-  db.prepare(
-    'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
-  ).run(noteA, noteB, new Date().toISOString(), req.userId);
+  const isRehome =
+    rehomeFrom &&
+    Number(rehomeFrom) !== Number(b) &&
+    db.prepare('SELECT 1 FROM notes WHERE id = ? AND user_id = ?').get(rehomeFrom, req.userId);
+
+  db.transaction(() => {
+    db.prepare(
+      'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
+    ).run(noteA, noteB, nowIso(), req.userId);
+
+    if (isRehome) {
+      const [fa, fb] = [Math.min(rehomeFrom, b), Math.max(rehomeFrom, b)];
+      db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ? AND user_id = ?').run(
+        fa,
+        fb,
+        req.userId
+      );
+    }
+  })();
+
+  if (isRehome) {
+    history.record(
+      req.userId,
+      'rehome',
+      { card: Number(b), from: Number(rehomeFrom), to: Number(a) },
+      `Moved "${history.noteTitle(req.userId, b)}" from "${history.noteTitle(
+        req.userId,
+        rehomeFrom
+      )}" into "${history.noteTitle(req.userId, a)}"`
+    );
+  } else {
+    history.record(
+      req.userId,
+      'link',
+      { a: noteA, b: noteB },
+      `Linked "${history.noteTitle(req.userId, noteA)}" ↔ "${history.noteTitle(req.userId, noteB)}"`
+    );
+  }
 
   res.status(201).json({ a: noteA, b: noteB });
 });
@@ -40,6 +81,14 @@ router.delete('/', (req, res) => {
     .prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?')
     .run(noteA, noteB);
   if (info.changes === 0) return res.status(404).json({ error: 'link not found' });
+
+  history.record(
+    req.userId,
+    'unlink',
+    { a: noteA, b: noteB },
+    `Unlinked "${history.noteTitle(req.userId, noteA)}" ✕ "${history.noteTitle(req.userId, noteB)}"`
+  );
+
   res.status(204).end();
 });
 

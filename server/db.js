@@ -62,6 +62,28 @@ if (!noteColumns.some((c) => c.name === 'status')) {
   db.exec("ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
 }
 
+// --- Alarms: a note can carry a wake-up. alarm_time is HH:MM in the viewer's
+// timezone. Recurring when alarm_days is a CSV of JS getDay() numbers (0=Sun);
+// one-shot when alarm_days is '' and alarm_date is YYYY-MM-DD. Fire times are
+// computed client-side (the server may run in another TZ); alarm_ack_at holds
+// the last "OK" and the alarm is "triggered" while it predates the current
+// occurrence. alarm_last_fired is retained unused (was a server-side memo).
+// alarm_next_at: absolute UTC instant of the next ring, computed by the client
+// in the viewer's timezone and rolled forward whenever the app is open.
+// alarm_pushed_at: set by the server scheduler once it has pushed for the
+// current alarm_next_at, so a ring is pushed at most once.
+for (const [col, ddl] of [
+  ['alarm_time', 'ALTER TABLE notes ADD COLUMN alarm_time TEXT'],
+  ['alarm_days', "ALTER TABLE notes ADD COLUMN alarm_days TEXT NOT NULL DEFAULT ''"],
+  ['alarm_date', 'ALTER TABLE notes ADD COLUMN alarm_date TEXT'],
+  ['alarm_last_fired', 'ALTER TABLE notes ADD COLUMN alarm_last_fired TEXT'],
+  ['alarm_ack_at', 'ALTER TABLE notes ADD COLUMN alarm_ack_at TEXT'],
+  ['alarm_next_at', 'ALTER TABLE notes ADD COLUMN alarm_next_at TEXT'],
+  ['alarm_pushed_at', 'ALTER TABLE notes ADD COLUMN alarm_pushed_at TEXT'],
+]) {
+  if (!noteColumns.some((c) => c.name === col)) db.exec(ddl);
+}
+
 // --- Multi-user (email identity only; no password/auth yet) ---
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -84,6 +106,44 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_nav_fwd ON nav_events (user_id, from_note_id, to_note_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_nav_back ON nav_events (user_id, to_note_id, from_note_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_nav_to ON nav_events (user_id, to_note_id, created_at);
+`);
+
+// Opaque per-user secret for the read-only home-screen widget feed
+// (GET /api/widget?token=…). Provisioned lazily by GET /api/session.
+const userCols = db.prepare('PRAGMA table_info(users)').all();
+if (!userCols.some((c) => c.name === 'widget_token')) {
+  db.exec('ALTER TABLE users ADD COLUMN widget_token TEXT');
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_widget_token ON users(widget_token)');
+
+// Web Push subscriptions — how the alarm scheduler reaches a user when their
+// PWA is backgrounded/closed. One row per browser push endpoint.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL UNIQUE,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+`);
+
+// Undo log: one row per reversible operation (link/unlink/rehome/create/update/
+// status/pin). payload is JSON carrying whatever the undo needs (note ids, the
+// pre-change title/content, the previous status…). undone_at is stamped once the
+// entry has been reversed, after which its button is spent.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    undone_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_history_user ON history (user_id, id DESC);
 `);
 
 // notes/links/tabs predate multi-user — add the owner column idempotently.
@@ -117,6 +177,11 @@ if (seededUsers.length === 1) {
 // Retention: navigation history is behavioural data — keep 90 days.
 db.prepare(
   "DELETE FROM nav_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')"
+).run();
+
+// Retention: the undo log is only useful for recent moves — keep 30 days.
+db.prepare(
+  "DELETE FROM history WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
 ).run();
 
 module.exports = db;

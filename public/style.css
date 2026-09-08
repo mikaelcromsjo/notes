@@ -19,10 +19,22 @@ html, body {
   margin: 0;
   height: 100vh;
   height: 100dvh;
+  /* Never let a stray wide element push the page past the viewport — Android
+     Chrome reacts to horizontal overflow by zooming the WHOLE page out (making
+     everything look half-size in a normal tab but fine in fullscreen, which
+     clips overflow instead). */
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  /* stop iOS Safari inflating text when the phone turns to landscape */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
+
+img, video, canvas, svg { max-width: 100%; }
 
 body {
   display: flex;
@@ -144,9 +156,12 @@ button:hover { filter: brightness(1.05); }
 
 .header-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 0.6rem;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .zoom-controls {
@@ -162,9 +177,11 @@ button:hover { filter: brightness(1.05); }
   background: transparent;
   border: 1px solid transparent;
   color: var(--text);
-  padding: 0.4rem 0.6rem;
+  padding: 0.35rem 0.5rem;
   border-radius: 6px;
   line-height: 1;
+  /* One size in every mode — fullscreen must not resize the toolbar icons. */
+  font-size: 1.1rem;
 }
 
 .zoom-controls .icon-btn {
@@ -280,6 +297,142 @@ button:hover { filter: brightness(1.05); }
   color: var(--pin-contrast);
 }
 
+/* --- Alarms --- */
+:root {
+  --alarm: #d9863d;
+  --alarm-contrast: #ffffff;
+}
+
+.alarmbar {
+  background: color-mix(in srgb, var(--alarm) 8%, var(--surface));
+}
+
+.alarmbar .tab {
+  border-color: color-mix(in srgb, var(--alarm) 40%, var(--border));
+  color: var(--alarm);
+  cursor: pointer;
+}
+
+.alarmbar .tab:hover {
+  border-color: var(--alarm);
+  color: var(--alarm);
+}
+
+.alarmbar .tab.active {
+  background: var(--alarm);
+  border-color: var(--alarm);
+  color: var(--alarm-contrast);
+}
+
+/* Triggered (ringing, unacknowledged) — stands out in every row it appears in. */
+.tab.alarm-triggered {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, var(--surface));
+  animation: alarm-pulse 1.4s ease-in-out infinite;
+}
+
+.tab.alarm-triggered.active {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.cell.alarm-triggered {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 55%, transparent);
+  animation: alarm-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes alarm-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.72; }
+}
+
+.cell.center .alarm-btn {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  padding: 0.4rem 0.55rem;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.cell.center .alarm-btn:hover {
+  border-color: var(--alarm);
+  color: var(--alarm);
+}
+
+.cell.center .alarm-btn.active {
+  background: var(--alarm);
+  border-color: var(--alarm);
+  color: var(--alarm-contrast);
+}
+
+.alarm-editor .alarm-time-input {
+  width: 100%;
+  font-size: 2rem;
+  text-align: center;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  margin-bottom: 0.75rem;
+}
+
+.alarm-repeat-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin-bottom: 0.4rem;
+}
+
+.alarm-days-row {
+  display: flex;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+}
+
+.alarm-day-btn {
+  flex: 1 1 0;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.alarm-day-btn.active {
+  background: var(--alarm);
+  border-color: var(--alarm);
+  color: var(--alarm-contrast);
+}
+
+.alarm-popup-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.alarm-popup-item:first-child { border-top: none; }
+
+.alarm-popup-item .apo-info { flex: 1; min-width: 0; }
+.alarm-popup-item .apo-title { font-weight: 600; overflow-wrap: anywhere; }
+.alarm-popup-item .apo-when { font-size: 0.78rem; color: var(--muted); }
+.alarm-popup-item button { padding: 0.3rem 0.55rem; }
+.alarm-popup-item .apo-ok { background: var(--accent); border-color: var(--accent); }
+.alarm-popup-item .apo-x {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+
 .grid {
   flex: 1 1 auto;
   min-height: 0;
@@ -326,10 +479,30 @@ button:hover { filter: brightness(1.05); }
   cursor: pointer;
   position: relative;
   justify-content: center;
+  /* let a press-drag on the card start a reorganise gesture instead of
+     scrolling — required for drag-and-drop to work on Android */
+  touch-action: none;
 }
 
 .cell.neighbor:hover {
   border-color: var(--accent);
+}
+
+.cell.neighbor.dragging {
+  opacity: 0.4;
+}
+
+.cell.neighbor.drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* position/size/z-index are set inline in app.js (they must outrank the
+   .cell.neighbor rules); this is just the lifted-card look. */
+.cell.drag-ghost {
+  opacity: 0.9;
+  box-shadow: 0 10px 28px rgba(20, 20, 30, 0.28);
+  transform: rotate(1.5deg);
 }
 
 .cell.neighbor .neighbor-title {
@@ -405,8 +578,96 @@ button:hover { filter: brightness(1.05); }
 .cell.center {
   grid-column: 2;
   grid-row: 2;
+  position: relative;
   border: 2px solid var(--accent);
 }
+
+/* Grid center cell: a "+N" pill when the note has more links than the grid can
+   show — a hint to open the note for the full, editable list. */
+.cell.center .center-link-badge {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  padding: 0.1rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.4;
+  pointer-events: none;
+}
+
+/* Fullscreen note: scrollable list of every link, capped at a third of the
+   view so title + body stay usable. */
+.cell.center .center-links {
+  flex: 0 0 33%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-top: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.cell.center .center-links-heading {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.cell.center .center-links-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cell.center .center-links-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.cell.center .center-links-name {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell.center .center-links-name:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cell.center .center-links-x {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 0.2rem 0.45rem;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.cell.center .center-links-x:hover { color: var(--danger); }
+
+.cell.center .center-links-row.dimmed { opacity: 0.45; }
 
 .cell.center .center-title {
   width: 100%;
@@ -434,6 +695,29 @@ button:hover { filter: brightness(1.05); }
 }
 
 .cell.center .center-content:focus { outline: none; }
+
+/* Read-only preview variants used by the grid center cell (the fullscreen
+   view keeps the real <input>/<textarea>). */
+.cell.center .center-title.readonly,
+.cell.center .center-content.readonly {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.cell.center .center-title.readonly {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell.center .center-content.readonly {
+  white-space: pre-wrap;
+  overflow: hidden;
+}
+
+.cell.center .center-content.readonly.placeholder {
+  color: var(--muted);
+}
 
 .center-attachment-image {
   width: 100%;
@@ -508,13 +792,19 @@ button:hover { filter: brightness(1.05); }
 
 .cell.center .pin-btn,
 .cell.center .done-btn,
-.cell.center .delete-btn {
+.cell.center .delete-btn,
+.cell.center .add-link-btn {
   background: transparent;
   border-color: var(--border);
   color: var(--muted);
   padding: 0.4rem 0.55rem;
   font-size: 0.95rem;
   line-height: 1;
+}
+
+.cell.center .add-link-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .cell.center .pin-btn:hover {
@@ -620,6 +910,70 @@ button:hover { filter: brightness(1.05); }
 .note-fullscreen-close:hover {
   color: var(--danger);
   filter: none;
+}
+
+.map-fullscreen {
+  position: relative;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: 92%;
+  max-width: 1100px;
+  height: 88vh;
+  padding: 0;
+  overflow: hidden;
+}
+
+.map-fullscreen #map {
+  width: 100%;
+  height: 100%;
+}
+
+.map-status {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 500;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.map-modes {
+  position: absolute;
+  top: 0.75rem;
+  right: 2.75rem;
+  z-index: 500;
+  display: flex;
+  gap: 4px;
+}
+
+.map-modes button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+  box-shadow: var(--shadow);
+}
+
+.map-modes button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+#map-overlay .note-fullscreen-close {
+  z-index: 500;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
 }
 
 .picker h2 {
@@ -736,7 +1090,8 @@ button:hover { filter: brightness(1.05); }
 
 /* Colour coding: a translucent tint set per cell from app.js. */
 .cell.neighbor[data-tint],
-.cell.center[data-tint] {
+.cell.center[data-tint],
+.mini-cell[data-tint] {
   background-image: linear-gradient(var(--cell-tint), var(--cell-tint));
 }
 
@@ -785,17 +1140,97 @@ button:hover { filter: brightness(1.05); }
   color: var(--muted);
 }
 
+/* --- History / undo dialog --- */
+.history-panel {
+  max-width: 620px;
+}
+
+.history-panel h2 {
+  flex: 0 0 auto;
+  margin: 0 0 0.75rem;
+}
+
+.history-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.history-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--border);
+}
+
+.history-item:first-child { border-top: none; }
+
+.history-icon {
+  flex: 0 0 auto;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.history-info { flex: 1; min-width: 0; }
+
+.history-summary {
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.history-when {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.1rem;
+}
+
+.history-when.history-error { color: var(--danger); }
+
+.history-undo {
+  flex: 0 0 auto;
+  background: transparent;
+  border-color: var(--border);
+  color: var(--muted);
+  padding: 0.35rem 0.6rem;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.history-undo:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.history-undo:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.history-item.undone .history-summary,
+.history-item.stale .history-summary {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.history-item.stale .history-summary { text-decoration: none; }
+
 @media (max-width: 640px) {
+  /* Reclaim vertical space the address bar steals in a plain browser tab, so
+     the grid cells get close to their fullscreen / installed-PWA height. */
+  .topbar { padding: 0.5rem 0.9rem; gap: 0.5rem 0.9rem; }
+  .tabbar { padding: 0.3rem 0.9rem; }
+
   .grid {
     gap: 0.5rem;
     padding: 0.75rem;
   }
-  .cell { padding: 0.6rem; font-size: 0.85rem; }
-  .cell.empty { font-size: 1.3rem; }
+  .cell { padding: 0.6rem; }
 }
 
-/* Short viewports (phones in landscape): shrink chrome so all 3 grid rows fit
-   without scrolling instead of overflowing the visible height. */
+/* Short viewports (phones in landscape): shrink spacing/chrome so all 3 grid
+   rows fit without scrolling. Font sizes are intentionally NOT touched here —
+   see the shared phone type-scale block below. */
 @media (max-height: 500px) {
   .topbar {
     padding: 0.4rem 0.9rem;
@@ -804,22 +1239,36 @@ button:hover { filter: brightness(1.05); }
   .topbar h1 { font-size: 0.95rem; }
   .search input { padding: 0.3rem 0.6rem; }
   .header-controls { gap: 0.35rem; }
-  .icon-btn { padding: 0.3rem 0.45rem; font-size: 0.85rem; }
-  .icon-btn.zoom-level { min-width: 2.6rem; font-size: 0.7rem; }
+  .icon-btn.zoom-level { min-width: 2.6rem; }
 
   .tabbar { padding: 0.3rem 0.9rem; }
-  .tab { padding: 0.2rem 0.4rem 0.2rem 0.6rem; font-size: 0.75rem; }
+  .tab { padding: 0.2rem 0.4rem 0.2rem 0.6rem; }
 
   .grid {
     gap: 0.4rem;
     padding: 0.5rem;
   }
-  .cell { padding: 0.4rem; font-size: 0.8rem; }
-  .cell.empty { font-size: 1.1rem; }
+  .cell { padding: 0.4rem; }
 
-  .cell.center .center-title { font-size: 0.95rem; }
-  .cell.center .center-content { font-size: 0.8rem; }
   .cell.center .center-footer { margin-top: 0.25rem; padding-top: 0.25rem; }
 
-  button { padding: 0.35rem 0.6rem; font-size: 0.78rem; }
+  button { padding: 0.35rem 0.6rem; }
 }
+
+/* One type scale for phones in ANY orientation — rotating the device must not
+   change font sizes. Applies whenever either phone media query would. */
+@media (max-width: 640px), (max-height: 500px) {
+  .cell.neighbor .neighbor-title { font-size: 0.95rem; }
+  .cell.center .center-title { font-size: 1.1rem; }
+  .cell.center .center-content { font-size: 0.9rem; }
+  .tab { font-size: 0.82rem; }
+  .icon-btn.zoom-level { font-size: 0.78rem; }
+  button { font-size: 0.85rem; }
+}
+
+/* Browser fullscreen (the ⛶ button) gains ~55px of height by dropping the
+   address bar, which nudges grid text up a notch — trim it back ~5% so the
+   centred note reads the same in and out of fullscreen. */
+:root:fullscreen .cell.center .center-title { font-size: 1.05rem; }
+:root:fullscreen .cell.center .center-content { font-size: 0.85rem; }
+:root:fullscreen .cell.neighbor .neighbor-title { font-size: 0.9rem; }

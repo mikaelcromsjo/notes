@@ -2,3 +2,6 @@ node_modules/
 
 # Live user data — never commit
 data/
+
+# Claude Code local settings (machine-specific hook)
+.claude/settings.local.json
