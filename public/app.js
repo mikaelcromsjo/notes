@@ -16,6 +16,11 @@
   const historyOverlay = document.getElementById('history-overlay');
   const historyClose = document.getElementById('history-close');
   const historyBody = document.getElementById('history-body');
+  const agendaBtn = document.getElementById('agenda-btn');
+  const agendaBadge = document.getElementById('agenda-badge');
+  const agendaOverlay = document.getElementById('agenda-overlay');
+  const agendaClose = document.getElementById('agenda-close');
+  const agendaBody = document.getElementById('agenda-body');
   const accountBtn = document.getElementById('account-btn');
   const loginOverlay = document.getElementById('login-overlay');
   const loginEmail = document.getElementById('login-email');
@@ -1776,10 +1781,12 @@
     }
 
     renderAlarmbar();
+    updateAgendaBadge(ringingIds.size);
     if (changed) {
       renderTabbar();
       renderPinbar();
       if (currentId) await render();
+      if (!agendaOverlay.classList.contains('hidden')) openAgenda();
     }
 
     const ringing = alarms.filter((a) => a.triggered && !alarmDismissed.has(a.id));
@@ -1817,6 +1824,34 @@
     if (!alarmPopupList.childElementCount) alarmPopupOverlay.classList.add('hidden');
   }
 
+  // A "Snooze…" dropdown for one reminder, shared by the ring popup and the
+  // agenda. `after` runs once the snooze has been persisted and alarms refreshed.
+  function buildSnoozeSelect(a, after) {
+    const sel = document.createElement('select');
+    sel.className = 'apo-snooze';
+    sel.title = 'Remind me again later';
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = 'Snooze…';
+    sel.appendChild(ph);
+    SNOOZE_OPTIONS.forEach((opt, i) => {
+      const o = document.createElement('option');
+      o.value = String(i);
+      o.textContent = opt.label;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', async () => {
+      const opt = SNOOZE_OPTIONS[Number(sel.value)];
+      sel.value = '';
+      if (!opt) return;
+      await api.snoozeAlarm(a.id, snoozeUntilIso(opt));
+      alarmDismissed.delete(a.id);
+      await checkAlarms({ popup: false });
+      if (after) after();
+    });
+    return sel;
+  }
+
   function showAlarmPopup(ringing) {
     alarmPopupList.innerHTML = '';
     ringing.forEach((a) => {
@@ -1834,28 +1869,7 @@
       info.appendChild(t);
       info.appendChild(w);
 
-      const snooze = document.createElement('select');
-      snooze.className = 'apo-snooze';
-      snooze.title = 'Remind me again later';
-      const ph = document.createElement('option');
-      ph.value = '';
-      ph.textContent = 'Snooze…';
-      snooze.appendChild(ph);
-      SNOOZE_OPTIONS.forEach((opt, i) => {
-        const o = document.createElement('option');
-        o.value = String(i);
-        o.textContent = opt.label;
-        snooze.appendChild(o);
-      });
-      snooze.addEventListener('change', async () => {
-        const opt = SNOOZE_OPTIONS[Number(snooze.value)];
-        snooze.value = '';
-        if (!opt) return;
-        await api.snoozeAlarm(a.id, snoozeUntilIso(opt));
-        alarmDismissed.delete(a.id);
-        hideAlarmPopupRow(row);
-        await checkAlarms({ popup: false });
-      });
+      const snooze = buildSnoozeSelect(a, () => hideAlarmPopupRow(row));
 
       const ok = document.createElement('button');
       ok.className = 'apo-ok';
@@ -1885,6 +1899,140 @@
     });
     alarmPopupOverlay.classList.remove('hidden');
   }
+
+  // --- Agenda: one "what's due" view across every reminder --------------------
+  function startOfDay(x) {
+    const d = new Date(x);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+
+  // A reminder's next fire instant, snooze-aware: the snooze time while it is
+  // still in the future, else the next normal occurrence (null once a one-shot
+  // has passed).
+  function effectiveNextFire(a, ref = new Date()) {
+    if (a.snoozeUntil) {
+      const s = new Date(a.snoozeUntil);
+      if (s > ref) return s;
+    }
+    return nextAlarmOccurrence(a, ref);
+  }
+
+  function agendaWhenText(d, ref = new Date()) {
+    if (!d) return '';
+    const hh = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const dd = Math.round((startOfDay(d) - startOfDay(ref)) / 86400000);
+    if (dd === 0) return `Today ${hh}`;
+    if (dd === 1) return `Tomorrow ${hh}`;
+    if (dd > 1 && dd < 7) return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${hh}`;
+    return `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${hh}`;
+  }
+
+  function updateAgendaBadge(n) {
+    if (n > 0) {
+      agendaBadge.textContent = n > 9 ? '9+' : String(n);
+      agendaBadge.classList.remove('hidden');
+    } else {
+      agendaBadge.classList.add('hidden');
+    }
+  }
+
+  function agendaRow(a, overdue) {
+    const row = document.createElement('div');
+    row.className = 'agenda-item' + (overdue ? ' agenda-overdue' : '');
+
+    const info = document.createElement('div');
+    info.className = 'agenda-info';
+    const t = document.createElement('div');
+    t.className = 'agenda-title linkish';
+    t.textContent = a.title;
+    t.addEventListener('click', () => {
+      agendaOverlay.classList.add('hidden');
+      jumpTo(a.noteId, 'agenda');
+    });
+    const w = document.createElement('div');
+    w.className = 'agenda-when';
+    const snoozed = a.snoozeUntil && new Date(a.snoozeUntil) > new Date();
+    w.textContent = snoozed
+      ? `Snoozed · ${agendaWhenText(a.fireAt)}`
+      : overdue
+        ? alarmWhenText(a)
+        : agendaWhenText(a.fireAt);
+    info.appendChild(t);
+    info.appendChild(w);
+
+    const snooze = buildSnoozeSelect(a, openAgenda);
+    const ok = document.createElement('button');
+    ok.className = 'agenda-ok';
+    ok.textContent = '✓';
+    ok.title = 'Done — quiet until it next goes off';
+    ok.addEventListener('click', async () => {
+      await api.ackAlarm(a.id, isoOrNull(nextAlarmOccurrence(a, new Date())));
+      await checkAlarms({ popup: false });
+      openAgenda();
+    });
+
+    row.appendChild(info);
+    row.appendChild(snooze);
+    row.appendChild(ok);
+    return row;
+  }
+
+  async function openAgenda() {
+    agendaOverlay.classList.remove('hidden');
+    agendaBody.textContent = 'Loading…';
+    const ref = new Date();
+    const list = (await api.listAlarms()).map((a) => ({
+      ...a,
+      triggered: alarmTriggered(a, ref),
+      fireAt: effectiveNextFire(a, ref),
+    }));
+
+    const buckets = { overdue: [], today: [], week: [], later: [] };
+    for (const a of list) {
+      if (a.triggered) {
+        buckets.overdue.push(a);
+        continue;
+      }
+      if (!a.fireAt) continue; // acked one-shot in the past — nothing to show
+      const dd = Math.round((startOfDay(a.fireAt) - startOfDay(ref)) / 86400000);
+      if (dd <= 0) buckets.today.push(a);
+      else if (dd < 7) buckets.week.push(a);
+      else buckets.later.push(a);
+    }
+    for (const k of Object.keys(buckets)) {
+      buckets[k].sort((x, y) => (x.fireAt || 0) - (y.fireAt || 0));
+    }
+
+    agendaBody.innerHTML = '';
+    const groups = [
+      ['Overdue', buckets.overdue],
+      ['Today', buckets.today],
+      ['This week', buckets.week],
+      ['Later', buckets.later],
+    ];
+    let any = false;
+    for (const [label, items] of groups) {
+      if (!items.length) continue;
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = label;
+      agendaBody.appendChild(h);
+      items.forEach((a) => agendaBody.appendChild(agendaRow(a, label === 'Overdue')));
+    }
+    if (!any) {
+      const p = document.createElement('p');
+      p.className = 'muted';
+      p.textContent = 'Nothing scheduled.';
+      agendaBody.appendChild(p);
+    }
+  }
+
+  agendaBtn.addEventListener('click', openAgenda);
+  agendaClose.addEventListener('click', () => agendaOverlay.classList.add('hidden'));
+  agendaOverlay.addEventListener('click', (e) => {
+    if (e.target === agendaOverlay) agendaOverlay.classList.add('hidden');
+  });
 
   // --- Alarm editor (Android-style: time wheel + weekday circles + one-time date) ---
   function selectedAlarmDays() {

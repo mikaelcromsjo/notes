@@ -1391,6 +1391,79 @@ button:hover { filter: brightness(1.05); }
 
 .history-item.stale .history-summary { text-decoration: none; }
 
+/* --- Agenda ("what's due") ------------------------------------------------ */
+#agenda-btn { position: relative; }
+
+.agenda-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 0.18rem;
+  box-sizing: border-box;
+  border-radius: 0.5rem;
+  background: var(--danger);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1rem;
+  text-align: center;
+}
+
+.agenda-panel { max-width: 620px; }
+.agenda-panel h2 { flex: 0 0 auto; margin: 0 0 0.75rem; }
+
+.agenda-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.agenda-body h3 {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin: 1rem 0 0.3rem;
+}
+.agenda-body h3:first-child { margin-top: 0; }
+.agenda-body .muted { color: var(--muted); }
+
+.agenda-item {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--border);
+}
+.agenda-item:first-of-type { border-top: none; }
+
+.agenda-info { flex: 1 1 55%; min-width: 0; }
+.agenda-title { font-weight: 600; overflow-wrap: anywhere; }
+.agenda-title.linkish { color: var(--accent); cursor: pointer; }
+.agenda-when { font-size: 0.78rem; color: var(--muted); margin-top: 0.1rem; }
+.agenda-overdue .agenda-when { color: var(--danger); }
+
+.agenda-item .apo-snooze {
+  margin-left: auto;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.agenda-item .agenda-ok {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.6rem;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
 @media (max-width: 640px) {
   /* Reclaim vertical space the address bar steals in a plain browser tab, so
      the grid cells get close to their fullscreen / installed-PWA height. */

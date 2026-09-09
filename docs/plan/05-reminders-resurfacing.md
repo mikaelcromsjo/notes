@@ -144,7 +144,13 @@ CREATE INDEX idx_reminders_due ON reminders(next_at) WHERE next_at IS NOT NULL;
    opening the app.
 3. **[M] Natural-language recurrence** parser + editor field + `rule` iteration.
 4. **[M] Agenda**: `GET /api/agenda`, the overlay, topbar bell + badge, widget
-   agenda mode.
+   agenda mode. ✅ PARTIAL (2026-09-09) — `🔔` topbar bell with an overdue-count
+   badge + an agenda overlay (overdue / today / this week / later), built
+   **client-side** from the `alarms` array so bucketing happens in the viewer's
+   TZ (no `GET /api/agenda` — the server has no reliable TZ; add the endpoint
+   only when the widget needs it). Rows: open the note, snooze (shared
+   `buildSnoozeSelect`), ✓ ack. Still TODO: `GET /api/agenda` + widget agenda
+   mode; the open-`- [ ]`-tasks secondary list (Domain 4 dependency).
 5. **[L] Digests**: `digest_prefs`, `digest-scheduler.js`, digest builder from
    `stats.js` signals, push + email delivery, `/api/review` + in-app Review tab,
    settings UI.

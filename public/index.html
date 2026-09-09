@@ -32,6 +32,7 @@
       <button id="depth-cycle-btn" class="icon-btn" title="Nested grid depth" aria-label="Cycle nested grid depth">🔲</button>
       <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🎨</button>
       <button id="map-btn" class="icon-btn" title="Map of notes" aria-label="Open map of notes">🗺️</button>
+      <button id="agenda-btn" class="icon-btn" title="Agenda — what's due" aria-label="Open agenda">🔔<span id="agenda-badge" class="agenda-badge hidden"></span></button>
       <button id="insights-btn" class="icon-btn" title="Insights" aria-label="Open insights">📊</button>
       <button id="history-btn" class="icon-btn" title="History &amp; undo" aria-label="Open history">↩️</button>
       <button id="fullscreen-btn" class="icon-btn" title="Toggle fullscreen" aria-label="Toggle fullscreen">⛶</button>
@@ -115,6 +116,14 @@
       <button id="insights-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
       <h2>Insights</h2>
       <div id="insights-body" class="insights-body"></div>
+    </div>
+  </div>
+
+  <div id="agenda-overlay" class="overlay hidden">
+    <div class="note-fullscreen agenda-panel">
+      <button id="agenda-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <h2>Agenda</h2>
+      <div id="agenda-body" class="agenda-body"></div>
     </div>
   </div>
 
