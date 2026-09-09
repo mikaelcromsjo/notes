@@ -385,6 +385,92 @@
         .slice(0, 12)
         .map((n) => ({ id: n.id, title: n.title, type: n.type, snippet: '' }));
     },
+
+    // --- Cached neighbour responses (phase 4): the last server-ranked
+    // { parent, neighbors, links, linkCount } per centred note, so the grid keeps
+    // its exact arrangement + path-heat offline instead of a link-recency guess.
+    nkey(id) {
+      return typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id;
+    },
+    async putNeighbors(id, data) {
+      if (!store || id == null || isTmp(id)) return;
+      if (!data || !Array.isArray(data.neighbors)) return; // don't cache an error body
+      try {
+        await store.put('neighbors', { id: this.nkey(id), data, at: Date.now() });
+      } catch {
+        /* ignore */
+      }
+    },
+    async getNeighborsBlob(id) {
+      if (!store || isTmp(id)) return null;
+      try {
+        const row = await store.get('neighbors', this.nkey(id));
+        return row ? row.data : null;
+      } catch {
+        return null;
+      }
+    },
+    // Drop cached entries for notes that no longer exist / were deleted since the
+    // blob was stored (locally or on another device).
+    filterNeighborBlob(data) {
+      if (!data) return data;
+      const live = new Set(
+        allNotesCache.filter((n) => n.status !== 'deleted').map((n) => n.id)
+      );
+      const keep = (n) => n && live.has(n.id);
+      const neighbors = (data.neighbors || []).filter(keep);
+      const links = (data.links || []).filter(keep);
+      return {
+        ...data,
+        parent: keep(data.parent) ? data.parent : null,
+        neighbors,
+        links,
+        linkCount: links.length,
+      };
+    },
+    // Keep both endpoints' cached blobs consistent with a link change made
+    // offline, so the grid doesn't show a stale / missing neighbour.
+    async patchNeighborLink(a, b, { removed = false } = {}) {
+      if (!store) return;
+      for (const [center, other] of [[a, b], [b, a]]) {
+        let row;
+        try {
+          row = await store.get('neighbors', this.nkey(center));
+        } catch {
+          row = null;
+        }
+        if (!row) continue;
+        const d = row.data;
+        const present =
+          (d.neighbors || []).some((n) => n.id === other) ||
+          (d.parent && d.parent.id === other);
+        if (removed) {
+          d.neighbors = (d.neighbors || []).filter((n) => n.id !== other);
+          d.links = (d.links || []).filter((n) => n.id !== other);
+          if (d.parent && d.parent.id === other) d.parent = null;
+        } else if (!present) {
+          const o = allNotesCache.find((n) => n.id === other);
+          const entry = {
+            id: other,
+            title: o ? o.title : String(other),
+            type: o ? o.type : 'text',
+            status: o ? o.status : 'active',
+            p: 0,
+            score: 0,
+          };
+          d.neighbors = [entry, ...(d.neighbors || [])].slice(0, 8);
+          d.links = [entry, ...(d.links || [])];
+        } else {
+          continue;
+        }
+        d.linkCount = (d.links || []).length;
+        try {
+          await store.put('neighbors', row);
+        } catch {
+          /* ignore */
+        }
+      }
+    },
   };
 
   window.addEventListener('online', () => reconnect());
@@ -856,6 +942,22 @@
           }
         }
         if (touched) await store.put('outbox', entry);
+      }
+      // Rewrite the tmp id inside any cached neighbour blob it was patched into.
+      for (const row of await store.getAll('neighbors')) {
+        const d = row.data || {};
+        let touched = false;
+        const fix = (n) => {
+          if (n && n.id === tmp) {
+            n.id = real;
+            touched = true;
+          }
+          return n;
+        };
+        (d.neighbors || []).forEach(fix);
+        (d.links || []).forEach(fix);
+        fix(d.parent);
+        if (touched) await store.put('neighbors', row);
       }
     }
 
@@ -1817,6 +1919,21 @@
     return (await cache.cachedNote(id)) || allNotesCache.find((n) => n.id === id) || {};
   }
 
+  // GET /api/stats/<path>, caching the body in meta['<metaKey>'] and returning
+  // the cached copy (or `fallback`) when offline.
+  async function cachedStat(path, metaKey, fallback) {
+    try {
+      const r = await fetch(`/api/stats/${path}`);
+      if (!r.ok) throw new Error(String(r.status));
+      const j = await r.json();
+      if (store) store.setMeta(metaKey, j).catch(() => {});
+      return j;
+    } catch {
+      const hit = store ? await store.meta(metaKey, null) : null;
+      return hit != null ? hit : fallback;
+    }
+  }
+
   async function togglePin(id, pin) {
     if (navigator.onLine && !isTmp(id)) {
       try {
@@ -1952,11 +2069,16 @@
     pinNote: (id) => togglePin(id, true),
     unpinNote: (id) => togglePin(id, false),
     getNeighbors: async (id) => {
+      if (isTmp(id)) return cache.localNeighbors(id);
       try {
-        if (isTmp(id)) return cache.localNeighbors(id);
-        return await fetch(`/api/notes/${id}/neighbors`).then((r) => r.json());
+        const d = await fetch(`/api/notes/${id}/neighbors`).then((r) => r.json());
+        await cache.putNeighbors(id, d);
+        return d;
       } catch {
-        return cache.localNeighbors(id);
+        // Offline: the last server-ranked arrangement if we have it (keeps the
+        // grid coherent), else a link-recency recompute.
+        const blob = await cache.getNeighborsBlob(id);
+        return blob ? cache.filterNeighborBlob(blob) : cache.localNeighbors(id);
       }
     },
     link: async (a, b, rehomeFrom) => {
@@ -1965,7 +2087,11 @@
         try {
           const r = await reqJson('/api/links', 'POST', rehoming ? { a, b, rehomeFrom } : { a, b });
           await mirrorLink(a, b);
-          if (rehoming) await mirrorLink(rehomeFrom, b, { removed: true });
+          await cache.patchNeighborLink(a, b);
+          if (rehoming) {
+            await mirrorLink(rehomeFrom, b, { removed: true });
+            await cache.patchNeighborLink(rehomeFrom, b, { removed: true });
+          }
           return r;
         } catch (err) {
           if (err.httpStatus) throw err;
@@ -1973,7 +2099,11 @@
       }
       const ts = new Date().toISOString();
       await putLocalLink(a, b, ts);
-      if (rehoming) await putLocalLink(rehomeFrom, b, ts, true);
+      await cache.patchNeighborLink(a, b);
+      if (rehoming) {
+        await putLocalLink(rehomeFrom, b, ts, true);
+        await cache.patchNeighborLink(rehomeFrom, b, { removed: true });
+      }
       await enqueue(
         'link',
         rehoming ? { a, b, rehomeFrom } : { a, b },
@@ -1987,12 +2117,14 @@
         try {
           const r = await reqJson('/api/links', 'DELETE', { a, b });
           await mirrorLink(a, b, { removed: true });
+          await cache.patchNeighborLink(a, b, { removed: true });
           return r;
         } catch (err) {
           if (err.httpStatus) throw err;
         }
       }
       await putLocalLink(a, b, null, true);
+      await cache.patchNeighborLink(a, b, { removed: true });
       await enqueue('unlink', { a, b }, [a, b]);
       scheduleFlush();
       return null;
@@ -2067,9 +2199,11 @@
     listSessions: () => fetch('/api/auth/sessions').then((r) => (r.ok ? r.json() : { sessions: [] })).catch(() => ({ sessions: [] })),
     revokeSession: (sid) => fetch(`/api/auth/sessions/${sid}`, { method: 'DELETE' }),
     revokeOtherSessions: () => fetch('/api/auth/sessions', { method: 'DELETE' }),
-    getNoteHeat: () => fetch('/api/stats/note-heat').then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
-    getClusters: () => fetch('/api/stats/clusters').then((r) => (r.ok ? r.json() : { clusters: {} })).catch(() => ({ clusters: {} })),
-    getInsights: () => fetch('/api/stats/insights').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    // Stats blobs are cached so the grid's colour modes keep their tints offline
+    // (rather than falling back to no colour) — updated on every online fetch.
+    getNoteHeat: () => cachedStat('note-heat', 'statNoteHeat', {}),
+    getClusters: () => cachedStat('clusters', 'statClusters', { clusters: {} }),
+    getInsights: () => cachedStat('insights', 'statInsights', null),
     getHistory: () => fetch('/api/history').then((r) => (r.ok ? r.json() : [])).catch(() => []),
     undoHistory: (id) =>
       fetch(`/api/history/${id}/undo`, { method: 'POST' })

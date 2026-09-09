@@ -16,10 +16,13 @@
 //   blobs   keyPath 'key'  — pending attachment payloads (File/Blob) awaiting
 //                            upload. Unused until phase 2.
 //   meta    keyPath 'k'    — scalar bookkeeping: temp-id map, last full-pull time.
+//   neighbors keyPath 'id' — the last server { parent, neighbors, links, … }
+//                            response per centred note, so the grid keeps its
+//                            ranked arrangement + path-heat offline (added v2).
 (() => {
   const DB_NAME = 'nico';
-  const DB_VERSION = 1;
-  const STORES = ['notes', 'links', 'outbox', 'blobs', 'meta'];
+  const DB_VERSION = 2;
+  const STORES = ['notes', 'links', 'outbox', 'blobs', 'meta', 'neighbors'];
 
   let dbPromise = null;
 
@@ -39,9 +42,14 @@
           db.createObjectStore('outbox', { keyPath: 'seq', autoIncrement: true });
         if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'key' });
         if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'k' });
+        if (!db.objectStoreNames.contains('neighbors'))
+          db.createObjectStore('neighbors', { keyPath: 'id' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
+      // Another tab on the old version is holding the upgrade open — degrade to
+      // online-only rather than hang; a reload once the other tab closes fixes it.
+      req.onblocked = () => reject(new Error('IndexedDB upgrade blocked'));
     }).catch((err) => {
       // A private window / disabled storage / a quota refusal at open time all
       // land here. Reset so a later call can retry, and let callers degrade.
