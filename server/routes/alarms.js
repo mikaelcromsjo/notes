@@ -63,7 +63,7 @@ function parseLocation(body) {
   if (!Number.isFinite(lon) || lon < -180 || lon > 180) return { error: 'lon out of range' };
   let radiusM = Math.round(Number(body && body.radiusM));
   if (!Number.isFinite(radiusM)) radiusM = 250;
-  radiusM = Math.min(5000, Math.max(50, radiusM));
+  radiusM = Math.min(10000, Math.max(50, radiusM));
   return { lat, lon, radiusM };
 }
 
