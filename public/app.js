@@ -89,6 +89,8 @@
   const restoreBtn = document.getElementById('restore-btn');
   const restoreFile = document.getElementById('restore-file');
   const restoreStatus = document.getElementById('restore-status');
+  const sessionList = document.getElementById('session-list');
+  const sessionRevokeOthersBtn = document.getElementById('session-revoke-others-btn');
   const accountCloseBtn = document.getElementById('account-close-btn');
   const importFormat = document.getElementById('import-format');
   const importFile = document.getElementById('import-file');
@@ -868,6 +870,9 @@
         body: JSON.stringify({ email }),
       }),
     logout: () => fetch('/api/session', { method: 'DELETE' }),
+    listSessions: () => fetch('/api/auth/sessions').then((r) => (r.ok ? r.json() : { sessions: [] })).catch(() => ({ sessions: [] })),
+    revokeSession: (sid) => fetch(`/api/auth/sessions/${sid}`, { method: 'DELETE' }),
+    revokeOtherSessions: () => fetch('/api/auth/sessions', { method: 'DELETE' }),
     getNoteHeat: () => fetch('/api/stats/note-heat').then((r) => (r.ok ? r.json() : {})).catch(() => ({})),
     getClusters: () => fetch('/api/stats/clusters').then((r) => (r.ok ? r.json() : { clusters: {} })).catch(() => ({ clusters: {} })),
     getInsights: () => fetch('/api/stats/insights').then((r) => (r.ok ? r.json() : null)).catch(() => null),
@@ -3644,7 +3649,85 @@
     syncBarToggles();
     showSettingsSection('account');
     loadDigestPrefs();
+    renderSessions();
     accountOverlay.classList.remove('hidden');
+  });
+
+  // --- Signed-in devices (Account section) ------------------------------
+  function deviceLabel(ua) {
+    if (!ua) return 'Unknown device';
+    const os =
+      /Android/i.test(ua) ? 'Android' :
+      /iPhone/i.test(ua) ? 'iPhone' :
+      /iPad/i.test(ua) ? 'iPad' :
+      /Macintosh|Mac OS X/i.test(ua) ? 'Mac' :
+      /Windows/i.test(ua) ? 'Windows' :
+      /Linux/i.test(ua) ? 'Linux' : 'Device';
+    const browser =
+      /Edg\//i.test(ua) ? 'Edge' :
+      /OPR\/|Opera/i.test(ua) ? 'Opera' :
+      /Firefox\//i.test(ua) ? 'Firefox' :
+      /Chrome\//i.test(ua) ? 'Chrome' :
+      /Safari\//i.test(ua) ? 'Safari' : '';
+    return browser ? `${browser} on ${os}` : os;
+  }
+
+  function relTime(iso) {
+    const then = new Date(iso).getTime();
+    if (!then) return '';
+    const s = Math.round((Date.now() - then) / 1000);
+    if (s < 90) return 'just now';
+    const m = Math.round(s / 60);
+    if (m < 90) return `${m} min ago`;
+    const h = Math.round(m / 60);
+    if (h < 36) return `${h} h ago`;
+    return `${Math.round(h / 24)} d ago`;
+  }
+
+  async function renderSessions() {
+    sessionList.textContent = 'Loading…';
+    const { sessions: rows } = await api.listSessions();
+    sessionList.innerHTML = '';
+    if (!rows.length) {
+      sessionList.textContent = 'No other sessions.';
+      sessionRevokeOthersBtn.disabled = true;
+      return;
+    }
+    sessionRevokeOthersBtn.disabled = rows.length < 2;
+    for (const s of rows) {
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      const name = document.createElement('span');
+      name.className = 'session-name';
+      name.textContent = deviceLabel(s.ua) + (s.current ? ' — this device' : '');
+      const sub = document.createElement('span');
+      sub.className = 'session-sub';
+      sub.textContent = `active ${relTime(s.last_seen_at)}`;
+      meta.append(name, sub);
+      row.append(meta);
+      if (!s.current) {
+        const btn = document.createElement('button');
+        btn.className = 'secondary';
+        btn.textContent = 'Sign out';
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          await api.revokeSession(s.sid);
+          renderSessions();
+        });
+        row.append(btn);
+      }
+      sessionList.append(row);
+    }
+  }
+
+  sessionRevokeOthersBtn.addEventListener('click', async () => {
+    if (!(await confirmDialog('Sign out every other device? They will need to sign in again.', { confirmLabel: 'Sign out others' }))) return;
+    sessionRevokeOthersBtn.disabled = true;
+    await api.revokeOtherSessions();
+    toast('Signed out all other devices.');
+    renderSessions();
   });
 
   accountCloseBtn.addEventListener('click', closeAccount);

@@ -169,7 +169,28 @@ to the real domain (Domain 7 owns the domain).
 4. **[M] Google OAuth.** `arctic`, `oauth_identities`, start/callback routes, UI
    buttons.
 5. **[S] Session management UI.** `GET/DELETE /api/auth/sessions` + account
-   overlay list.
+   overlay list. ✅ DONE (2026-09-09).
+
+   **What shipped:** three routes in `server/routes/auth.js` (mounted above the
+   cookie gate; each guards on `req.userId` from `resolveSession`):
+   `GET /api/auth/sessions` → `{ sessions: [{ sid, current, created_at,
+   last_seen_at, expires_at, ua }] }` where `sid` = `sha256(session id).slice(0,16)`
+   (the raw id is the auth secret and is never sent to the client);
+   `DELETE /api/auth/sessions/:sid` revokes the one whose hash-prefix matches
+   among the caller's own sessions (clears the cookie too if it was the current
+   one); `DELETE /api/auth/sessions` = "log out everywhere else" via the existing
+   `sessions.destroyOthers(userId, keepToken)`. No new deps / schema — reuses
+   `sessions.list` / `.destroy` / `.destroyOthers`. Frontend: **Settings →
+   Account → "Signed-in devices"** — `renderSessions()` lists each row as
+   `deviceLabel(ua)` ("Chrome on Android" etc., from a small UA regex) + "active
+   N min ago" (`relTime`), a "— this device" marker on the current one and a
+   per-row "Sign out" button on the others, plus a "Sign out all other devices"
+   button (confirm dialog). `api.listSessions/revokeSession/revokeOtherSessions`
+   added; list re-renders after each action; revoking the current device isn't
+   offered in the UI. `.session-list/.session-row/...` styles in `style.css`.
+   Verified on a DB copy: list shape + `current` flag, single revoke removes just
+   that row, revoke-others leaves exactly the caller's session (still valid for
+   `GET /api/notes`), unauth → 401.
 6. **[M] Apple OAuth.** `.p8` client-secret signing, form-post callback. Needed
    before Domain 7's iOS listing.
 7. **[S] Remove the `nico_uid` shim** (~30 days after milestone 1).

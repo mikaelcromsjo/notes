@@ -119,4 +119,40 @@ router.get('/callback', (req, res) => {
   res.redirect('/');
 });
 
+// --- Session management ("signed-in devices" / log out everywhere) ---------
+// Mounted above the cookie gate, so guard on req.userId (set by resolveSession).
+// The raw session id is the auth secret and is never sent to the client — each
+// row is addressed by a short hash of it.
+const publicSid = (id) => sha256(id).slice(0, 16);
+
+router.get('/sessions', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  const rows = sessions.list(req.userId).map((s) => ({
+    sid: publicSid(s.id),
+    current: s.id === req.sessionId,
+    created_at: s.created_at,
+    last_seen_at: s.last_seen_at,
+    expires_at: s.expires_at,
+    ua: s.ua || null,
+  }));
+  res.json({ sessions: rows });
+});
+
+// Revoke every other session for this user; the caller's stays live.
+router.delete('/sessions', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  sessions.destroyOthers(req.userId, req.sessionId);
+  res.status(204).end();
+});
+
+router.delete('/sessions/:sid', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  const sid = String(req.params.sid || '');
+  const row = sessions.list(req.userId).find((s) => publicSid(s.id) === sid);
+  if (!row) return res.status(404).json({ error: 'session not found' });
+  sessions.destroy(row.id);
+  if (row.id === req.sessionId) res.clearCookie(sessions.SESSION_COOKIE, { path: '/' });
+  res.status(204).end();
+});
+
 module.exports = router;

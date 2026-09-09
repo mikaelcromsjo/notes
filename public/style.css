@@ -1545,6 +1545,49 @@ button:hover { filter: brightness(1.05); }
   border-top: 1px solid var(--border);
 }
 
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.session-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-name {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-sub {
+  font-size: 0.78rem;
+}
+
+.session-row button {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.6rem;
+}
+
 /* Toggle row: label text on the left, a switch on the right. The real
    <input type=checkbox> is visually hidden but stays keyboard/AT reachable. */
 .settings-toggle {
