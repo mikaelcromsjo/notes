@@ -10,7 +10,7 @@ const { sendToUser } = require('./webpush');
 const TICK_MS = 30 * 1000;
 
 const dueStmt = db.prepare(
-  `SELECT r.id, r.note_id, r.user_id,
+  `SELECT r.id, r.note_id, r.user_id, r.kind,
           COALESCE(r.snooze_until, r.next_at) AS due_at,
           n.title
    FROM reminders r
@@ -38,6 +38,7 @@ async function tick() {
       reminderId: r.id,
       noteId: r.note_id,
       title: r.title || 'Alarm',
+      kind: r.kind || 'time',
       at: r.due_at,
     });
   }

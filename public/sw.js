@@ -50,8 +50,13 @@ const SNOOZE_ACTIONS = [
 ];
 
 function showAlarm(data, extraBody) {
-  const title = `⏰ ${data.title || 'Alarm'}`;
-  const base = data.at ? new Date(data.at).toLocaleString() : 'Alarm';
+  const place = data.kind === 'location';
+  const title = `${place ? '📍' : '⏰'} ${data.title || 'Alarm'}`;
+  const base = place
+    ? "You're near here"
+    : data.at
+      ? new Date(data.at).toLocaleString()
+      : 'Alarm';
   return self.registration.showNotification(title, {
     body: extraBody ? `${base}\n${extraBody}` : base,
     tag: data.noteId ? `alarm-${data.noteId}` : 'alarm',

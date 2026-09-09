@@ -57,6 +57,14 @@
   const alarmDaysRow = document.getElementById('alarm-days-row');
   const alarmDateWrap = document.getElementById('alarm-date-wrap');
   const alarmDateInput = document.getElementById('alarm-date-input');
+  const alarmKindRow = document.getElementById('alarm-kind-row');
+  const alarmTimeFields = document.getElementById('alarm-time-fields');
+  const alarmPlaceFields = document.getElementById('alarm-place-fields');
+  const alarmRadiusInput = document.getElementById('alarm-radius-input');
+  const alarmLocReadout = document.getElementById('alarm-loc-readout');
+  const alarmLocCurrentBtn = document.getElementById('alarm-loc-current');
+  const alarmLocPickBtn = document.getElementById('alarm-loc-pick');
+  const mapPickBanner = document.getElementById('map-pick-banner');
   const alarmSaveBtn = document.getElementById('alarm-save-btn');
   const alarmRemoveBtn = document.getElementById('alarm-remove-btn');
   const alarmCancelBtn = document.getElementById('alarm-cancel-btn');
@@ -606,8 +614,15 @@
       if (s > ref) return false; // snoozed into the future — stays quiet
       return !a.ackAt || new Date(a.ackAt) < s; // snooze elapsed — ring until acked
     }
-    const t = mostRecentAlarmTrigger(a, ref);
-    if (!t) return false;
+    // A location reminder has no clock — it "fires" the moment the geofence
+    // watch POSTs /arrive, which stamps nextAt. Ring until acked.
+    const t =
+      a.kind === 'location'
+        ? a.nextAt
+          ? new Date(a.nextAt)
+          : null
+        : mostRecentAlarmTrigger(a, ref);
+    if (!t || t > ref) return false;
     return !a.ackAt || new Date(a.ackAt) < t;
   }
 
@@ -673,6 +688,7 @@
   const isoOrNull = (d) => (d ? d.toISOString() : null);
 
   function alarmWhenText(a) {
+    if (a.kind === 'location') return `📍 On arrival · ${a.radiusM || 250} m`;
     if (a.days && a.days.length) {
       if (a.days.length === 7) return `Every day · ${a.time}`;
       const labels = ALARM_DAY_NUM.map((num, i) => (a.days.includes(num) ? ALARM_DAYS[i] : null)).filter(
@@ -703,6 +719,61 @@
         { timeout: 5000, maximumAge: 60000 }
       );
     });
+  }
+
+  // --- Location reminders: a foreground geofence. While the app is open and at
+  // least one kind='location' reminder exists, watch the viewer's position; on
+  // an outside->inside crossing of a reminder's radius, POST /arrive so the
+  // normal triggered/push path fires. Background geofencing needs the native
+  // wrapper (Domain 7) — this only runs with the tab alive.
+  let geoWatchId = null;
+  const geoInside = new Map(); // reminderId -> was inside on the last fix
+  const geoArrivedAt = new Map(); // reminderId -> ms of last /arrive (jitter guard)
+  const GEO_REARM_MS = 10 * 60 * 1000;
+
+  function haversineM(a, b) {
+    const R = 6371000;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(b.lat - a.lat);
+    const dLon = toRad(b.lon - a.lon);
+    const h =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function onGeoPosition(pos) {
+    const here = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    const slack = Math.min(pos.coords.accuracy || 0, 100);
+    for (const a of alarms) {
+      if (a.kind !== 'location' || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
+      const inside = haversineM(here, { lat: a.lat, lon: a.lon }) <= (a.radiusM || 250) + slack;
+      const was = geoInside.get(a.id);
+      geoInside.set(a.id, inside);
+      if (!inside || was) continue; // fire on the outside/unknown -> inside edge only
+      if (Date.now() - (geoArrivedAt.get(a.id) || 0) < GEO_REARM_MS) continue;
+      geoArrivedAt.set(a.id, Date.now());
+      api.arriveAlarm(a.id).then((r) => {
+        if (r && r.armed) checkAlarms();
+      });
+    }
+  }
+
+  function syncGeofenceWatch() {
+    const want = alarms.some(
+      (a) => a.kind === 'location' && Number.isFinite(a.lat) && Number.isFinite(a.lon)
+    );
+    if (want && geoWatchId == null && navigator.geolocation) {
+      geoWatchId = navigator.geolocation.watchPosition(onGeoPosition, () => {}, {
+        enableHighAccuracy: true,
+        maximumAge: 30000,
+        timeout: 27000,
+      });
+    } else if (!want && geoWatchId != null) {
+      navigator.geolocation.clearWatch(geoWatchId);
+      geoWatchId = null;
+      geoInside.clear();
+    }
   }
 
   const api = {
@@ -836,6 +907,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nextAt: nextAt || null }),
       }).catch(() => {}),
+    arriveAlarm: (id) =>
+      fetch(`/api/alarms/${id}/arrive`, { method: 'POST' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
     agenda: () => {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
       return fetch(`/api/agenda${tz ? `?tz=${encodeURIComponent(tz)}` : ''}`)
@@ -1931,13 +2006,17 @@
     for (const id of [...alarmNotified]) if (!ringingIds.has(id)) alarmNotified.delete(id);
 
     // Keep the server's next_at pointing at the upcoming occurrence — but leave
-    // a reminder that is snoozed into the future alone.
+    // a reminder that is snoozed into the future alone. Location reminders carry
+    // no clock: their next_at is stamped by /arrive and cleared by /ack, so the
+    // client must never roll it.
     for (const a of alarms) {
+      if (a.kind === 'location') continue;
       if (a.snoozeUntil && new Date(a.snoozeUntil) > ref) continue;
       const want = isoOrNull(nextAlarmOccurrence(a, ref));
       if (want !== (a.nextAt || null)) api.scheduleAlarm(a.id, want);
     }
 
+    syncGeofenceWatch();
     renderAlarmbar();
     updateAgendaBadge(ringingIds.size);
     if (changed) {
@@ -2159,6 +2238,37 @@
     return row;
   }
 
+  // A standing location reminder (armed, not ringing) — no clock, so no snooze.
+  function placeRow(a) {
+    const row = document.createElement('div');
+    row.className = 'agenda-item agenda-place';
+    const info = document.createElement('div');
+    info.className = 'agenda-info';
+    const t = document.createElement('div');
+    t.className = 'agenda-title linkish';
+    t.textContent = a.title;
+    t.addEventListener('click', () => {
+      agendaOverlay.classList.add('hidden');
+      jumpTo(a.noteId, 'agenda');
+    });
+    const w = document.createElement('div');
+    w.className = 'agenda-when';
+    w.textContent = `When you arrive · ${a.radiusM || 250} m`;
+    info.appendChild(t);
+    info.appendChild(w);
+    row.appendChild(info);
+    const mapB = document.createElement('button');
+    mapB.className = 'agenda-ok';
+    mapB.textContent = '🗺';
+    mapB.title = 'Show on map';
+    mapB.addEventListener('click', () => {
+      agendaOverlay.classList.add('hidden');
+      openMap();
+    });
+    row.appendChild(mapB);
+    return row;
+  }
+
   // A note the user flagged to-do via the center-cell status button.
   function todoRow(t) {
     const row = document.createElement('div');
@@ -2220,6 +2330,16 @@
       items.forEach((a) => agendaBody.appendChild(agendaRow(a, label === 'Overdue')));
     }
 
+    // Standing geofence reminders that aren't currently ringing.
+    const places = list.filter((a) => a.kind === 'location' && !a.triggered);
+    if (places.length) {
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = 'Places';
+      agendaBody.appendChild(h);
+      places.forEach((a) => agendaBody.appendChild(placeRow(a)));
+    }
+
     // Secondary lists (server-computed): notes flagged to-do, then notes
     // carrying open `- [ ]` tasks in their body.
     const extra = await api.agenda();
@@ -2274,14 +2394,51 @@
     ).padStart(2, '0')}`;
   }
 
+  // 'time' (clock) vs 'location' (geofence) — the two alarm-editor modes.
+  let alarmKind = 'time';
+  // The place chosen in the current editor session (current-location or map
+  // pick); null falls back to the note's own lat/lon.
+  let alarmPickedLoc = null;
+
+  function currentAlarmLoc() {
+    if (alarmPickedLoc) return alarmPickedLoc;
+    const n = alarmEditNote;
+    if (n && Number.isFinite(n.lat) && Number.isFinite(n.lon)) {
+      return { lat: n.lat, lon: n.lon, fromNote: true };
+    }
+    return null;
+  }
+
+  function refreshAlarmLocReadout() {
+    const loc = currentAlarmLoc();
+    if (!loc) {
+      alarmLocReadout.textContent = 'No location set';
+      return;
+    }
+    const coords = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`;
+    alarmLocReadout.textContent = loc.fromNote ? `Note's location · ${coords}` : coords;
+  }
+
+  function setAlarmKind(kind) {
+    alarmKind = kind === 'location' ? 'location' : 'time';
+    alarmKindRow.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.kind === alarmKind);
+    });
+    alarmTimeFields.classList.toggle('hidden', alarmKind === 'location');
+    alarmPlaceFields.classList.toggle('hidden', alarmKind !== 'location');
+    if (alarmKind === 'location') refreshAlarmLocReadout();
+  }
+
   function openAlarmEditor(note) {
     alarmEditNote = note;
+    alarmPickedLoc = null;
     const existing = alarms.find((a) => a.noteId === note.id);
 
     const d = new Date();
-    alarmTimeInput.value = existing
-      ? existing.time
-      : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    alarmTimeInput.value =
+      existing && existing.time
+        ? existing.time
+        : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 
     const activeDays = new Set(existing ? existing.days : []);
     alarmDaysRow.innerHTML = '';
@@ -2302,6 +2459,15 @@
     alarmDateInput.value =
       existing && existing.date ? existing.date : defaultAlarmDate(alarmTimeInput.value);
     syncAlarmDateVisibility();
+
+    if (existing && existing.kind === 'location') {
+      alarmPickedLoc = { lat: existing.lat, lon: existing.lon };
+      alarmRadiusInput.value = String(existing.radiusM || 250);
+    } else {
+      alarmRadiusInput.value = alarmRadiusInput.value || '250';
+    }
+    setAlarmKind(existing && existing.kind === 'location' ? 'location' : 'time');
+
     alarmRemoveBtn.classList.toggle('hidden', !existing);
     alarmOverlay.classList.remove('hidden');
   }
@@ -2309,7 +2475,39 @@
   function closeAlarmEditor() {
     alarmOverlay.classList.add('hidden');
     alarmEditNote = null;
+    alarmPickedLoc = null;
   }
+
+  alarmKindRow.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-kind]');
+    if (b) setAlarmKind(b.dataset.kind);
+  });
+
+  alarmLocCurrentBtn.addEventListener('click', async () => {
+    alarmLocCurrentBtn.disabled = true;
+    const loc = await getLocation();
+    alarmLocCurrentBtn.disabled = false;
+    if (!loc) {
+      toast('Location unavailable.');
+      return;
+    }
+    alarmPickedLoc = loc;
+    refreshAlarmLocReadout();
+  });
+
+  alarmLocPickBtn.addEventListener('click', () => {
+    alarmOverlay.classList.add('hidden');
+    openMap({
+      pick: true,
+      onPick: (c) => {
+        alarmPickedLoc = c;
+        refreshAlarmLocReadout();
+      },
+      onClose: () => {
+        alarmOverlay.classList.remove('hidden');
+      },
+    });
+  });
 
   async function afterAlarmChange() {
     await checkAlarms({ popup: false });
@@ -2363,6 +2561,33 @@
 
   alarmSaveBtn.addEventListener('click', async () => {
     if (!alarmEditNote) return;
+    const existingAny = alarms.find((a) => a.noteId === alarmEditNote.id);
+
+    if (alarmKind === 'location') {
+      const loc = currentAlarmLoc();
+      if (!loc) {
+        toast('Set a location — use current or pick on map.');
+        return;
+      }
+      const body = {
+        kind: 'location',
+        lat: loc.lat,
+        lon: loc.lon,
+        radiusM: Number(alarmRadiusInput.value) || 250,
+      };
+      try {
+        body.tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+      } catch {
+        body.tz = null;
+      }
+      if (existingAny) await api.updateAlarm(existingAny.id, body);
+      else await api.createAlarm({ ...body, noteId: alarmEditNote.id });
+      await enableAlarmDelivery();
+      closeAlarmEditor();
+      await afterAlarmChange();
+      return;
+    }
+
     const time = alarmTimeInput.value;
     if (!/^\d{2}:\d{2}$/.test(time)) {
       toast('Pick a time.');
@@ -2991,6 +3216,66 @@
         )
         .addTo(mapMarkers);
     });
+
+    drawReminderMarkers(latCellDeg);
+  }
+
+  // Location reminders on the map: an amber radius circle per reminder plus a
+  // 🔔 marker, bucketed like note pins so several at one spot become one marker
+  // whose popup lists them.
+  function drawReminderMarkers(latCellDeg) {
+    const rems = (alarms || []).filter(
+      (a) => a.kind === 'location' && Number.isFinite(a.lat) && Number.isFinite(a.lon)
+    );
+    if (!rems.length) return;
+
+    const groups = new Map();
+    rems.forEach((r) => {
+      const lonCellDeg = latCellDeg / Math.max(Math.cos((r.lat * Math.PI) / 180), 1e-6);
+      const key = Math.round(r.lat / latCellDeg) + ':' + Math.round(r.lon / lonCellDeg);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    });
+
+    groups.forEach((list) => {
+      list.forEach((r) => {
+        L.circle([r.lat, r.lon], {
+          radius: r.radiusM || 250,
+          color: '#e8590c',
+          weight: 1,
+          fillColor: '#e8590c',
+          fillOpacity: 0.12,
+        }).addTo(mapMarkers);
+      });
+      const lat = list.reduce((s, r) => s + r.lat, 0) / list.length;
+      const lon = list.reduce((s, r) => s + r.lon, 0) / list.length;
+      const popup =
+        list.length === 1
+          ? `<b>🔔 ${escapeHtml(list[0].title || 'Untitled')}</b><br />` +
+            `Reminds when you arrive · ${list[0].radiusM || 250} m<br />` +
+            `<a href="#${list[0].noteId}" data-note-id="${list[0].noteId}">Open note</a>`
+          : `<b>${list.length} arrival reminders here</b>` +
+            `<ul class="map-stack-list">` +
+            list
+              .map(
+                (r) =>
+                  `<li><a href="#${r.noteId}" data-note-id="${r.noteId}">` +
+                  `${escapeHtml(r.title || 'Untitled')}</a> · ${r.radiusM || 250} m</li>`
+              )
+              .join('') +
+            `</ul>`;
+      L.marker([lat, lon], {
+        icon: L.divIcon({
+          className: 'map-rem-icon',
+          html: `<span>${list.length === 1 ? '🔔' : list.length}</span>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+          popupAnchor: [0, -14],
+        }),
+      })
+        .bindPopup(popup)
+        .addTo(mapMarkers);
+    });
   }
 
   // Metres per screen pixel at the map's current zoom and centre latitude.
@@ -3003,11 +3288,16 @@
   // viewer's own position (then the whole world) when there are none. Kept out
   // of drawMapMarkers so re-bucketing on zoom doesn't yank the view around.
   async function centerMapOnNotes() {
-    const geo = allNotesCache.filter(
-      (n) => Number.isFinite(n.lat) && Number.isFinite(n.lon)
-    );
-    if (geo.length > 0) {
-      leafletMap.fitBounds(geo.map((n) => [n.lat, n.lon]), { padding: [40, 40], maxZoom: 16 });
+    const pts = allNotesCache
+      .filter((n) => Number.isFinite(n.lat) && Number.isFinite(n.lon))
+      .map((n) => [n.lat, n.lon]);
+    (alarms || []).forEach((a) => {
+      if (a.kind === 'location' && Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
+        pts.push([a.lat, a.lon]);
+      }
+    });
+    if (pts.length > 0) {
+      leafletMap.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
       return;
     }
     const here = await getLocation();
@@ -3026,8 +3316,14 @@
     });
   }
 
-  async function openMap() {
+  // While set, the next map background click is captured as a location pick
+  // (for the alarm editor's "Pick on map") instead of doing nothing.
+  let mapPick = null;
+
+  async function openMap(opts = {}) {
     mapOverlay.classList.remove('hidden');
+    mapPick = opts.pick ? { onPick: opts.onPick || null, onClose: opts.onClose || null } : null;
+    mapPickBanner.classList.toggle('hidden', !mapPick);
 
     if (!leafletMap) {
       leafletMap = L.map('map');
@@ -3041,6 +3337,14 @@
       // Re-bucket the stacks for the new zoom (fires once per zoom gesture,
       // after the animation settles).
       leafletMap.on('zoomend', () => { drawMapMarkers(); });
+
+      // Pick mode: a tap on the map hands its coords back and closes.
+      leafletMap.on('click', (e) => {
+        if (!mapPick) return;
+        const cb = mapPick.onPick;
+        if (cb) cb({ lat: e.latlng.lat, lon: e.latlng.lng });
+        closeMap();
+      });
 
       mapEl.addEventListener('click', (e) => {
         const a = e.target.closest('a[data-note-id]');
@@ -3062,9 +3366,13 @@
 
   function closeMap() {
     mapOverlay.classList.add('hidden');
+    mapPickBanner.classList.add('hidden');
+    const onClose = mapPick && mapPick.onClose;
+    mapPick = null;
+    if (onClose) onClose();
   }
 
-  mapBtn.addEventListener('click', openMap);
+  mapBtn.addEventListener('click', () => openMap());
   mapOverlayClose.addEventListener('click', closeMap);
   mapOverlay.addEventListener('click', (e) => {
     if (e.target === mapOverlay) closeMap();

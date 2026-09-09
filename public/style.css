@@ -482,6 +482,68 @@ button:hover { filter: brightness(1.05); }
   color: var(--alarm-contrast);
 }
 
+/* Time / Place segmented toggle at the top of the reminder editor. */
+.alarm-kind-row {
+  display: flex;
+  gap: 0.3rem;
+  margin-bottom: 0.75rem;
+}
+
+.alarm-kind-btn {
+  flex: 1 1 0;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.alarm-kind-btn.active {
+  background: var(--alarm);
+  border-color: var(--alarm);
+  color: var(--alarm-contrast);
+}
+
+.alarm-place-hint {
+  margin: 0 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.alarm-place-loc {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.alarm-place-loc button { flex: 1 1 0; }
+
+.alarm-loc-readout {
+  font-size: 0.8rem;
+  color: var(--muted);
+  word-break: break-all;
+  margin-bottom: 0.75rem;
+}
+
+.alarm-radius-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.alarm-radius-label select {
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
 .alarm-popup-item {
   display: flex;
   align-items: center;
@@ -1205,6 +1267,37 @@ button:hover { filter: brightness(1.05); }
 }
 
 .map-stack-list li { margin: 0.15rem 0; }
+
+/* Location-reminder marker: an amber badge (🔔, or a count when several stack). */
+.map-rem-icon span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: var(--shadow);
+  background: #e8590c;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.map-pick-banner {
+  position: absolute;
+  top: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 600;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  padding: 0.4rem 0.8rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+}
 
 .picker h2 {
   margin: 0 0 0.75rem 0;

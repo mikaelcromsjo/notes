@@ -181,7 +181,22 @@ CREATE INDEX idx_reminders_due ON reminders(next_at) WHERE next_at IS NOT NULL;
    Open-in-app / Insights buttons. `handleDeepLink()` in `app.js` opens the
    agenda/insights overlay from `/?d=agenda` / `/?d=insights`.
 6. **[S] Location reminders** (in-app / foreground only) — full background
-   geofence deferred to the Domain 7 wrapper.
+   geofence deferred to the Domain 7 wrapper. ✅ DONE (2026-09-09) —
+   `reminders` gains `kind` ('time'|'location'), `lat`, `lon`, `radius_m`
+   (idempotent ALTERs). A location reminder sits armed with `next_at` NULL;
+   `public/app.js`'s foreground `watchPosition` (runs only while ≥1 location
+   reminder exists) POSTs `/api/alarms/:id/arrive` on an outside→inside radius
+   crossing, which stamps `next_at = now` (guarded against re-fire while pending
+   / snoozed) so the normal triggered + push path takes over; `/ack` clears it.
+   `parseSchedule` branches on `kind`; scheduler + `agenda.js` thread `kind`
+   through; `sw.js` shows a 📍 "you're near here" push. Alarm editor gets a
+   Time/Place toggle (radius select + "Use current location" / "Pick on map",
+   the latter reusing the fullscreen map overlay in a pick mode). Map draws each
+   location reminder as an amber radius circle + 🔔 marker, bucketed like note
+   pins so overlapping ones list together. Agenda shows a "Places" section for
+   armed-not-ringing ones; triggered ones fall into Overdue. **This closes the
+   beta scope of Domain 5.** Server-verified on a DB copy; needs a browser pass
+   (geofence needs a real device).
 
 ## 5. Dependencies
 

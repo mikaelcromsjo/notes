@@ -8,8 +8,8 @@ const db = require('./db');
 // most of the user's reminders, else UTC.
 
 const remindersStmt = db.prepare(
-  `SELECT r.id, r.note_id, r.time, r.days, r.date, r.tz, r.snooze_until, r.next_at,
-          n.title
+  `SELECT r.id, r.note_id, r.kind, r.time, r.days, r.date, r.radius_m, r.tz,
+          r.snooze_until, r.next_at, n.title
    FROM reminders r JOIN notes n ON n.id = r.note_id
    WHERE r.user_id = ? AND n.status != 'deleted'`
 );
@@ -84,7 +84,9 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
       id: r.id,
       noteId: r.note_id,
       title: r.title,
+      kind: r.kind || 'time',
       time: r.time,
+      radiusM: r.radius_m,
       dueAt: dueIso,
       snoozed: !!snoozed,
     };

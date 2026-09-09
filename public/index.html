@@ -102,6 +102,7 @@
   <div id="map-overlay" class="overlay hidden">
     <div class="map-fullscreen">
       <button id="map-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <div id="map-pick-banner" class="map-pick-banner hidden">Tap the map to set the reminder location</div>
       <div id="map-status" class="map-status"></div>
       <div class="map-modes" id="map-modes">
         <button data-mode="off">Plain</button>
@@ -150,13 +151,35 @@
 
   <div id="alarm-overlay" class="overlay hidden">
     <div class="picker alarm-editor">
-      <h2>Alarm</h2>
-      <input type="time" id="alarm-time-input" class="alarm-time-input" />
-      <div class="alarm-repeat-label">Repeat</div>
-      <div class="alarm-days-row" id="alarm-days-row"></div>
-      <div id="alarm-date-wrap">
-        <div class="picker-divider">one-time on</div>
-        <input type="date" id="alarm-date-input" />
+      <h2>Reminder</h2>
+      <div class="alarm-kind-row" id="alarm-kind-row">
+        <button type="button" data-kind="time" class="alarm-kind-btn active">🕑 Time</button>
+        <button type="button" data-kind="location" class="alarm-kind-btn">📍 Place</button>
+      </div>
+      <div id="alarm-time-fields">
+        <input type="time" id="alarm-time-input" class="alarm-time-input" />
+        <div class="alarm-repeat-label">Repeat</div>
+        <div class="alarm-days-row" id="alarm-days-row"></div>
+        <div id="alarm-date-wrap">
+          <div class="picker-divider">one-time on</div>
+          <input type="date" id="alarm-date-input" />
+        </div>
+      </div>
+      <div id="alarm-place-fields" class="hidden">
+        <p class="alarm-place-hint">Remind me when I arrive here.</p>
+        <div class="alarm-place-loc">
+          <button type="button" id="alarm-loc-current" class="secondary">Use current location</button>
+          <button type="button" id="alarm-loc-pick" class="secondary">Pick on map</button>
+        </div>
+        <div id="alarm-loc-readout" class="alarm-loc-readout">No location set</div>
+        <label class="alarm-radius-label">Radius
+          <select id="alarm-radius-input">
+            <option value="100">100 m</option>
+            <option value="250" selected>250 m</option>
+            <option value="500">500 m</option>
+            <option value="1000">1 km</option>
+          </select>
+        </label>
       </div>
       <div class="picker-actions">
         <button id="alarm-save-btn">Save</button>

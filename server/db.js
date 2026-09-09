@@ -287,6 +287,25 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (next_at) WHERE next_at IS NOT NULL;
 `);
 
+// kind='location': a geofence reminder rather than a clock one. time/days/date
+// are unused (time stored as ''); lat/lon/radius_m describe a circle. It sits
+// armed with next_at NULL; the client's foreground watchPosition POSTs
+// /api/alarms/:id/arrive on an outside->inside crossing, which stamps next_at =
+// now so the normal "triggered / push" path fires. ack clears next_at again.
+const reminderColumns = db.prepare('PRAGMA table_info(reminders)').all();
+if (!reminderColumns.some((c) => c.name === 'kind')) {
+  db.exec("ALTER TABLE reminders ADD COLUMN kind TEXT NOT NULL DEFAULT 'time'");
+}
+if (!reminderColumns.some((c) => c.name === 'lat')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN lat REAL');
+}
+if (!reminderColumns.some((c) => c.name === 'lon')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN lon REAL');
+}
+if (!reminderColumns.some((c) => c.name === 'radius_m')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN radius_m INTEGER');
+}
+
 // One-time backfill of every armed notes.alarm_* row into reminders. Shares the
 // user_version counter with the FTS rebuild above (1 = FTS built); to force
 // either again bump past 2 and adjust the matching guard.
