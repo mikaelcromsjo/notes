@@ -84,6 +84,11 @@
   const accountCopyBtn = document.getElementById('account-copy-btn');
   const accountResetWidgetBtn = document.getElementById('account-reset-widget-btn');
   const accountSwitchBtn = document.getElementById('account-switch-btn');
+  const accountDeleteBtn = document.getElementById('account-delete-btn');
+  const exportBtn = document.getElementById('export-btn');
+  const restoreBtn = document.getElementById('restore-btn');
+  const restoreFile = document.getElementById('restore-file');
+  const restoreStatus = document.getElementById('restore-status');
   const accountCloseBtn = document.getElementById('account-close-btn');
   const importFormat = document.getElementById('import-format');
   const importFile = document.getElementById('import-file');
@@ -3663,6 +3668,73 @@
     if (!(await confirmDialog('Sign out and sign in as someone else?', { confirmLabel: 'Sign out' }))) return;
     await api.logout();
     location.reload();
+  });
+
+  exportBtn.addEventListener('click', () => {
+    // Same-origin GET; the response is Content-Disposition: attachment so the
+    // browser downloads it without navigating away from the app.
+    exportBtn.disabled = true;
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = '/api/account/export';
+    document.body.appendChild(iframe);
+    toast('Preparing your export…');
+    setTimeout(() => {
+      iframe.remove();
+      exportBtn.disabled = false;
+    }, 8000);
+  });
+
+  restoreBtn.addEventListener('click', () => restoreFile.click());
+  restoreFile.addEventListener('change', async () => {
+    const file = restoreFile.files[0];
+    if (!file) return;
+    restoreFile.value = '';
+    const ok = await confirmDialog(
+      `Restore from "${file.name}"? This replaces every note, link, tab, reminder and attachment in this account with the backup. What's here now is deleted.`,
+      { confirmLabel: 'Replace everything', danger: true }
+    );
+    if (!ok) return;
+    restoreBtn.disabled = true;
+    restoreStatus.textContent = 'Restoring…';
+    try {
+      const fd = new FormData();
+      fd.set('file', file);
+      const res = await fetch('/api/account/import', { method: 'POST', body: fd });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        restoreStatus.textContent = body.error || 'Restore failed.';
+        return;
+      }
+      const r = body.restored || {};
+      restoreStatus.textContent = `Restored ${r.notes || 0} notes, ${r.links || 0} links, ${r.reminders || 0} reminders, ${r.attachments || 0} files. Reloading…`;
+      setTimeout(() => location.reload(), 1200);
+    } catch {
+      restoreStatus.textContent = 'Restore failed.';
+    } finally {
+      restoreBtn.disabled = false;
+    }
+  });
+
+  accountDeleteBtn.addEventListener('click', async () => {
+    const ok = await confirmDialog(
+      'Delete your account and every note, link, reminder and file in it? We’ll email you a link to confirm. This cannot be undone.',
+      { confirmLabel: 'Email me the link', danger: true }
+    );
+    if (!ok) return;
+    accountDeleteBtn.disabled = true;
+    try {
+      const res = await fetch('/api/account/delete-request', { method: 'POST' });
+      if (res.ok) {
+        toast('Check your email for a link to confirm deletion.');
+      } else {
+        toast('Could not start account deletion.');
+      }
+    } catch {
+      toast('Could not start account deletion.');
+    } finally {
+      accountDeleteBtn.disabled = false;
+    }
   });
 
   accountResetWidgetBtn.addEventListener('click', async () => {

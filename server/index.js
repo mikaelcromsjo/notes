@@ -20,6 +20,7 @@ const widgetRouter = require('./routes/widget');
 const historyRouter = require('./routes/history');
 const importRouter = require('./routes/import');
 const shareRouter = require('./routes/share');
+const accountRouter = require('./routes/account');
 const alarmScheduler = require('./alarm-scheduler');
 const digestScheduler = require('./digest-scheduler');
 
@@ -97,6 +98,11 @@ app.use('/api/auth', authRouter);
 // Token-authed (widget_token query param), so these sit above the cookie gate.
 app.use('/api/widget', widgetRouter);
 app.use('/digest', digestPageRouter);
+
+// Account export + deletion. `delete-confirm` is authed by its emailed one-time
+// token (not the cookie), so the router sits above the 401 gate; its cookie-only
+// routes re-check req.userId themselves.
+app.use('/api/account', accountRouter);
 
 // Everything below the session endpoint needs a user.
 app.use('/api', (req, res, next) => {

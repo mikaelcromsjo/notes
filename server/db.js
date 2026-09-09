@@ -195,6 +195,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_login_tokens_email ON login_tokens (email);
 `);
 
+// purpose: 'login' (default) | 'delete-account'. A 'delete-account' token is
+// minted by POST /api/account/delete-request and, when its emailed link is
+// opened, triggers the irreversible account wipe instead of signing in.
+const loginTokenCols = db.prepare('PRAGMA table_info(login_tokens)').all();
+if (!loginTokenCols.some((c) => c.name === 'purpose')) {
+  db.exec("ALTER TABLE login_tokens ADD COLUMN purpose TEXT NOT NULL DEFAULT 'login'");
+}
+
 // notes/links/tabs predate multi-user — add the owner column idempotently.
 for (const table of ['notes', 'links', 'tabs']) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();

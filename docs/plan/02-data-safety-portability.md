@@ -143,7 +143,74 @@ throwaway box and the timing recorded.**
 3. **[M] Restore runbook written and rehearsed** on a throwaway box; record RTO.
 4. **[S] `/healthz` + monitoring/alerts** (healthchecks.io + mailer).
 5. **[M] `GET /api/account/export`** (sync zip first; async job if needed) + UI.
+   ✅ DONE (2026-09-09).
+
+   **What shipped:** `server/routes/account.js` `GET /api/account/export` —
+   builds a `.zip` in memory with `adm-zip` (already a dep), scoped by
+   `req.userId`, 3/hour in-memory rate limit, `Content-Disposition: attachment`.
+   Contents: `notes/<id>-<slug>.md` (YAML front-matter `title`/`id`/`created`/
+   `updated`/`type`/`status`/`lat`/`lon`, body with inline `](/uploads/` rewritten
+   to `](attachments/`, an attachment embed line for image/audio notes, and a
+   `## Links` list of `- [[Neighbour title]]` for every edge — re-importable by
+   the Domain 3 M2 Markdown-folder importer, which resolves `[[wiki]]` by title);
+   `attachments/<file>` (every `/uploads/` file a note references, copied);
+   `data.json` (every column of every owned row across notes/links/tabs/reminders/
+   nav_events/history + the user row & digest prefs — the GDPR "everything we
+   hold"); `README.txt`. Client: **Settings → Import & export → "Download my data
+   (.zip)"** triggers it via a hidden iframe (no SPA navigation). Round-trips
+   with the importer for text + links + inline images; attachment-type notes come
+   back as text-with-embed (lossy but intentional — `data.json` is the lossless
+   copy). Server-verified on a DB copy; needs a browser download + re-import pass.
+
+   **Lossless restore added (2026-09-09):** `POST /api/account/import` (multer
+   memory, 60 MB) takes the export `.zip` (or a bare `data.json`) and **replaces
+   this account's whole graph** from the snapshot — founder wanted export→import
+   to reproduce an account exactly, which the per-note Markdown path never could
+   (ambiguous `[[title]]` resolution, synthesised folder/tag hubs, attachment
+   notes flattened, no nav/history/tabs). One transaction wipes the caller's
+   `reminders`/`nav_events`/`history`/`tabs`/`links`/`notes`, then re-inserts
+   every row from `data.json` with **freshly assigned note ids** and an `old→new`
+   map applied to `links.note_a/b`, `tabs.note_id`, `reminders.note_id`,
+   `nav_events.from/to` (events with an unmappable NOT-NULL `to_note_id` are
+   dropped), `notes.created_from_note_id` (2nd pass) and the id-bearing
+   `history.payload` keys (`noteId/a/b/to/from/card`). Bundled `attachments/*`
+   are re-written under `/uploads/` with new random names (extension allowlist
+   re-checked); every `/uploads/<old>` / `attachments/<old>` ref in note content
+   + `attachment_path` is rewritten; the replaced graph's orphan upload files are
+   unlinked after commit. `data.json` `user.digest` prefs are COALESCE'd onto the
+   `users` row; push subscriptions + login tokens untouched. Rollback-safe (FS
+   writes happen only after the DB commit). Client: **Settings → Import & export
+   → "Restore from backup…"** (danger) → hidden file input → `confirmDialog` →
+   `POST /api/account/import` → shows restored counts + reloads. Verified on a DB
+   copy: export → delete 5 notes + add junk → restore ⇒ identical row counts,
+   junk gone, FK + `integrity_check` clean, a sample note's neighbour set
+   preserved, attachment on disk; bare-`data.json`, garbage (400) and no-session
+   (401) paths correct. Needs a browser pass.
 6. **[M] `DELETE /api/account`** with re-auth + soft-delete grace + upload purge.
+   ✅ DONE (2026-09-09) — **emailed-link re-auth; no soft-delete grace (hard
+   delete, immediate).**
+
+   **What shipped:** `login_tokens` gains `purpose TEXT DEFAULT 'login'`
+   (idempotent ALTER; `/api/auth/callback` now refuses a non-`login` token).
+   `POST /api/account/delete-request` (cookie-authed, 3/30min rate limit) mints a
+   `purpose='delete-account'` token (15-min TTL, sha256-stored like login tokens)
+   and emails a **red-button** confirmation link via `server/mailer.js` (logs it
+   if the mailer is unconfigured). `GET /api/account/delete-confirm?token=`
+   (mounted **above** the `/api` 401 gate — the token is the auth): validates +
+   atomically consumes the token, then in one transaction deletes every owned row
+   in FK-safe order (`reminders`, `import_source`, `import_jobs`, `nav_events`,
+   `history`, `push_subscriptions`, `tabs`, `links`, `notes`, `sessions`),
+   `login_tokens` by email, then the `users` row; unlinks the notes' upload
+   files; clears the session + legacy cookies; returns a styled result page.
+   **App-level cascade, not the milestone-1 FK rebuild** — deliberately avoided
+   the scary `notes` table-rebuild while there are still no off-box backups
+   (milestone 2). Client: **Settings → Account → Danger zone → "Delete account…"**
+   → `confirmDialog` → `POST /delete-request` → toast "Check your email".
+   Server-verified end-to-end on a DB copy (throwaway user wiped, main user +
+   FKs + `integrity_check` intact, token single-use). **Follow-ups:** the
+   milestone-1 FK-cascade rebuild is still the eventual clean-up; no 14-day grace
+   / undelete; `login_tokens.purpose` check not added to any other consumer (only
+   auth callback + this route read it).
 7. **[L] Offline outbox + conflict handling** for notes/links (`rev` column,
    `PATCH` merge, `sw.js` flush, IndexedDB outbox).
 8. **[S] Weekly automated restore-verify + `integrity_check`.**

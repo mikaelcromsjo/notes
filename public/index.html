@@ -208,8 +208,8 @@
         <nav class="settings-nav" id="settings-nav">
           <button type="button" class="settings-nav-item active" data-section="account">Account</button>
           <button type="button" class="settings-nav-item" data-section="layout">Header rows</button>
-          <button type="button" class="settings-nav-item" data-section="digest">Digest</button>
-          <button type="button" class="settings-nav-item" data-section="import">Import</button>
+          <button type="button" class="settings-nav-item" data-section="integrate">Integrate</button>
+          <button type="button" class="settings-nav-item" data-section="portability">Import &amp; export</button>
         </nav>
 
         <div class="settings-panels">
@@ -217,15 +217,14 @@
             <h3>Account</h3>
             <p class="settings-desc" id="account-email"></p>
 
-            <label class="settings-label" for="account-widget-url">Home-screen widget feed URL</label>
-            <input type="text" id="account-widget-url" readonly />
             <div class="settings-btn-row">
-              <button id="account-copy-btn" class="secondary">Copy URL</button>
-              <button id="account-reset-widget-btn" class="secondary">Reset widget URL</button>
+              <button id="account-switch-btn" class="secondary">Sign in as someone else</button>
             </div>
 
-            <div class="settings-btn-row settings-btn-row-spaced">
-              <button id="account-switch-btn" class="secondary">Sign in as someone else</button>
+            <label class="settings-label settings-btn-row-spaced">Danger zone</label>
+            <p class="settings-desc">Deleting your account permanently removes every note, link, reminder and uploaded file. We email you a link to confirm — it cannot be undone. Export your data first if you might want it.</p>
+            <div class="settings-btn-row">
+              <button id="account-delete-btn" class="secondary danger">Delete account…</button>
             </div>
           </section>
 
@@ -270,11 +269,19 @@
             </label>
           </section>
 
-          <section class="settings-section" data-section="digest">
-            <h3>Digest</h3>
-            <p class="settings-desc">A scheduled push or email of your agenda — what's overdue, due soon, flagged to-do, and open tasks.</p>
+          <section class="settings-section" data-section="integrate">
+            <h3>Integrate</h3>
 
-            <label class="settings-label" for="digest-cadence">Send me my agenda</label>
+            <label class="settings-label" for="account-widget-url">Home-screen widget feed</label>
+            <p class="settings-desc">A read-only URL a home-screen widget app can poll for your current note and what's due. Treat it like a password.</p>
+            <input type="text" id="account-widget-url" readonly />
+            <div class="settings-btn-row">
+              <button id="account-copy-btn" class="secondary">Copy URL</button>
+              <button id="account-reset-widget-btn" class="secondary">Reset URL</button>
+            </div>
+
+            <label class="settings-label settings-btn-row-spaced" for="digest-cadence">Agenda digest</label>
+            <p class="settings-desc">A scheduled push or email of your agenda — what's overdue, due soon, flagged to-do, and open tasks.</p>
             <div class="settings-inline-row">
               <select id="digest-cadence">
                 <option value="off">Off</option>
@@ -295,11 +302,11 @@
             </div>
           </section>
 
-          <section class="settings-section" data-section="import">
-            <h3>Import</h3>
-            <p class="settings-desc">Bring notes in from another app. A re-import updates matched notes instead of duplicating them.</p>
+          <section class="settings-section" data-section="portability">
+            <h3>Import &amp; export</h3>
 
-            <label class="settings-label" for="import-format">Source</label>
+            <label class="settings-label" for="import-format">Import</label>
+            <p class="settings-desc">Bring notes in from another app. A re-import updates matched notes instead of duplicating them.</p>
             <div class="settings-inline-row">
               <select id="import-format">
                 <option value="obsidian">Obsidian vault</option>
@@ -311,6 +318,15 @@
             <div class="settings-btn-row">
               <button id="import-run-btn" class="secondary">Import (.zip or .md)</button>
             </div>
+
+            <label class="settings-label settings-btn-row-spaced" for="export-btn">Backup &amp; restore</label>
+            <p class="settings-desc">Download a full backup .zip: readable Markdown per note, the image/audio files, and <code>data.json</code>. <strong>Restore</strong> puts an account back exactly as it was — every note, link, tab, reminder, attachment and navigation stat — by replacing what's here now.</p>
+            <div class="settings-btn-row">
+              <button id="export-btn" class="secondary">Download backup (.zip)</button>
+              <button id="restore-btn" class="secondary danger">Restore from backup…</button>
+              <input type="file" id="restore-file" class="hidden" accept=".zip,.json" />
+            </div>
+            <p class="settings-desc" id="restore-status"></p>
           </section>
         </div>
       </div>

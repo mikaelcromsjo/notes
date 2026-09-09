@@ -7,7 +7,7 @@
   --accent: #4f6df5;
   --accent-contrast: #ffffff;
   --danger: #e0575b;
-  --pin: #c9821a;
+  --pin: #5f6aff;
   --pin-contrast: #ffffff;
   --todo: #0d9488;
   --todo-contrast: #ffffff;
@@ -201,6 +201,11 @@ button.secondary {
   border-color: var(--border);
 }
 
+button.secondary.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+}
+
 button:hover { filter: brightness(1.05); }
 
 .header-controls {
@@ -369,7 +374,7 @@ button:hover { filter: brightness(1.05); }
 
 /* --- Alarms --- */
 :root {
-  --alarm: #d9863d;
+  --alarm: #55235d;
   --alarm-contrast: #ffffff;
 }
 

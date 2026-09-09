@@ -36,7 +36,7 @@ const insertToken = db.prepare(
    VALUES (?, ?, ?, ?)`
 );
 const findToken = db.prepare(
-  'SELECT token_hash, email, expires_at, consumed_at FROM login_tokens WHERE token_hash = ?'
+  'SELECT token_hash, email, expires_at, consumed_at, purpose FROM login_tokens WHERE token_hash = ?'
 );
 const consumeToken = db.prepare(
   'UPDATE login_tokens SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL'
@@ -101,7 +101,7 @@ router.get('/callback', (req, res) => {
   if (!token) return fail();
 
   const row = findToken.get(sha256(token));
-  if (!row || row.consumed_at) return fail();
+  if (!row || row.consumed_at || (row.purpose || 'login') !== 'login') return fail();
   if (Date.parse(row.expires_at) < Date.now()) return fail();
 
   const consumed = consumeToken.run(new Date().toISOString(), row.token_hash);
