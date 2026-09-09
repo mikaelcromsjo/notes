@@ -194,6 +194,1022 @@
     });
   }
 
+  // --- Offline support. The service worker serves the shell; this layer mirrors
+  // note/link data into IndexedDB on every successful read and serves it back
+  // when a fetch fails (phase 1), and queues writes made offline in an `outbox`
+  // that drains, in order, once the connection returns (phase 2). ---
+  const store = window.NicoStore && window.NicoStore.available ? window.NicoStore : null;
+
+  // Counts surfaced by the pill; kept current by refreshPending().
+  let pendingCount = 0;
+  let failedCount = 0;
+  let syncing = false;
+
+  const net = {
+    _pill: null,
+    get online() {
+      return navigator.onLine;
+    },
+    pill() {
+      if (!this._pill) {
+        const el = document.createElement('button');
+        el.id = 'net-pill';
+        el.type = 'button';
+        el.className = 'net-pill hidden';
+        el.addEventListener('click', () => {
+          if (pendingCount || failedCount) openSyncPanel();
+        });
+        const host = document.querySelector('.header-controls') || document.querySelector('.topbar');
+        if (host) host.insertBefore(el, host.firstChild);
+        this._pill = el;
+      }
+      return this._pill;
+    },
+    render() {
+      const el = this.pill();
+      let text = '';
+      let cls = 'net-pill';
+      if (!this.online) {
+        text = pendingCount ? `⚡ Offline · ${pendingCount} unsynced` : '⚡ Offline';
+        cls += ' net-pill--offline';
+      } else if (syncing) {
+        text = '↻ Syncing…';
+        cls += ' net-pill--syncing';
+      } else if (failedCount) {
+        text = `⚠ ${failedCount} need${failedCount === 1 ? 's' : ''} attention`;
+        cls += ' net-pill--failed';
+      } else if (pendingCount) {
+        text = `${pendingCount} unsynced`;
+        cls += ' net-pill--syncing';
+      } else {
+        el.className = 'net-pill hidden';
+        el.textContent = '';
+        return;
+      }
+      el.className = cls + ((pendingCount || failedCount) ? ' net-pill--clickable' : '');
+      el.textContent = text;
+    },
+  };
+
+  // Note rows arrive in two shapes: the list (GET /api/notes, no `content`) and
+  // the full row (GET /api/notes/:id). Merge so a list refresh never drops the
+  // `content` a prior full read cached.
+  const cache = {
+    async mergeNotes(rows) {
+      if (!store) return;
+      try {
+        // One transaction (read → clear → write) so a concurrent flush write
+        // can't be wiped by the clear.
+        await store.tx('notes', 'readwrite', async (t) => {
+          const os = t.objectStore('notes');
+          const existing = new Map(
+            (await store.reqAsPromise(os.getAll())).map((n) => [n.id, n])
+          );
+          const listed = new Set(rows.map((r) => r.id));
+          os.clear();
+          for (const r of rows) {
+            const prev = existing.get(r.id);
+            // A note with an unsynced local edit stays fully local until its
+            // outbox entry lands; otherwise merge (list rows carry no `content`,
+            // so the spread keeps a cached body) and track the conflict base.
+            os.put(prev && prev._dirty ? prev : { ...prev, ...r, _serverUpdatedAt: r.updated_at });
+          }
+          // Keep local-only tmp: rows the server list can't know about yet.
+          for (const n of existing.values()) {
+            if (!listed.has(n.id) && typeof n.id === 'string') os.put(n);
+          }
+        });
+      } catch {
+        /* storage unavailable — run online-only */
+      }
+    },
+    // A note straight from the server (full row): authoritative, so it clears
+    // the local-edit flag unless the outbox still holds an entry for it.
+    async putNote(note, { fromServer = true } = {}) {
+      if (!store || !note || note.id == null) return;
+      try {
+        const prev = await store.get('notes', note.id);
+        const next = { ...prev, ...note };
+        if (fromServer) {
+          next._serverUpdatedAt = note.updated_at;
+          next._dirty = outbox.hasPendingFor(note.id);
+        }
+        await store.put('notes', next);
+      } catch {
+        /* ignore */
+      }
+    },
+    async cachedList() {
+      if (!store) return [];
+      try {
+        return (await store.getAll('notes')).filter((n) => n.status !== 'deleted');
+      } catch {
+        return [];
+      }
+    },
+    async cachedNote(id) {
+      if (!store) return null;
+      try {
+        const key = typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id;
+        return (await store.get('notes', key)) || null;
+      } catch {
+        return null;
+      }
+    },
+    async putLinks(rows) {
+      if (!store) return;
+      try {
+        await store.tx('links', 'readwrite', async (t) => {
+          const os = t.objectStore('links');
+          // Keep any local-only link (a tmp: endpoint, or one added offline and
+          // not yet synced) the server list doesn't know about yet.
+          const local = (await store.reqAsPromise(os.getAll())).filter((l) => l._dirty);
+          const seen = new Set();
+          os.clear();
+          for (const r of rows) {
+            const key = linkKey(r.a, r.b);
+            seen.add(key);
+            os.put({ key, a: r.a, b: r.b, created_at: r.created_at });
+          }
+          for (const l of local) if (!seen.has(l.key)) os.put(l);
+        });
+      } catch {
+        /* ignore */
+      }
+    },
+    async cachedLinks() {
+      if (!store) return [];
+      try {
+        return await store.getAll('links');
+      } catch {
+        return [];
+      }
+    },
+    // Rebuild the { parent, neighbors, links, linkCount } shape loadNeighbors
+    // wants, from the local link + note mirror. No nav_events offline, so the
+    // ranking degrades to link-recency (exactly the server's cold-start order)
+    // and `parent` falls back to recorded provenance.
+    async localNeighbors(id) {
+      const nid = typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id;
+      const [links, notesArr] = [await this.cachedLinks(), await this.cachedList()];
+      const byId = new Map(notesArr.map((n) => [n.id, n]));
+      const rows = links
+        .filter((l) => !l._deleted && (l.a === nid || l.b === nid))
+        .map((l) => ({ other: l.a === nid ? l.b : l.a, at: l.created_at }))
+        .sort((x, y) => String(y.at).localeCompare(String(x.at)))
+        .map(({ other }) => byId.get(other))
+        .filter((n) => n && n.status !== 'deleted')
+        .map((n) => ({ id: n.id, title: n.title, type: n.type, status: n.status }));
+
+      const center = byId.get(nid);
+      let parent = null;
+      if (center && center.created_from_note_id) {
+        parent = rows.find((r) => r.id === center.created_from_note_id) || null;
+      }
+      const parentId = parent ? parent.id : null;
+      const ordered = rows.filter((r) => r.id !== parentId);
+      // 'done' neighbours sink, same as the server.
+      ordered.sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0));
+      const neighbors = ordered.slice(0, parent ? 7 : 8);
+      return { parent, neighbors, links: rows, linkCount: rows.length };
+    },
+    localSearch(q) {
+      const ql = String(q || '').toLowerCase().trim();
+      if (!ql) return [];
+      return allNotesCache
+        .filter(
+          (n) =>
+            (n.title || '').toLowerCase().includes(ql) ||
+            (n.content || '').toLowerCase().includes(ql)
+        )
+        .slice(0, 12)
+        .map((n) => ({ id: n.id, title: n.title, type: n.type, snippet: '' }));
+    },
+  };
+
+  window.addEventListener('online', () => reconnect());
+  window.addEventListener('offline', () => net.render());
+
+  // Back online: drain whatever queued while away, then pull authoritative
+  // state (which also picks up edits made on other devices).
+  async function reconnect() {
+    net.render();
+    await flushOutbox();
+    if (!syncing) await resyncFromServer();
+    if (currentUser) checkAlarms({ popup: false });
+  }
+
+  async function resyncFromServer() {
+    if (!net.online || !currentUser) return;
+    try {
+      allNotesCache = await api.listNotes();
+      await syncLinks();
+      renderPinbar();
+      if (currentId != null) {
+        await loadNeighbors(currentId);
+        await refreshColorData();
+        await render();
+      }
+    } catch {
+      /* transient — the next online event or reload will catch up */
+    }
+  }
+
+  async function syncLinks() {
+    if (!net.online) return;
+    try {
+      const rows = await fetch('/api/links').then((r) => (r.ok ? r.json() : null));
+      if (rows) await cache.putLinks(rows);
+    } catch {
+      /* offline — keep the mirror we have */
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Write queue (phase 2). A mutation made while offline (or one whose request
+  // drops mid-flight) is applied optimistically to the IndexedDB mirror and
+  // appended to the `outbox` store; flushOutbox() replays entries in order once
+  // the connection is back. Offline-created notes get a `tmp:<id>` id that is
+  // rewritten to the real server id on create-sync (remapId).
+  // ---------------------------------------------------------------------------
+
+  function genId() {
+    return (crypto.randomUUID && crypto.randomUUID()) ||
+      `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`;
+  }
+  const isTmp = (v) => typeof v === 'string' && v.startsWith('tmp:');
+  const anyTmp = (...ids) => ids.some(isTmp);
+
+  // Canonical local link key: numeric pairs keep the server's a<b ordering;
+  // anything involving a tmp id sorts lexically. Consistent either way.
+  function linkKey(a, b) {
+    if (typeof a === 'number' && typeof b === 'number') return a < b ? `${a}:${b}` : `${b}:${a}`;
+    return [String(a), String(b)].sort().join(':');
+  }
+
+  function httpErr(status, msg) {
+    const e = new Error(msg || `HTTP ${status}`);
+    e.httpStatus = status;
+    return e;
+  }
+  async function reqJson(url, method, body) {
+    const opts = { method };
+    if (body !== undefined) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    let res;
+    try {
+      res = await fetch(url, opts);
+    } catch {
+      throw httpErr(0, 'offline'); // network failure — retryable
+    }
+    if (!res.ok) throw httpErr(res.status, `HTTP ${res.status}`);
+    if (res.status === 204) return null;
+    return res.json().catch(() => null);
+  }
+  const postJson = (u, b) => reqJson(u, 'POST', b);
+  const putJson = (u, b) => reqJson(u, 'PUT', b);
+
+  // tmp -> real id map, persisted so a reload mid-sync still resolves.
+  const idmapMem = new Map();
+  async function loadIdmap() {
+    if (!store) return;
+    const m = await store.meta('idmap', {});
+    for (const [k, v] of Object.entries(m || {})) idmapMem.set(k, v);
+  }
+  const idResolve = (id) => (idmapMem.has(id) ? idmapMem.get(id) : id);
+
+  const outbox = {
+    hasPendingFor(id) {
+      return pendingRefs.has(id);
+    },
+  };
+  const pendingRefs = new Set();
+
+  async function refreshPending() {
+    pendingRefs.clear();
+    let all = [];
+    if (store) {
+      try {
+        all = await store.getAll('outbox');
+      } catch {
+        /* ignore */
+      }
+    }
+    pendingCount = all.filter((e) => e.status !== 'failed').length;
+    failedCount = all.filter((e) => e.status === 'failed').length;
+    for (const e of all) for (const r of e.refs || []) pendingRefs.add(r);
+    net.render();
+  }
+
+  // Append a mutation, coalescing with a compatible pending entry where that is
+  // safe (repeated edits to one note, a link then its unlink, …) so the queue
+  // stays short and produces the minimum number of requests.
+  async function enqueue(kind, payload, refs = []) {
+    if (!store) return;
+    const pend = (await store.getAll('outbox')).filter((e) => e.status !== 'failed');
+    const find = (fn) => pend.find(fn);
+
+    if (kind === 'note.update') {
+      const create = find((e) => e.kind === 'note.create' && e.payload.tmpId === payload.id);
+      if (create) {
+        if (payload.title !== undefined) create.payload.title = payload.title;
+        if (payload.content !== undefined) create.payload.content = payload.content;
+        await store.put('outbox', create);
+        return refreshPending();
+      }
+      const up = find((e) => e.kind === 'note.update' && e.payload.id === payload.id);
+      if (up) {
+        if (payload.title !== undefined) up.payload.title = payload.title;
+        if (payload.content !== undefined) up.payload.content = payload.content;
+        up.payload.clientUpdatedAt = payload.clientUpdatedAt; // keep the earliest baseUpdatedAt
+        await store.put('outbox', up);
+        return refreshPending();
+      }
+    } else if (kind === 'note.status') {
+      const prev = find((e) => e.kind === 'note.status' && e.payload.id === payload.id);
+      if (prev) {
+        prev.payload.status = payload.status;
+        await store.put('outbox', prev);
+        return refreshPending();
+      }
+    } else if (kind === 'note.pin' || kind === 'note.unpin') {
+      const opp = kind === 'note.pin' ? 'note.unpin' : 'note.pin';
+      const cancel = find((e) => e.kind === opp && e.payload.id === payload.id);
+      if (cancel) {
+        await store.del('outbox', cancel.seq);
+        return refreshPending();
+      }
+      if (find((e) => e.kind === kind && e.payload.id === payload.id)) return refreshPending();
+    } else if (kind === 'link' || kind === 'unlink') {
+      const samePair = (e) => {
+        const p = e.payload;
+        return (p.a === payload.a && p.b === payload.b) || (p.a === payload.b && p.b === payload.a);
+      };
+      const opp = kind === 'link' ? 'unlink' : 'link';
+      const cancel = find(
+        (e) => e.kind === opp && samePair(e) && !e.payload.rehomeFrom && !payload.rehomeFrom
+      );
+      if (cancel) {
+        await store.del('outbox', cancel.seq);
+        return refreshPending();
+      }
+      if (!payload.rehomeFrom && find((e) => e.kind === kind && samePair(e))) return refreshPending();
+    } else if (kind === 'reminder.update') {
+      const create = find((e) => e.kind === 'reminder.create' && e.payload.tmpId === payload.id);
+      if (create) {
+        create.payload.body = { ...create.payload.body, ...payload.body };
+        await store.put('outbox', create);
+        return refreshPending();
+      }
+      const up = find((e) => e.kind === 'reminder.update' && e.payload.id === payload.id);
+      if (up) {
+        up.payload.body = payload.body;
+        await store.put('outbox', up);
+        return refreshPending();
+      }
+    } else if (
+      kind === 'reminder.ack' ||
+      kind === 'reminder.snooze' ||
+      kind === 'reminder.arrive'
+    ) {
+      const prev = find((e) => e.kind === kind && e.payload.id === payload.id);
+      if (prev) {
+        prev.payload = payload;
+        await store.put('outbox', prev);
+        return refreshPending();
+      }
+    } else if (kind === 'reminder.delete') {
+      // Drop every queued op for this reminder; only send a delete if it was a
+      // real (already-synced) reminder.
+      const wasLocalOnly = Boolean(
+        find((e) => e.kind === 'reminder.create' && e.payload.tmpId === payload.id)
+      );
+      for (const d of pend) {
+        if (
+          d.kind &&
+          d.kind.startsWith('reminder.') &&
+          (d.payload.id === payload.id || d.payload.tmpId === payload.id)
+        ) {
+          await store.del('outbox', d.seq);
+        }
+      }
+      if (wasLocalOnly) return refreshPending();
+    }
+
+    await store.put('outbox', {
+      kind,
+      payload,
+      refs,
+      createdAt: new Date().toISOString(),
+      tries: 0,
+      lastError: null,
+      status: 'pending',
+    });
+    return refreshPending();
+  }
+
+  let flushScheduled = false;
+  async function flushOutbox() {
+    if (syncing || !navigator.onLine || !store || !currentUser) return;
+    syncing = true;
+    net.render();
+    let drainedAny = false;
+    try {
+      for (;;) {
+        const next = (await store.getAll('outbox'))
+          .filter((e) => e.status !== 'failed')
+          .sort((a, b) => a.seq - b.seq)[0];
+        if (!next) break;
+        try {
+          await sendEntry(next);
+          await store.del('outbox', next.seq);
+          drainedAny = true;
+        } catch (err) {
+          const st = err && err.httpStatus;
+          next.tries = (next.tries || 0) + 1;
+          next.lastError = (err && err.message) || 'sync failed';
+          if (next.kind === 'nav' || next.kind === 'reminder.arrive') {
+            await store.del('outbox', next.seq); // best-effort signal — don't surface
+            continue;
+          }
+          if (
+            (next.kind === 'link' ||
+              next.kind === 'unlink' ||
+              next.kind === 'reminder.delete') &&
+            (st === 404 || st === 409)
+          ) {
+            await store.del('outbox', next.seq); // converges / already gone — done
+            continue;
+          }
+          if (st && st >= 400 && st < 500 && st !== 408 && st !== 429) {
+            next.status = 'failed';
+            await store.put('outbox', next);
+            continue; // keep draining the rest
+          }
+          await store.put('outbox', next); // network / 5xx — stop, retry later
+          break;
+        }
+      }
+    } finally {
+      syncing = false;
+      await refreshPending();
+      await reconcileDirty();
+    }
+    if (drainedAny && navigator.onLine) await resyncFromServer();
+  }
+
+  // A note's `_dirty` flag must exactly track "has a pending outbox entry". The
+  // per-write helpers set it; this clears it once the queue no longer holds
+  // anything for that note (putNote can't do it alone — the entry is still in
+  // the store when its own response is being cached).
+  async function reconcileDirty() {
+    if (!store) return;
+    try {
+      for (const n of await store.getAll('notes')) {
+        const want = pendingRefs.has(n.id);
+        if (Boolean(n._dirty) !== want) {
+          n._dirty = want;
+          await store.put('notes', n);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function scheduleFlush() {
+    if (flushScheduled) return;
+    flushScheduled = true;
+    setTimeout(() => {
+      flushScheduled = false;
+      flushOutbox();
+    }, 400);
+  }
+
+  async function sendEntry(e) {
+    const p = e.payload;
+
+    if (e.kind === 'note.create') {
+      const body = { title: p.title, content: p.content || '' };
+      const linkTo = p.linkTo != null ? idResolve(p.linkTo) : null;
+      if (linkTo != null && !isTmp(linkTo)) body.linkTo = linkTo;
+      if (p.lat != null) body.lat = p.lat;
+      if (p.lon != null) body.lon = p.lon;
+      const note = await postJson('/api/notes', body);
+      await remapId(p.tmpId, note.id);
+      await cache.putNote(note);
+      return;
+    }
+
+    if (e.kind === 'note.update') {
+      const id = idResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'note not synced yet');
+      const note = await putJson(`/api/notes/${id}`, {
+        title: p.title,
+        content: p.content,
+        baseUpdatedAt: p.baseUpdatedAt || null,
+        clientUpdatedAt: p.clientUpdatedAt || null,
+      });
+      if (note && note.conflict) await handleConflict(note, p);
+      if (note) delete note.conflict;
+      await cache.putNote(note);
+      return;
+    }
+
+    if (e.kind === 'note.status') {
+      const id = idResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'note not synced yet');
+      await cache.putNote(await putJson(`/api/notes/${id}/status`, { status: p.status }));
+      return;
+    }
+
+    if (e.kind === 'note.pin' || e.kind === 'note.unpin') {
+      const id = idResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'note not synced yet');
+      const note = await reqJson(`/api/notes/${id}/pin`, e.kind === 'note.pin' ? 'PUT' : 'DELETE');
+      await cache.putNote(note);
+      return;
+    }
+
+    if (e.kind === 'link' || e.kind === 'unlink') {
+      const a = idResolve(p.a);
+      const b = idResolve(p.b);
+      if (anyTmp(a, b)) throw httpErr(0, 'note not synced yet');
+      const rf = p.rehomeFrom != null ? idResolve(p.rehomeFrom) : undefined;
+      const rehoming = e.kind === 'link' && rf != null && !isTmp(rf) && rf !== b;
+      await reqJson(
+        '/api/links',
+        e.kind === 'link' ? 'POST' : 'DELETE',
+        rehoming ? { a, b, rehomeFrom: rf } : { a, b }
+      );
+      await mirrorLink(a, b, { removed: e.kind === 'unlink' });
+      if (rehoming) await mirrorLink(rf, b, { removed: true });
+      return;
+    }
+
+    if (e.kind === 'attachment.create') {
+      const parentId = idResolve(p.parentId);
+      if (isTmp(parentId)) throw httpErr(0, 'parent not synced yet');
+      const fd = new FormData();
+      for (const [k, v] of Object.entries(p.fields || {})) fd.set(k, v);
+      if (p.blobKey) {
+        const rec = await store.get('blobs', p.blobKey);
+        if (!rec || !rec.blob) throw httpErr(0, 'upload data lost');
+        fd.set('file', rec.blob, rec.name || 'upload');
+      }
+      let res;
+      try {
+        res = await fetch(`/api/notes/${parentId}/attachments`, { method: 'POST', body: fd });
+      } catch {
+        throw httpErr(0, 'offline');
+      }
+      if (!res.ok) throw httpErr(res.status, `HTTP ${res.status}`);
+      const note = await res.json().catch(() => null);
+      if (p.tmpId && note && note.id != null) {
+        await remapId(p.tmpId, note.id);
+        await cache.putNote(note);
+      }
+      if (p.blobKey) await store.del('blobs', p.blobKey).catch(() => {});
+      return;
+    }
+
+    if (e.kind === 'nav') {
+      const to = idResolve(p.to);
+      if (isTmp(to)) return; // target never synced — drop
+      const from = p.from != null ? idResolve(p.from) : null;
+      await postJson('/api/nav', { from: isTmp(from) ? null : from, to, via: p.via });
+      return;
+    }
+
+    if (e.kind === 'reminder.create') {
+      const noteId = idResolve(p.noteId);
+      if (isTmp(noteId)) throw httpErr(0, 'note not synced yet');
+      const row = await postJson('/api/alarms', { ...p.body, noteId });
+      await remapReminderId(p.tmpId, row.id);
+      await mirrorUpsertAlarm(row);
+      return;
+    }
+    if (e.kind === 'reminder.update') {
+      const id = ridResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
+      await mirrorUpsertAlarm(await putJson(`/api/alarms/${id}`, p.body));
+      return;
+    }
+    if (e.kind === 'reminder.delete') {
+      const id = ridResolve(p.id);
+      if (isTmp(id)) return; // never reached the server
+      await reqJson(`/api/alarms/${id}`, 'DELETE');
+      return;
+    }
+    if (e.kind === 'reminder.ack') {
+      const id = ridResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
+      await postJson(`/api/alarms/${id}/ack`, { at: p.at, nextAt: p.nextAt || null });
+      return;
+    }
+    if (e.kind === 'reminder.snooze') {
+      const id = ridResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
+      await postJson(`/api/alarms/${id}/snooze`, { until: p.until });
+      return;
+    }
+    if (e.kind === 'reminder.arrive') {
+      const id = ridResolve(p.id);
+      if (isTmp(id)) return;
+      await postJson(`/api/alarms/${id}/arrive`, {});
+      return;
+    }
+  }
+
+  // Rewrite a freshly-synced note's tmp id to its real server id everywhere it
+  // could still be referenced: the IndexedDB mirror, the rest of the outbox, and
+  // the in-memory view state.
+  async function remapId(tmp, real) {
+    if (tmp == null || tmp === real) return;
+    idmapMem.set(tmp, real);
+    if (store) {
+      await store.setMeta('idmap', Object.fromEntries(idmapMem)).catch(() => {});
+      await store.del('notes', tmp).catch(() => {});
+      for (const l of await store.getAll('links')) {
+        if (l.a === tmp || l.b === tmp) {
+          await store.del('links', l.key);
+          const a = l.a === tmp ? real : l.a;
+          const b = l.b === tmp ? real : l.b;
+          await store.put('links', { ...l, key: linkKey(a, b), a, b });
+        }
+      }
+      for (const entry of await store.getAll('outbox')) {
+        let touched = false;
+        for (const f of ['id', 'a', 'b', 'to', 'from', 'linkTo', 'parentId', 'rehomeFrom', 'noteId']) {
+          if (entry.payload && entry.payload[f] === tmp) {
+            entry.payload[f] = real;
+            touched = true;
+          }
+        }
+        if (Array.isArray(entry.refs)) {
+          const i = entry.refs.indexOf(tmp);
+          if (i >= 0) {
+            entry.refs[i] = real;
+            touched = true;
+          }
+        }
+        if (touched) await store.put('outbox', entry);
+      }
+    }
+
+    for (const n of allNotesCache) {
+      if (n.id === tmp) n.id = real;
+      if (n.created_from_note_id === tmp) n.created_from_note_id = real;
+    }
+    if (currentId === tmp) currentId = real;
+    if (currentNote && currentNote.id === tmp) currentNote.id = real;
+    for (const t of tabs) if (t.note_id === tmp) t.note_id = real;
+    for (const nb of neighbors) if (nb && nb.id === tmp) nb.id = real;
+    if (parentNeighbor && parentNeighbor.id === tmp) parentNeighbor.id = real;
+    for (const l of allLinks) if (l && l.id === tmp) l.id = real;
+    if (location.hash === `#${tmp}`) history.replaceState(null, '', `#${real}`);
+  }
+
+  // Keep the local link mirror in step with a link change the server accepted
+  // (from the outbox or straight through online), so offline rendering later is
+  // correct without waiting for the next full syncLinks().
+  async function mirrorLink(a, b, { removed = false } = {}) {
+    if (!store) return;
+    const key = linkKey(a, b);
+    if (removed) {
+      await store.del('links', key).catch(() => {});
+      return;
+    }
+    const prev = await store.get('links', key);
+    await store.put('links', {
+      key,
+      a,
+      b,
+      created_at: (prev && prev.created_at) || new Date().toISOString(),
+    });
+  }
+
+  // The server won a field the user had edited offline: keep the user's version
+  // as a new linked "conflicted copy" note rather than dropping it.
+  async function handleConflict(serverNote, payload) {
+    if (payload.content === undefined || serverNote.content === payload.content) {
+      toast(`"${serverNote.title}" also changed on another device.`);
+      return;
+    }
+    await queueCreateNote({
+      title: `${serverNote.title} (conflicted copy)`,
+      content: payload.content,
+      linkTo: serverNote.id,
+    });
+    toast(`"${serverNote.title}" changed elsewhere — your version was kept as a conflicted copy.`);
+  }
+
+  // --- Optimistic local writers, shared by the offline api.* paths ---
+
+  function patchListCache(id, fields) {
+    const i = allNotesCache.findIndex((n) => n.id === id);
+    if (i >= 0) allNotesCache[i] = { ...allNotesCache[i], ...fields };
+  }
+
+  async function putLocalLink(a, b, ts, deleted) {
+    if (!store) return;
+    const key = linkKey(a, b);
+    if (deleted) {
+      await store.del('links', key).catch(() => {});
+      return;
+    }
+    await store.put('links', { key, a, b, created_at: ts || new Date().toISOString(), _dirty: true });
+  }
+
+  async function queueCreateNote(body) {
+    const tmpId = `tmp:${genId()}`;
+    const ts = new Date().toISOString();
+    const note = {
+      id: tmpId,
+      title: (body.title || '').trim(),
+      content: body.content || '',
+      type: 'text',
+      status: 'active',
+      pinned: 0,
+      created_at: ts,
+      updated_at: ts,
+      created_from_note_id: body.linkTo != null ? body.linkTo : null,
+      lat: body.lat != null ? body.lat : null,
+      lon: body.lon != null ? body.lon : null,
+      _dirty: true,
+      _localUpdatedAt: ts,
+    };
+    if (store) await store.put('notes', note);
+    allNotesCache.push({
+      id: tmpId,
+      title: note.title,
+      updated_at: ts,
+      pinned: 0,
+      type: 'text',
+      status: 'active',
+      lat: note.lat,
+      lon: note.lon,
+    });
+    if (body.linkTo != null) await putLocalLink(body.linkTo, tmpId, ts);
+    await enqueue(
+      'note.create',
+      {
+        tmpId,
+        title: note.title,
+        content: note.content,
+        linkTo: body.linkTo != null ? body.linkTo : null,
+        lat: note.lat,
+        lon: note.lon,
+      },
+      [tmpId, body.linkTo].filter((v) => v != null)
+    );
+    scheduleFlush();
+    return note;
+  }
+
+  async function queueUpdateNote(id, data, prev) {
+    const ts = new Date().toISOString();
+    const note = {
+      ...prev,
+      id,
+      title: data.title !== undefined ? data.title.trim() : prev.title,
+      content: data.content !== undefined ? data.content : prev.content,
+      updated_at: ts,
+      _dirty: true,
+      _localUpdatedAt: ts,
+    };
+    if (store) await store.put('notes', note);
+    patchListCache(id, { title: note.title, updated_at: ts });
+    await enqueue(
+      'note.update',
+      {
+        id,
+        title: data.title,
+        content: data.content,
+        baseUpdatedAt: prev._serverUpdatedAt || prev.updated_at || null,
+        clientUpdatedAt: ts,
+      },
+      [id]
+    );
+    scheduleFlush();
+    return note;
+  }
+
+  async function queueAttachment(parentId, formData) {
+    const fields = {};
+    let blob = null;
+    let blobName = 'upload';
+    for (const [k, v] of formData.entries()) {
+      if (v instanceof Blob) {
+        blob = v;
+        blobName = (v && v.name) || 'upload';
+      } else {
+        fields[k] = v;
+      }
+    }
+    const type = fields.type || 'text';
+    const ts = new Date().toISOString();
+    const tmpId = `tmp:${genId()}`;
+    let blobKey = null;
+    if (blob && store) {
+      blobKey = `blob:${genId()}`;
+      await store.put('blobs', { key: blobKey, blob, name: blobName });
+    }
+    const title =
+      (fields.title && fields.title.trim()) ||
+      (type === 'image'
+        ? 'Photo'
+        : type === 'audio'
+          ? 'Recording'
+          : fields.contactName || fields.appLabel || fields.appUri || 'Attachment');
+    const note = {
+      id: tmpId,
+      title,
+      content: fields.content || '',
+      type,
+      status: 'active',
+      pinned: 0,
+      created_at: ts,
+      updated_at: ts,
+      created_from_note_id: parentId,
+      lat: fields.lat != null ? Number(fields.lat) : null,
+      lon: fields.lon != null ? Number(fields.lon) : null,
+      attachment_path:
+        type === 'contact'
+          ? JSON.stringify({
+              name: fields.contactName || '',
+              phone: fields.contactPhone || '',
+              email: fields.contactEmail || '',
+            })
+          : type === 'app'
+            ? fields.appUri || ''
+            : blobKey
+              ? `blob-pending:${blobKey}`
+              : null,
+      _dirty: true,
+    };
+    if (store) await store.put('notes', note);
+    allNotesCache.push({
+      id: tmpId,
+      title,
+      updated_at: ts,
+      pinned: 0,
+      type,
+      status: 'active',
+      lat: note.lat,
+      lon: note.lon,
+    });
+    await putLocalLink(parentId, tmpId, ts);
+    await enqueue('attachment.create', { parentId, tmpId, fields, blobKey }, [tmpId, parentId]);
+    scheduleFlush();
+    return note;
+  }
+
+  // --- Reminders (phase 3) --------------------------------------------------
+  // The client already treats reminders as one flat array; mirror it whole in
+  // meta['alarms'] rather than adding an object store.
+
+  const ridmapMem = new Map(); // rtmp: -> real reminder id
+  async function loadRidmap() {
+    if (!store) return;
+    const m = await store.meta('ridmap', {});
+    for (const [k, v] of Object.entries(m || {})) ridmapMem.set(k, v);
+  }
+  const ridResolve = (id) => (ridmapMem.has(id) ? ridmapMem.get(id) : id);
+
+  async function alarmMirrorArr() {
+    return store ? await store.meta('alarms', []) : [];
+  }
+  async function mirrorUpsertAlarm(row) {
+    if (!store || !row || row.id == null) return;
+    const arr = await alarmMirrorArr();
+    const i = arr.findIndex((a) => a.id === row.id);
+    if (i >= 0) arr[i] = row;
+    else arr.push(row);
+    await store.setMeta('alarms', arr);
+  }
+  async function mirrorRemoveAlarm(id) {
+    if (!store) return;
+    await store.setMeta('alarms', (await alarmMirrorArr()).filter((a) => a.id !== id));
+  }
+  async function mirrorPatchAlarm(id, patch) {
+    if (!store) return;
+    const arr = await alarmMirrorArr();
+    const i = arr.findIndex((a) => a.id === id);
+    if (i >= 0) {
+      arr[i] = { ...arr[i], ...patch };
+      await store.setMeta('alarms', arr);
+    }
+  }
+
+  // An update body -> the alarm-shaped fields it changes (matches the server's
+  // serialize()). Both PUT branches reset ack/next/snooze, so mirror that.
+  function alarmUpdateToPatch(b) {
+    if (b && b.kind === 'location') {
+      return {
+        kind: 'location', time: '', days: [], date: null,
+        lat: b.lat, lon: b.lon, radiusM: b.radiusM || 250,
+        tz: b.tz || null, nextAt: null, snoozeUntil: null,
+      };
+    }
+    return {
+      kind: 'time', time: b.time, days: b.days || [], date: b.date || null,
+      lat: null, lon: null, radiusM: null, tz: b.tz || null,
+      ackAt: b.ackAt || new Date().toISOString(),
+      nextAt: b.nextAt || null, snoozeUntil: null,
+    };
+  }
+
+  function synthAlarm(p) {
+    const b = p.body || {};
+    const note = allNotesCache.find((n) => n.id === p.noteId);
+    const loc = b.kind === 'location';
+    return {
+      id: p.tmpId,
+      noteId: p.noteId,
+      title: (note && note.title) || 'Reminder',
+      kind: loc ? 'location' : 'time',
+      time: loc ? '' : b.time,
+      days: loc ? [] : b.days || [],
+      date: loc ? null : b.date || null,
+      lat: loc ? b.lat : null,
+      lon: loc ? b.lon : null,
+      radiusM: loc ? b.radiusM || 250 : null,
+      tz: b.tz || null,
+      ackAt: b.ackAt || new Date().toISOString(),
+      nextAt: b.nextAt || null,
+      snoozeUntil: null,
+    };
+  }
+
+  function mergeAlarmOp(a, kind, p) {
+    if (kind === 'reminder.update') return { ...a, ...alarmUpdateToPatch(p.body) };
+    if (kind === 'reminder.ack') {
+      return { ...a, ackAt: p.at, nextAt: p.nextAt || null, snoozeUntil: null };
+    }
+    if (kind === 'reminder.snooze') return { ...a, snoozeUntil: p.until, ackAt: p.at || a.ackAt };
+    if (kind === 'reminder.arrive') return { ...a, nextAt: p.at || new Date().toISOString() };
+    return a;
+  }
+
+  // Overlay any queued reminder ops onto a row array so what the UI shows always
+  // matches what the user did offline, even if a stale server list slips in.
+  async function applyLocalAlarmOps(rows) {
+    if (!store) return rows;
+    let out = Array.isArray(rows) ? rows.slice() : [];
+    let q = [];
+    try {
+      q = (await store.getAll('outbox')).filter((e) => e.kind && e.kind.startsWith('reminder.'));
+    } catch {
+      return out;
+    }
+    for (const e of q.sort((x, y) => x.seq - y.seq)) {
+      const p = e.payload;
+      if (e.kind === 'reminder.create') {
+        if (!out.some((a) => a.id === p.tmpId)) out.push(synthAlarm(p));
+      } else if (e.kind === 'reminder.delete') {
+        out = out.filter((a) => a.id !== p.id);
+      } else {
+        const i = out.findIndex((a) => a.id === p.id);
+        if (i >= 0) out[i] = mergeAlarmOp(out[i], e.kind, p);
+      }
+    }
+    return out;
+  }
+
+  async function remapReminderId(tmp, real) {
+    if (tmp == null || tmp === real) return;
+    ridmapMem.set(tmp, real);
+    if (store) {
+      await store.setMeta('ridmap', Object.fromEntries(ridmapMem)).catch(() => {});
+      const arr = await alarmMirrorArr();
+      let changed = false;
+      for (const a of arr) if (a.id === tmp) { a.id = real; changed = true; }
+      if (changed) await store.setMeta('alarms', arr);
+      for (const entry of await store.getAll('outbox')) {
+        if (!entry.kind || !entry.kind.startsWith('reminder.')) continue;
+        let touched = false;
+        for (const f of ['id', 'tmpId']) {
+          if (entry.payload && entry.payload[f] === tmp) {
+            entry.payload[f] = real;
+            touched = true;
+          }
+        }
+        if (Array.isArray(entry.refs)) {
+          const i = entry.refs.indexOf(tmp);
+          if (i >= 0) {
+            entry.refs[i] = real;
+            touched = true;
+          }
+        }
+        if (touched) await store.put('outbox', entry);
+      }
+    }
+    for (const a of alarms) if (a && a.id === tmp) a.id = real;
+  }
+
   let currentId = null;
   let currentNote = null;
   let neighbors = [];
@@ -566,6 +1582,19 @@
     parentNeighbor = (data && data.parent) || null;
     allLinks = (data && data.links) || [];
     linkCount = (data && data.linkCount) || 0;
+    // Fold in not-yet-synced local neighbours (offline-created notes/attachments
+    // linked to this one) that a server response can't know about yet.
+    if (store && pendingCount > 0 && !isTmp(id)) {
+      const known = new Set(neighbors.map((n) => n.id));
+      if (parentNeighbor) known.add(parentNeighbor.id);
+      const local = await cache.localNeighbors(id);
+      const extra = (local.neighbors || []).filter((n) => isTmp(n.id) && !known.has(n.id));
+      if (extra.length) {
+        neighbors = neighbors.concat(extra);
+        allLinks = allLinks.concat(extra);
+        linkCount += extra.length;
+      }
+    }
   }
 
   async function afterAttach() {
@@ -783,23 +1812,75 @@
     }
   }
 
+  // Read whatever we have locally for a note (full row, else the list row).
+  async function localNoteFor(id) {
+    return (await cache.cachedNote(id)) || allNotesCache.find((n) => n.id === id) || {};
+  }
+
+  async function togglePin(id, pin) {
+    if (navigator.onLine && !isTmp(id)) {
+      try {
+        const note = await reqJson(`/api/notes/${id}/pin`, pin ? 'PUT' : 'DELETE');
+        await cache.putNote(note);
+        return note;
+      } catch (err) {
+        if (err.httpStatus) throw err;
+      }
+    }
+    const prev = await localNoteFor(id);
+    const note = { ...prev, id, pinned: pin ? 1 : 0, _dirty: true };
+    if (store) await store.put('notes', note);
+    patchListCache(id, { pinned: pin ? 1 : 0 });
+    await enqueue(pin ? 'note.pin' : 'note.unpin', { id }, [id]);
+    scheduleFlush();
+    return note;
+  }
+
   const api = {
-    listNotes: () => fetch('/api/notes').then((r) => r.json()),
-    searchNotes: (q) =>
-      fetch(`/api/notes/search?q=${encodeURIComponent(q)}`)
+    // Read: refresh the IndexedDB mirror when the network answers, fall back to
+    // it when it doesn't.
+    listNotes: async () => {
+      try {
+        const rows = await fetch('/api/notes').then((r) => r.json());
+        await cache.mergeNotes(rows);
+        return rows;
+      } catch {
+        return cache.cachedList();
+      }
+    },
+    searchNotes: (q) => {
+      if (!navigator.onLine) return Promise.resolve(cache.localSearch(q));
+      return fetch(`/api/notes/search?q=${encodeURIComponent(q)}`)
         .then((r) => (r.ok ? r.json() : []))
-        .catch(() => []),
+        .catch(() => cache.localSearch(q));
+    },
     rotateWidgetToken: () =>
       fetch('/api/session/widget-token', { method: 'POST' }).then((r) => r.json()),
-    getNote: (id) => fetch(`/api/notes/${id}`).then((r) => (r.ok ? r.json() : null)),
+    getNote: async (id) => {
+      try {
+        const n = await fetch(`/api/notes/${id}`).then((r) => (r.ok ? r.json() : null));
+        if (n) await cache.putNote(n);
+        return n || (await cache.cachedNote(id));
+      } catch {
+        return cache.cachedNote(id);
+      }
+    },
+    // Writes: online, hit the server and mirror the result; on a genuine HTTP
+    // error, surface it; on a network drop (or when already offline), apply the
+    // change locally and queue it (see the write-queue section above).
     createNote: async (data) => {
       const loc = await getLocation();
       const body = loc ? { ...data, lat: loc.lat, lon: loc.lon } : data;
-      return fetch('/api/notes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }).then((r) => r.json());
+      if (navigator.onLine) {
+        try {
+          const note = await postJson('/api/notes', body);
+          await cache.putNote(note);
+          return note;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      return queueCreateNote(body);
     },
     createAttachment: async (parentId, formData) => {
       const loc = await getLocation();
@@ -807,62 +1888,175 @@
         formData.set('lat', String(loc.lat));
         formData.set('lon', String(loc.lon));
       }
-      return fetch(`/api/notes/${parentId}/attachments`, {
+      const inline = formData.get('inline') === '1' || formData.get('inline') === 'true';
+      if (navigator.onLine && !anyTmp(parentId)) {
+        try {
+          const res = await fetch(`/api/notes/${parentId}/attachments`, {
+            method: 'POST',
+            body: formData,
+          });
+          if (!res.ok) throw httpErr(res.status, `HTTP ${res.status}`);
+          const note = await res.json();
+          if (note && note.id != null) await cache.putNote(note);
+          return note;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      if (inline) {
+        // An inline image is referenced by a /uploads URL that only exists once
+        // uploaded — there's nothing meaningful to store offline.
+        toast('Photos in the text need a connection.');
+        throw httpErr(0, 'offline');
+      }
+      return queueAttachment(parentId, formData);
+    },
+    updateNote: async (id, data) => {
+      const prev = await localNoteFor(id);
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const note = await putJson(`/api/notes/${id}`, {
+            title: data.title,
+            content: data.content,
+            baseUpdatedAt: prev._serverUpdatedAt || prev.updated_at || null,
+            clientUpdatedAt: new Date().toISOString(),
+          });
+          if (note && note.conflict) await handleConflict(note, data);
+          if (note) delete note.conflict;
+          await cache.putNote(note);
+          return note;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      return queueUpdateNote(id, data, prev);
+    },
+    setStatus: async (id, status) => {
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const note = await putJson(`/api/notes/${id}/status`, { status });
+          await cache.putNote(note);
+          return note;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      const prev = await localNoteFor(id);
+      const note = { ...prev, id, status, updated_at: new Date().toISOString(), _dirty: true };
+      if (store) await store.put('notes', note);
+      patchListCache(id, { status });
+      await enqueue('note.status', { id, status }, [id]);
+      scheduleFlush();
+      return note;
+    },
+    pinNote: (id) => togglePin(id, true),
+    unpinNote: (id) => togglePin(id, false),
+    getNeighbors: async (id) => {
+      try {
+        if (isTmp(id)) return cache.localNeighbors(id);
+        return await fetch(`/api/notes/${id}/neighbors`).then((r) => r.json());
+      } catch {
+        return cache.localNeighbors(id);
+      }
+    },
+    link: async (a, b, rehomeFrom) => {
+      const rehoming = rehomeFrom != null && rehomeFrom !== b;
+      if (navigator.onLine && !anyTmp(a, b, rehomeFrom)) {
+        try {
+          const r = await reqJson('/api/links', 'POST', rehoming ? { a, b, rehomeFrom } : { a, b });
+          await mirrorLink(a, b);
+          if (rehoming) await mirrorLink(rehomeFrom, b, { removed: true });
+          return r;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      const ts = new Date().toISOString();
+      await putLocalLink(a, b, ts);
+      if (rehoming) await putLocalLink(rehomeFrom, b, ts, true);
+      await enqueue(
+        'link',
+        rehoming ? { a, b, rehomeFrom } : { a, b },
+        [a, b, rehomeFrom].filter((v) => v != null)
+      );
+      scheduleFlush();
+      return { a, b };
+    },
+    unlink: async (a, b) => {
+      if (navigator.onLine && !anyTmp(a, b)) {
+        try {
+          const r = await reqJson('/api/links', 'DELETE', { a, b });
+          await mirrorLink(a, b, { removed: true });
+          return r;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      await putLocalLink(a, b, null, true);
+      await enqueue('unlink', { a, b }, [a, b]);
+      scheduleFlush();
+      return null;
+    },
+    listTabs: async () => {
+      try {
+        const t = await fetch('/api/tabs').then((r) => r.json());
+        if (store) store.setMeta('tabs', t).catch(() => {});
+        return t;
+      } catch {
+        return store ? store.meta('tabs', []) : [];
+      }
+    },
+    // Tab state is online-best-effort (see CLAUDE.md): offline, these are soft
+    // no-ops that hand back the tabs we already have so navigation still works;
+    // the server reconciles on the next successful listTabs().
+    openTab: (noteId) => {
+      if (!navigator.onLine) return Promise.resolve(tabs);
+      return fetch('/api/tabs', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note_id: noteId }),
       }).then((r) => r.json());
     },
-    updateNote: (id, data) =>
-      fetch(`/api/notes/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      }).then((r) => r.json()),
-    setStatus: (id, status) =>
-      fetch(`/api/notes/${id}/status`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      }).then((r) => r.json()),
-    pinNote: (id) => fetch(`/api/notes/${id}/pin`, { method: 'PUT' }).then((r) => r.json()),
-    unpinNote: (id) => fetch(`/api/notes/${id}/pin`, { method: 'DELETE' }).then((r) => r.json()),
-    getNeighbors: (id) => fetch(`/api/notes/${id}/neighbors`).then((r) => r.json()),
-    link: (a, b, rehomeFrom) =>
-      fetch('/api/links', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(rehomeFrom ? { a, b, rehomeFrom } : { a, b }),
-      }),
-    unlink: (a, b) =>
-      fetch('/api/links', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ a, b }),
-      }),
-    listTabs: () => fetch('/api/tabs').then((r) => r.json()),
-    openTab: (noteId) =>
-      fetch('/api/tabs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note_id: noteId }),
-      }).then((r) => r.json()),
-    moveTab: (tabId, noteId) =>
-      fetch(`/api/tabs/${tabId}`, {
+    moveTab: (tabId, noteId) => {
+      if (!navigator.onLine) return Promise.resolve(tabs);
+      return fetch(`/api/tabs/${tabId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ note_id: noteId }),
-      }).then((r) => r.json()),
-    activateTab: (tabId) => fetch(`/api/tabs/${tabId}/activate`, { method: 'PUT' }).then((r) => r.json()),
-    closeTab: (tabId) => fetch(`/api/tabs/${tabId}`, { method: 'DELETE' }).then((r) => r.json()),
+      }).then((r) => r.json());
+    },
+    activateTab: (tabId) => {
+      if (!navigator.onLine) return Promise.resolve(tabs);
+      return fetch(`/api/tabs/${tabId}/activate`, { method: 'PUT' }).then((r) => r.json());
+    },
+    closeTab: (tabId) => {
+      if (!navigator.onLine) return Promise.resolve(tabs);
+      return fetch(`/api/tabs/${tabId}`, { method: 'DELETE' }).then((r) => r.json());
+    },
     logNav: (from, to, via) => {
       if (!to) return;
+      const queue = () => {
+        if (store) enqueue('nav', { from: from || null, to, via }, [to, from].filter((v) => v != null));
+      };
+      if (!navigator.onLine) return queue();
       fetch('/api/nav', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ from: from || null, to, via }),
-      }).catch(() => {});
+      }).catch(queue);
     },
-    getSession: () => fetch('/api/session').then((r) => (r.ok ? r.json() : { user: null })).catch(() => ({ user: null })),
+    getSession: async () => {
+      try {
+        const s = await fetch('/api/session').then((r) => (r.ok ? r.json() : { user: null }));
+        if (s && s.user && store) store.setMeta('session', s).catch(() => {});
+        return s;
+      } catch {
+        // Offline: boot from the last session we saw so the app opens to the
+        // grid instead of the login screen.
+        const cached = store ? await store.meta('session', null) : null;
+        return cached && cached.user ? { ...cached, offline: true } : { user: null };
+      }
+    },
     requestLoginLink: (email) =>
       fetch('/api/auth/request-link', {
         method: 'POST',
@@ -885,42 +2079,125 @@
       fetch(`/api/history/${id}/redo`, { method: 'POST' })
         .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
         .catch(() => ({ ok: false, error: 'network error' })),
-    listAlarms: () => fetch('/api/alarms').then((r) => (r.ok ? r.json() : [])).catch(() => []),
-    createAlarm: (data) =>
-      fetch('/api/alarms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      }).then((r) => r.json()),
-    updateAlarm: (id, data) =>
-      fetch(`/api/alarms/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      }).then((r) => r.json()),
-    removeAlarm: (id) => fetch(`/api/alarms/${id}`, { method: 'DELETE' }),
-    ackAlarm: (id, nextAt) =>
-      fetch(`/api/alarms/${id}/ack`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ at: new Date().toISOString(), nextAt: nextAt || null }),
-      }),
-    snoozeAlarm: (id, until) =>
-      fetch(`/api/alarms/${id}/snooze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ until }),
-      }),
-    scheduleAlarm: (id, nextAt) =>
-      fetch(`/api/alarms/${id}/schedule`, {
+    // Reminders (phase 3). The whole list is mirrored in meta['alarms'];
+    // mutations follow the same online / HTTP-error / queue pattern as notes,
+    // with reminder tmp ids prefixed `rtmp:` and their own id map.
+    listAlarms: async () => {
+      try {
+        const rows = await fetch('/api/alarms').then((r) => (r.ok ? r.json() : []));
+        const merged = await applyLocalAlarmOps(rows);
+        if (store) store.setMeta('alarms', merged).catch(() => {});
+        return merged;
+      } catch {
+        return applyLocalAlarmOps(store ? await store.meta('alarms', []) : []);
+      }
+    },
+    createAlarm: async (data) => {
+      const { noteId, ...body } = data;
+      if (navigator.onLine && !isTmp(noteId)) {
+        try {
+          const row = await postJson('/api/alarms', data);
+          await mirrorUpsertAlarm(row);
+          return row;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      const tmpId = `rtmp:${genId()}`;
+      const payload = { tmpId, noteId, body };
+      const synth = synthAlarm(payload);
+      await mirrorUpsertAlarm(synth);
+      await enqueue('reminder.create', payload, [tmpId, noteId].filter((v) => v != null));
+      scheduleFlush();
+      return synth;
+    },
+    updateAlarm: async (id, data) => {
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const row = await putJson(`/api/alarms/${id}`, data);
+          await mirrorUpsertAlarm(row);
+          return row;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      const patch = alarmUpdateToPatch(data);
+      await mirrorPatchAlarm(id, patch);
+      await enqueue('reminder.update', { id, body: data }, [id]);
+      scheduleFlush();
+      return { id, ...patch };
+    },
+    removeAlarm: async (id) => {
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const r = await reqJson(`/api/alarms/${id}`, 'DELETE');
+          await mirrorRemoveAlarm(id);
+          return r;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      await mirrorRemoveAlarm(id);
+      await enqueue('reminder.delete', { id }, [id]);
+      scheduleFlush();
+      return null;
+    },
+    ackAlarm: async (id, nextAt) => {
+      const at = new Date().toISOString();
+      const patch = { ackAt: at, nextAt: nextAt || null, snoozeUntil: null };
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const r = await reqJson(`/api/alarms/${id}/ack`, 'POST', { at, nextAt: nextAt || null });
+          await mirrorPatchAlarm(id, patch);
+          return r;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      await mirrorPatchAlarm(id, patch);
+      await enqueue('reminder.ack', { id, at, nextAt: nextAt || null }, [id]);
+      scheduleFlush();
+      return { ok: true };
+    },
+    snoozeAlarm: async (id, until) => {
+      const at = new Date().toISOString();
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const r = await reqJson(`/api/alarms/${id}/snooze`, 'POST', { until });
+          await mirrorPatchAlarm(id, { snoozeUntil: until, ackAt: at });
+          return r;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      await mirrorPatchAlarm(id, { snoozeUntil: until, ackAt: at });
+      await enqueue('reminder.snooze', { id, until, at }, [id]);
+      scheduleFlush();
+      return { ok: true };
+    },
+    // Rolling next_at forward is only useful while online (it arms the server
+    // push scheduler); offline it's a no-op and checkAlarms skips it.
+    scheduleAlarm: (id, nextAt) => {
+      if (!navigator.onLine || isTmp(id)) return Promise.resolve();
+      return fetch(`/api/alarms/${id}/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nextAt: nextAt || null }),
-      }).catch(() => {}),
-    arriveAlarm: (id) =>
-      fetch(`/api/alarms/${id}/arrive`, { method: 'POST' })
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null),
+      }).catch(() => {});
+    },
+    arriveAlarm: async (id) => {
+      if (navigator.onLine && !isTmp(id)) {
+        return fetch(`/api/alarms/${id}/arrive`, { method: 'POST' })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null);
+      }
+      if (isTmp(id)) return null;
+      const at = new Date().toISOString();
+      await mirrorPatchAlarm(id, { nextAt: at });
+      await enqueue('reminder.arrive', { id, at }, [id]);
+      scheduleFlush();
+      return { ok: true, armed: true };
+    },
     agenda: () => {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
       return fetch(`/api/agenda${tz ? `?tz=${encodeURIComponent(tz)}` : ''}`)
@@ -1004,18 +2281,42 @@
   // flagged active, promotes a tab to active if none is flagged, or opens
   // a tab on the most recent note (or shows the empty state) if none exist.
   async function refreshFromTabs(tabsList) {
-    tabs = tabsList;
+    tabs = Array.isArray(tabsList) ? tabsList : [];
     let active = tabs.find((t) => t.is_active);
 
+    // No tab flagged active: promote the first. Offline, api.activateTab is a
+    // no-op that returns `tabs` unchanged, so pick locally instead of recursing.
     if (!active && tabs.length > 0) {
-      const activated = await api.activateTab(tabs[0].id);
-      return refreshFromTabs(activated);
+      if (net.online) {
+        const activated = await api.activateTab(tabs[0].id);
+        if (Array.isArray(activated) && activated.some((t) => t.is_active)) {
+          return refreshFromTabs(activated);
+        }
+      }
+      active = tabs[0];
     }
 
     if (active) {
       activeTabId = active.id;
       currentId = active.note_id;
-      currentNote = await api.getNote(currentId);
+      currentNote =
+        (await api.getNote(currentId)) ||
+        allNotesCache.find((n) => n.id === currentId) ||
+        null;
+      if (!currentNote) {
+        // Offline and this note was never cached — fall back to something we have.
+        if (allNotesCache.length > 0) {
+          currentId = allNotesCache[0].id;
+          currentNote = (await api.getNote(currentId)) || allNotesCache[0];
+        } else {
+          activeTabId = null;
+          currentId = null;
+          renderTabbar();
+          renderPinbar();
+          renderEmptyState();
+          return;
+        }
+      }
       await loadNeighbors(currentId);
       await refreshColorData();
       setHash(currentId);
@@ -1033,12 +2334,21 @@
     renderTabbar();
     renderPinbar();
 
-    if (allNotesCache.length > 0) {
-      const opened = await api.openTab(allNotesCache[0].id);
-      await refreshFromTabs(opened);
-    } else {
+    if (allNotesCache.length === 0) {
       renderEmptyState();
+      return;
     }
+    if (net.online) {
+      const opened = await api.openTab(allNotesCache[0].id);
+      if (Array.isArray(opened) && opened.length > tabs.length) {
+        await refreshFromTabs(opened);
+        return;
+      }
+    }
+    // Offline (or the open didn't take): centre the newest cached note without
+    // a server tab row.
+    tabs = [{ id: 'local', note_id: allNotesCache[0].id, is_active: 1 }];
+    await refreshFromTabs(tabs);
   }
 
   // Recenter the active tab on a note (neighbor clicks, hash navigation, fallbacks).
@@ -1074,7 +2384,214 @@
     await goTo(id, via);
   }
 
+  // --- Sync panel: opened from the topbar pill when something is queued or
+  // stuck. Lists outbox entries; failed ones get Retry / Discard. ---
+  function describeEntry(e) {
+    const p = e.payload || {};
+    switch (e.kind) {
+      case 'note.create':
+        return `New note “${p.title || 'Untitled'}”`;
+      case 'note.update':
+        return 'Note edit';
+      case 'note.status':
+        return `Set status “${p.status}”`;
+      case 'note.pin':
+        return 'Pin note';
+      case 'note.unpin':
+        return 'Unpin note';
+      case 'link':
+        return p.rehomeFrom != null ? 'Move a link' : 'Link two notes';
+      case 'unlink':
+        return 'Unlink two notes';
+      case 'attachment.create':
+        return `Upload ${(p.fields && p.fields.type) || 'attachment'}`;
+      case 'nav':
+        return 'Navigation';
+      case 'reminder.create':
+        return 'New reminder';
+      case 'reminder.update':
+        return 'Reminder change';
+      case 'reminder.delete':
+        return 'Delete reminder';
+      case 'reminder.ack':
+        return 'Reminder “OK”';
+      case 'reminder.snooze':
+        return 'Snooze reminder';
+      case 'reminder.arrive':
+        return 'Reminder arrival';
+      default:
+        return e.kind;
+    }
+  }
+
+  async function discardEntry(e) {
+    if (!store) return;
+    await store.del('outbox', e.seq);
+    // Discarding a create also drops everything queued that depends on its
+    // tmp id (edits, links, reminders on it).
+    const tmp = (e.kind === 'note.create' || e.kind === 'reminder.create') && e.payload.tmpId;
+    if (tmp) {
+      for (const dep of await store.getAll('outbox')) {
+        if ((dep.refs || []).includes(tmp)) await store.del('outbox', dep.seq);
+      }
+    }
+    if (e.kind === 'note.create' && e.payload.tmpId) {
+      await store.del('notes', tmp).catch(() => {});
+      for (const l of await store.getAll('links')) {
+        if (l.a === tmp || l.b === tmp) await store.del('links', l.key);
+      }
+      allNotesCache = allNotesCache.filter((n) => n.id !== tmp);
+      if (currentId === tmp) {
+        currentId = null;
+        currentNote = null;
+        await refreshFromTabs(tabs);
+      } else {
+        renderPinbar();
+      }
+    } else if ((e.kind === 'note.update' || e.kind === 'note.status') && navigator.onLine) {
+      // Drop the local change and take the server's version back.
+      const fresh = await api.getNote(idResolve(e.payload.id));
+      if (fresh && currentId === fresh.id) {
+        currentNote = fresh;
+        await render();
+      }
+    } else if (e.kind === 'reminder.create' && e.payload.tmpId) {
+      await mirrorRemoveAlarm(e.payload.tmpId);
+      alarms = alarms.filter((a) => a.id !== e.payload.tmpId);
+      renderAlarmbar();
+    } else if (e.kind && e.kind.startsWith('reminder.') && navigator.onLine) {
+      await checkAlarms({ popup: false }); // re-pull the true reminder state
+    }
+    await refreshPending();
+    await reconcileDirty();
+  }
+
+  async function openSyncPanel() {
+    if (!store) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    const box = document.createElement('div');
+    box.className = 'picker sync-panel';
+    overlay.appendChild(box);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target === overlay) close();
+    });
+
+    async function paint() {
+      const all = (await store.getAll('outbox')).sort((a, b) => a.seq - b.seq);
+      box.innerHTML = '';
+      const h = document.createElement('h2');
+      const failed = all.filter((e) => e.status === 'failed');
+      h.textContent = all.length
+        ? `Sync — ${all.length} queued${failed.length ? `, ${failed.length} stuck` : ''}`
+        : 'Sync — all caught up';
+      box.appendChild(h);
+
+      if (!navigator.onLine) {
+        const p = document.createElement('p');
+        p.className = 'sync-hint';
+        p.textContent = 'Offline — these send when you reconnect.';
+        box.appendChild(p);
+      }
+
+      const list = document.createElement('div');
+      list.className = 'sync-list';
+      for (const e of all) {
+        const row = document.createElement('div');
+        row.className = 'sync-row' + (e.status === 'failed' ? ' failed' : '');
+        const label = document.createElement('span');
+        label.className = 'sync-row-label';
+        label.textContent = describeEntry(e);
+        row.appendChild(label);
+        if (e.status === 'failed') {
+          const why = document.createElement('span');
+          why.className = 'sync-row-why';
+          why.textContent = e.lastError || 'failed';
+          row.appendChild(why);
+          const retry = document.createElement('button');
+          retry.textContent = 'Retry';
+          retry.addEventListener('click', async () => {
+            e.status = 'pending';
+            e.lastError = null;
+            await store.put('outbox', e);
+            await refreshPending();
+            flushOutbox().then(paint);
+            paint();
+          });
+          const drop = document.createElement('button');
+          drop.className = 'secondary';
+          drop.textContent = 'Discard';
+          drop.addEventListener('click', async () => {
+            await discardEntry(e);
+            paint();
+          });
+          row.append(retry, drop);
+        }
+        list.appendChild(row);
+      }
+      box.appendChild(list);
+
+      const actions = document.createElement('div');
+      actions.className = 'picker-actions';
+      if (failed.length) {
+        const retryAll = document.createElement('button');
+        retryAll.textContent = 'Retry all';
+        retryAll.addEventListener('click', async () => {
+          for (const e of failed) {
+            e.status = 'pending';
+            e.lastError = null;
+            await store.put('outbox', e);
+          }
+          await refreshPending();
+          flushOutbox().then(paint);
+          paint();
+        });
+        actions.appendChild(retryAll);
+      }
+      const done = document.createElement('button');
+      done.className = 'secondary';
+      done.textContent = 'Close';
+      done.addEventListener('click', close);
+      actions.appendChild(done);
+      box.appendChild(actions);
+    }
+
+    document.body.appendChild(overlay);
+    await paint();
+  }
+
+  // The service worker precaches the shell, so an already-open tab keeps running
+  // the previous app.js/style.css after a deploy until it's reloaded. When a new
+  // worker takes control, offer a reload rather than forcing one.
+  let workerUpdatePrompted = false;
+  function listenForWorkerUpdate() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (!e.data || e.data.type !== 'sw-activated' || workerUpdatePrompted) return;
+      workerUpdatePrompted = true;
+      let host = document.getElementById('toast-host');
+      if (!host) {
+        host = document.createElement('div');
+        host.id = 'toast-host';
+        document.body.appendChild(host);
+      }
+      const bar = document.createElement('div');
+      bar.className = 'toast update-toast';
+      const label = document.createElement('span');
+      label.textContent = 'A new version is ready.';
+      const btn = document.createElement('button');
+      btn.textContent = 'Reload';
+      btn.addEventListener('click', () => location.reload());
+      bar.append(label, btn);
+      host.appendChild(bar);
+      requestAnimationFrame(() => bar.classList.add('show'));
+    });
+  }
+
   async function init() {
+    net.render();
+    listenForWorkerUpdate();
     const sess = await api.getSession();
     if (!sess.user) {
       showLogin();
@@ -1083,16 +2600,26 @@
     currentUser = sess.user;
     widgetToken = sess.widgetToken || null;
     accountBtn.title = `Signed in as ${currentUser.email}`;
+    await loadIdmap();
+    await loadRidmap();
+    await refreshPending();
+    await reconcileDirty();
     allNotesCache = await api.listNotes();
+    await syncLinks();
     const tabsList = await api.listTabs();
     await refreshFromTabs(tabsList);
     await checkAlarms();
     ensurePushSubscription();
+    flushOutbox();
     setInterval(() => checkAlarms(), 30000);
+    setInterval(() => flushOutbox(), 30000);
     // Re-check the moment the app is foregrounded again — a backgrounded PWA's
     // timers are throttled, so an alarm that came due while away rings now.
     document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) checkAlarms();
+      if (!document.hidden) {
+        checkAlarms();
+        flushOutbox();
+      }
     });
     handleDeepLink();
   }
@@ -1162,12 +2689,30 @@
     document.getElementById('first-note-btn').addEventListener('click', () => openPicker());
   }
 
+  // An attachment note created offline stores its file in the `blobs` store and
+  // carries a "blob-pending:<key>" path until it uploads. Point the element at
+  // the in-memory blob so it shows immediately.
+  function setMediaSrc(el, path) {
+    const m = /^blob-pending:(.+)$/.exec(path || '');
+    if (!m) {
+      el.src = path;
+      return;
+    }
+    if (!store) return;
+    store
+      .get('blobs', m[1])
+      .then((rec) => {
+        if (rec && rec.blob) el.src = URL.createObjectURL(rec.blob);
+      })
+      .catch(() => {});
+  }
+
   // Renders the type-specific payload of an attachment note (image/audio/contact/app).
   function buildAttachmentPreview(note) {
     if (note.type === 'image' && note.attachment_path) {
       const img = document.createElement('img');
       img.className = 'center-attachment-image';
-      img.src = note.attachment_path;
+      setMediaSrc(img, note.attachment_path);
       img.alt = note.title;
       return img;
     }
@@ -1175,7 +2720,7 @@
       const audio = document.createElement('audio');
       audio.className = 'center-attachment-audio';
       audio.controls = true;
-      audio.src = note.attachment_path;
+      setMediaSrc(audio, note.attachment_path);
       return audio;
     }
     if (note.type === 'contact' && note.attachment_path) {
@@ -2062,12 +3607,15 @@
     // Keep the server's next_at pointing at the upcoming occurrence — but leave
     // a reminder that is snoozed into the future alone. Location reminders carry
     // no clock: their next_at is stamped by /arrive and cleared by /ack, so the
-    // client must never roll it.
-    for (const a of alarms) {
-      if (a.kind === 'location') continue;
-      if (a.snoozeUntil && new Date(a.snoozeUntil) > ref) continue;
-      const want = isoOrNull(nextAlarmOccurrence(a, ref));
-      if (want !== (a.nextAt || null)) api.scheduleAlarm(a.id, want);
+    // client must never roll it. Only meaningful online (it arms the server push
+    // scheduler); offline the reconnect does a fresh checkAlarms that catches up.
+    if (net.online) {
+      for (const a of alarms) {
+        if (a.kind === 'location' || isTmp(a.id)) continue;
+        if (a.snoozeUntil && new Date(a.snoozeUntil) > ref) continue;
+        const want = isoOrNull(nextAlarmOccurrence(a, ref));
+        if (want !== (a.nextAt || null)) api.scheduleAlarm(a.id, want);
+      }
     }
 
     syncGeofenceWatch();
@@ -2950,7 +4498,11 @@
         } else {
           allNotesCache = await api.listNotes();
           renderPinbar();
-          await refreshFromTabs(await api.openTab(note.id));
+          if (navigator.onLine && !isTmp(note.id)) {
+            await refreshFromTabs(await api.openTab(note.id));
+          } else {
+            await goTo(note.id, 'new');
+          }
         }
       } else {
         if (title) formData.set('title', title);

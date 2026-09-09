@@ -1,22 +1,115 @@
-// Minimal pass-through worker: present so the app is installable, but it does
-// NOT cache or intercept anything — every request goes straight to the network,
-// so code changes are always live. It also clears any cache left by older
-// versions of this worker.
-self.addEventListener('install', () => self.skipWaiting());
+// Service worker: offline app-shell caching + Web Push delivery.
+//
+// Caching model (phase 1 of offline support):
+//  - The app shell (HTML/JS/CSS/vendor/icons) is precached on install and served
+//    stale-while-revalidate: a cached hit returns immediately, a fresh copy is
+//    fetched in the background and stored for next load. So a `public/` change is
+//    live on the *second* load, not instantly — the price of working offline.
+//  - Navigations fall back to the cached shell when the network is down, so the
+//    app boots offline; app.js then reads note data from IndexedDB.
+//  - `/api/*`, `/uploads/*`, `/share`, `/digest` are never touched here — they go
+//    straight to the network and app.js handles their offline behaviour itself
+//    (one source of truth: IndexedDB, not a synthetic response in the worker).
+//
+// Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
+// a byte change to this file is itself what makes the browser re-run install.
+const CACHE_VERSION = 'v1';
+const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
+const SHELL_ASSETS = [
+  '/',
+  '/index.html',
+  '/app.js',
+  '/store.js',
+  '/style.css',
+  '/manifest.webmanifest',
+  '/vendor/leaflet.min.js',
+  '/vendor/leaflet.min.css',
+  '/vendor/marked.min.js',
+  '/vendor/purify.min.js',
+  '/vendor/images/layers.png',
+  '/vendor/images/layers-2x.png',
+  '/vendor/images/marker-icon.png',
+  '/vendor/images/marker-icon-2x.png',
+  '/vendor/images/marker-shadow.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/icon-maskable-512.png',
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil(
     (async () => {
-      const keys = await caches.keys();
-      await Promise.all(keys.map((k) => caches.delete(k)));
-      await self.clients.claim();
+      const cache = await caches.open(SHELL_CACHE);
+      // Individually so one 404 (e.g. a missing icon) doesn't fail the whole
+      // precache and leave the worker without a shell.
+      await Promise.all(
+        SHELL_ASSETS.map((url) =>
+          cache.add(new Request(url, { cache: 'reload' })).catch(() => {})
+        )
+      );
+      await self.skipWaiting();
     })()
   );
 });
 
-// An (empty) fetch handler is enough to satisfy the install criteria; returning
-// nothing lets the browser perform its normal fetch.
-self.addEventListener('fetch', () => {});
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    (async () => {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k !== SHELL_CACHE).map((k) => caches.delete(k)));
+      await self.clients.claim();
+      // Tell already-open pages a new worker is in charge — they still hold the
+      // previous app.js in memory, so app.js decides whether to prompt a reload.
+      const clients = await self.clients.matchAll({ type: 'window' });
+      for (const c of clients) c.postMessage({ type: 'sw-activated', version: CACHE_VERSION });
+    })()
+  );
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'skipWaiting') self.skipWaiting();
+});
+
+const BYPASS = [/^\/api\//, /^\/uploads\//, /^\/share\b/, /^\/digest\b/];
+
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  if (request.method !== 'GET') return;
+
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return;
+  if (BYPASS.some((re) => re.test(url.pathname))) return;
+
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      (async () => {
+        try {
+          return await fetch(request);
+        } catch {
+          const cache = await caches.open(SHELL_CACHE);
+          return (await cache.match('/index.html')) || (await cache.match('/')) || Response.error();
+        }
+      })()
+    );
+    return;
+  }
+
+  // Stale-while-revalidate for shell assets.
+  event.respondWith(
+    (async () => {
+      const cache = await caches.open(SHELL_CACHE);
+      const cached = await cache.match(request);
+      const network = fetch(request)
+        .then((res) => {
+          if (res && res.ok && res.type === 'basic') cache.put(request, res.clone());
+          return res;
+        })
+        .catch(() => null);
+      return cached || (await network) || Response.error();
+    })()
+  );
+});
 
 // --- Alarm delivery: the server pushes when an alarm is due and the app is
 // not in the foreground. iOS/Android require the notification to be shown. ---

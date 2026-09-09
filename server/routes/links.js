@@ -6,6 +6,15 @@ const router = express.Router();
 
 const nowIso = () => new Date().toISOString();
 
+// The caller's whole link graph — the client mirrors this into IndexedDB so the
+// grid (and, later, offline link edits) can be rebuilt with no connection.
+router.get('/', (req, res) => {
+  const rows = db
+    .prepare('SELECT note_a AS a, note_b AS b, created_at FROM links WHERE user_id = ? ORDER BY created_at')
+    .all(req.userId);
+  res.json(rows);
+});
+
 // Create a link. When `rehomeFrom` is given, this is a card being dragged from
 // one anchor to another: link (a ↔ b), drop (rehomeFrom ↔ b), and log the pair
 // as a single reversible "moved" entry. `b` is the card; `a` the new anchor.

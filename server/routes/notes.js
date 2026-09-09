@@ -121,16 +121,36 @@ router.get('/:id', (req, res) => {
   res.json(note);
 });
 
+// Optional offline-sync fields in the body:
+//   baseUpdatedAt   — the `updated_at` the client last saw for this row. If it
+//                     no longer matches, the row changed elsewhere while the
+//                     client was offline: that's a conflict.
+//   clientUpdatedAt — when the offline edit was actually made. On a conflict,
+//                     a field the client sent is kept only if the client's edit
+//                     is newer than the server's current `updated_at`; otherwise
+//                     the server's value wins that field. The response carries
+//                     `conflict: true` so the client can preserve the loser as a
+//                     "conflicted copy" note.
+// Clients that send neither field keep the old last-write-wins behaviour.
 router.put('/:id', (req, res) => {
-  const { title, content } = req.body;
+  const { title, content, baseUpdatedAt, clientUpdatedAt } = req.body;
   const note = db
     .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
     .get(req.params.id, req.userId);
   if (!note) return res.status(404).json({ error: 'not found' });
 
-  const newTitle = title !== undefined ? title.trim() : note.title;
-  const newContent = content !== undefined ? content : note.content;
+  let newTitle = title !== undefined ? title.trim() : note.title;
+  let newContent = content !== undefined ? content : note.content;
   if (!newTitle) return res.status(400).json({ error: 'title is required' });
+
+  const conflict = Boolean(baseUpdatedAt) && baseUpdatedAt !== note.updated_at;
+  if (conflict) {
+    const serverWins = !clientUpdatedAt || note.updated_at > clientUpdatedAt;
+    if (serverWins) {
+      if (title !== undefined) newTitle = note.title;
+      if (content !== undefined) newContent = note.content;
+    }
+  }
 
   db.prepare('UPDATE notes SET title = ?, content = ?, updated_at = ? WHERE id = ?').run(
     newTitle,
@@ -145,7 +165,8 @@ router.put('/:id', (req, res) => {
     { title: newTitle, content: newContent },
     `Edited "${newTitle}"`
   );
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
+  const row = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
+  res.json(conflict ? { ...row, conflict: true } : row);
 });
 
 router.delete('/:id', (req, res) => {

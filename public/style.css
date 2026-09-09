@@ -1137,6 +1137,75 @@ button:hover { filter: brightness(1.05); }
   transform: translateY(0);
 }
 
+/* Persistent "reload for the new version" bar — a toast that doesn't self-dismiss. */
+.update-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.update-toast button {
+  background: var(--surface);
+  color: var(--text);
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0.25rem 0.7rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+/* Connectivity / sync pill in the topbar. Hidden when online and fully synced;
+   amber offline, blue while syncing/pending, red when something is stuck. */
+.net-pill {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  white-space: nowrap;
+  font: inherit;
+  font-size: 0.78rem;
+  line-height: 1;
+  padding: 0.3rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+}
+.net-pill.hidden { display: none; }
+.net-pill--clickable { cursor: pointer; }
+.net-pill--offline {
+  border-color: color-mix(in srgb, #b26b00 40%, var(--border));
+  background: color-mix(in srgb, #f5a623 18%, var(--surface));
+  color: #8a5300;
+}
+.net-pill--syncing {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+}
+.net-pill--failed {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface));
+  color: var(--danger);
+}
+
+/* Sync panel (opened from the pill) */
+.sync-panel { max-width: 460px; }
+.sync-hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.5rem; }
+.sync-list { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.9rem; max-height: 50vh; overflow-y: auto; }
+.sync-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px);
+  font-size: 0.85rem;
+}
+.sync-row.failed { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.sync-row-label { flex: 1; }
+.sync-row-why { color: var(--danger); font-size: 0.75rem; }
+.sync-row button { font-size: 0.78rem; padding: 0.2rem 0.55rem; }
+
 .note-fullscreen {
   position: relative;
   background: var(--surface);
