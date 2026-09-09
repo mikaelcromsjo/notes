@@ -129,11 +129,11 @@
   <div id="login-overlay" class="overlay hidden">
     <div class="picker">
       <h2>Sign in</h2>
-      <p class="picker-hint" style="margin: 0 0 0.6rem;">Enter your email to load your notes. No password yet.</p>
+      <p class="picker-hint" style="margin: 0 0 0.6rem;">Enter your email and we'll send you a login link. No password.</p>
       <input type="email" id="login-email" placeholder="you@example.com" autocomplete="email" />
       <div id="login-error" class="picker-hint" style="color: var(--danger);"></div>
       <div class="picker-actions">
-        <button id="login-btn">Continue</button>
+        <button id="login-btn">Email me a link</button>
       </div>
     </div>
   </div>
@@ -163,7 +163,27 @@
     </div>
   </div>
 
+  <div id="account-overlay" class="overlay hidden">
+    <div class="picker">
+      <h2>Account</h2>
+      <p class="picker-hint" id="account-email" style="margin: 0 0 0.8rem;"></p>
+      <label class="picker-hint" for="account-widget-url">Home-screen widget feed URL</label>
+      <input type="text" id="account-widget-url" readonly />
+      <div class="picker-actions">
+        <button id="account-copy-btn" class="secondary">Copy URL</button>
+        <button id="account-reset-widget-btn" class="secondary">Reset widget URL</button>
+      </div>
+      <div class="picker-divider">or</div>
+      <div class="picker-actions">
+        <button id="account-switch-btn" class="secondary">Sign in as someone else</button>
+        <button id="account-close-btn" class="secondary">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
   <script src="app.js"></script>
   <script>
     if ('serviceWorker' in navigator) {

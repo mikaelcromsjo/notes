@@ -146,6 +146,35 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_history_user ON history (user_id, id DESC);
 `);
 
+// Server-side sessions. The cookie (nico_sess) holds an opaque 256-bit id; this
+// row is the only thing that authenticates a request. Replaces the old scheme
+// where the cookie was the raw users.id and could be forged.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    ua TEXT,
+    ip_hash TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id, last_seen_at DESC);
+`);
+
+// Single-use magic-link login tokens. The URL carries the raw 32-byte secret;
+// only its sha256 is stored here. Short-lived; consumed_at is stamped on use.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS login_tokens (
+    token_hash TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_login_tokens_email ON login_tokens (email);
+`);
+
 // notes/links/tabs predate multi-user — add the owner column idempotently.
 for (const table of ['notes', 'links', 'tabs']) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
@@ -172,6 +201,38 @@ if (seededUsers.length === 1) {
   for (const table of ['notes', 'links', 'tabs']) {
     db.prepare(`UPDATE ${table} SET user_id = ? WHERE user_id IS NULL`).run(uid);
   }
+}
+
+// --- Full-text search index over notes (FTS5, bundled with better-sqlite3).
+// External-content table mirroring notes(title, content); kept in sync by
+// triggers. All DDL is IF NOT EXISTS and the backfill is a no-op once populated,
+// so this is safe to run on every boot like the rest of this file.
+db.exec(`
+  CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+    title, content,
+    content='notes', content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+  );
+  CREATE TRIGGER IF NOT EXISTS notes_fts_ai AFTER INSERT ON notes BEGIN
+    INSERT INTO notes_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS notes_fts_ad AFTER DELETE ON notes BEGIN
+    INSERT INTO notes_fts(notes_fts, rowid, title, content)
+      VALUES ('delete', old.id, old.title, old.content);
+  END;
+  CREATE TRIGGER IF NOT EXISTS notes_fts_au AFTER UPDATE ON notes BEGIN
+    INSERT INTO notes_fts(notes_fts, rowid, title, content)
+      VALUES ('delete', old.id, old.title, old.content);
+    INSERT INTO notes_fts(rowid, title, content) VALUES (new.id, new.title, new.content);
+  END;
+`);
+// One-time index build from the existing rows (an external-content FTS table
+// exposes every content rowid, so a "WHERE NOT IN" backfill is a no-op — use
+// the built-in rebuild). Guarded by user_version; bump it to force a rebuild
+// after any change to the notes_fts columns/tokenizer above.
+if (db.pragma('user_version', { simple: true }) < 1) {
+  db.exec("INSERT INTO notes_fts(notes_fts) VALUES('rebuild')");
+  db.pragma('user_version = 1');
 }
 
 // Retention: navigation history is behavioural data — keep 90 days.

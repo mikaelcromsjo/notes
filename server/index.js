@@ -2,7 +2,10 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 
+const db = require('./db');
+const sessions = require('./sessions');
 const sessionRouter = require('./routes/session');
+const authRouter = require('./routes/auth');
 const notesRouter = require('./routes/notes');
 const linksRouter = require('./routes/links');
 const tabsRouter = require('./routes/tabs');
@@ -48,12 +51,38 @@ function parseCookies(header) {
 }
 
 app.use('/api', (req, res, next) => {
-  const uid = Number(parseCookies(req.headers.cookie).nico_uid);
-  req.userId = Number.isInteger(uid) && uid > 0 ? uid : null;
+  sessions.sweepExpired();
+  const cookies = parseCookies(req.headers.cookie);
+
+  const sess = sessions.resolve(cookies[sessions.SESSION_COOKIE]);
+  if (sess) {
+    req.userId = sess.user_id;
+    req.sessionId = sess.id;
+    return next();
+  }
+
+  // One-release migration shim: a valid legacy raw-id cookie is silently
+  // upgraded to a real session, then cleared.
+  const legacyUid = Number(cookies[sessions.LEGACY_COOKIE]);
+  if (Number.isInteger(legacyUid) && legacyUid > 0) {
+    const user = db.prepare('SELECT id FROM users WHERE id = ?').get(legacyUid);
+    if (user) {
+      const token = sessions.create(user.id, req);
+      res.cookie(sessions.SESSION_COOKIE, token, sessions.COOKIE_OPTS);
+      res.clearCookie(sessions.LEGACY_COOKIE, { path: '/' });
+      req.userId = user.id;
+      req.sessionId = token;
+      return next();
+    }
+  }
+
+  req.userId = null;
   next();
 });
 
 app.use('/api/session', sessionRouter);
+// Magic-link login: issues/consumes tokens, so it must sit above the cookie gate.
+app.use('/api/auth', authRouter);
 
 // Token-authed (widget_token query param), so it sits above the cookie gate.
 app.use('/api/widget', widgetRouter);

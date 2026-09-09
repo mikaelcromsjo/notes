@@ -11,11 +11,13 @@ const nowIso = () => new Date().toISOString();
 // as a single reversible "moved" entry. `b` is the card; `a` the new anchor.
 router.post('/', (req, res) => {
   const { a, b, rehomeFrom } = req.body;
-  if (!a || !b || a === b) {
+  const aNum = Number(a);
+  const bNum = Number(b);
+  if (!Number.isInteger(aNum) || !Number.isInteger(bNum) || aNum <= 0 || bNum <= 0 || aNum === bNum) {
     return res.status(400).json({ error: 'a and b (distinct note ids) are required' });
   }
-  const noteA = Math.min(a, b);
-  const noteB = Math.max(a, b);
+  const noteA = Math.min(aNum, bNum);
+  const noteB = Math.max(aNum, bNum);
 
   const owned = db
     .prepare('SELECT COUNT(*) AS c FROM notes WHERE id IN (?, ?) AND user_id = ?')

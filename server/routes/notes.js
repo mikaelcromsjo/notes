@@ -120,6 +120,37 @@ router.post('/', (req, res) => {
   res.status(201).json(note);
 });
 
+// Full-text search over the caller's notes. Must be declared before "/:id".
+router.get('/search', (req, res) => {
+  const raw = String(req.query.q || '').trim();
+  const terms = raw.toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [];
+  if (!terms.length) return res.json([]);
+
+  // Quote each term (defuses FTS operators); prefix-match the last one so
+  // results appear while the user is still typing.
+  const match = terms
+    .map((t, i) => (i === terms.length - 1 ? `"${t}"*` : `"${t}"`))
+    .join(' ');
+  const limit = Math.min(Math.max(Number(req.query.limit) || 12, 1), 30);
+
+  try {
+    const rows = db
+      .prepare(
+        `SELECT n.id, n.title, n.type,
+                snippet(notes_fts, 1, '[', ']', '…', 12) AS snippet
+         FROM notes_fts
+         JOIN notes n ON n.id = notes_fts.rowid
+         WHERE notes_fts MATCH ? AND n.user_id = ? AND n.status != 'deleted'
+         ORDER BY bm25(notes_fts, 5.0, 1.0)
+         LIMIT ?`
+      )
+      .all(match, req.userId, limit);
+    res.json(rows);
+  } catch (err) {
+    res.json([]);
+  }
+});
+
 router.get('/:id', (req, res) => {
   const note = db
     .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')

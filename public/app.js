@@ -64,6 +64,73 @@
   const headerToggleBtn = document.getElementById('header-toggle-btn');
   const depthCycleBtn = document.getElementById('depth-cycle-btn');
 
+  const accountOverlay = document.getElementById('account-overlay');
+  const accountEmail = document.getElementById('account-email');
+  const accountWidgetUrl = document.getElementById('account-widget-url');
+  const accountCopyBtn = document.getElementById('account-copy-btn');
+  const accountResetWidgetBtn = document.getElementById('account-reset-widget-btn');
+  const accountSwitchBtn = document.getElementById('account-switch-btn');
+  const accountCloseBtn = document.getElementById('account-close-btn');
+
+  // --- In-app replacements for native alert()/confirm() ---
+  function toast(msg) {
+    let host = document.getElementById('toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toast-host';
+      document.body.appendChild(host);
+    }
+    const el = document.createElement('div');
+    el.className = 'toast';
+    el.textContent = msg;
+    host.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(() => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 200);
+    }, 2600);
+  }
+
+  function confirmDialog(message, { confirmLabel = 'OK', danger = false } = {}) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      const box = document.createElement('div');
+      box.className = 'picker';
+      const p = document.createElement('p');
+      p.className = 'confirm-message';
+      p.textContent = message;
+      const actions = document.createElement('div');
+      actions.className = 'picker-actions';
+      const ok = document.createElement('button');
+      ok.textContent = confirmLabel;
+      if (danger) ok.className = 'danger';
+      const cancel = document.createElement('button');
+      cancel.className = 'secondary';
+      cancel.textContent = 'Cancel';
+      actions.append(ok, cancel);
+      box.append(p, actions);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      const done = (val) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(false);
+        if (e.key === 'Enter') done(true);
+      };
+      ok.addEventListener('click', () => done(true));
+      cancel.addEventListener('click', () => done(false));
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) done(false);
+      });
+      document.addEventListener('keydown', onKey);
+      ok.focus();
+    });
+  }
+
   let currentId = null;
   let currentNote = null;
   let neighbors = [];
@@ -77,6 +144,349 @@
   let widgetToken = null;
 
   const TYPE_ICON = { image: '🖼️', audio: '🎤', contact: '👤', app: '🔗' };
+
+  // --- Markdown rendering (vendored marked + DOMPurify, no build step) ---
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+  }
+
+  // Set while a note's own markdown is being rendered, so [[Title]] never
+  // resolves a note to itself (common when several notes share a title).
+  let mdRenderContextId = null;
+
+  // Resolve a [[wikilink]] target ("Some Title" or "#123") to a cached note.
+  function wikiResolve(target) {
+    if (!target) return null;
+    const hashId = /^#(\d+)$/.exec(target.trim());
+    if (hashId) return allNotesCache.find((n) => n.id === Number(hashId[1])) || null;
+    const t = target.trim().toLowerCase();
+    return (
+      allNotesCache.find(
+        (n) => n.id !== mdRenderContextId && (n.title || '').trim().toLowerCase() === t
+      ) || null
+    );
+  }
+
+  const md = (() => {
+    const ready =
+      typeof window.marked !== 'undefined' && typeof window.DOMPurify !== 'undefined';
+    if (ready) {
+      window.marked.use({
+        gfm: true,
+        breaks: true,
+        extensions: [
+          {
+            name: 'wikilink',
+            level: 'inline',
+            start(src) {
+              const i = src.indexOf('[[');
+              return i < 0 ? undefined : i;
+            },
+            tokenizer(src) {
+              const m = /^\[\[([^\][\n]+?)\]\]/.exec(src);
+              if (m) return { type: 'wikilink', raw: m[0], target: m[1].trim() };
+              return undefined;
+            },
+            renderer(token) {
+              const hit = wikiResolve(token.target);
+              if (hit) {
+                return `<a class="wikilink" data-note-id="${hit.id}" href="#${hit.id}">${escapeHtml(
+                  hit.title || token.target
+                )}</a>`;
+              }
+              return `<a class="wikilink missing" data-wiki="${escapeHtml(
+                token.target
+              )}" href="#">${escapeHtml(token.target)}</a>`;
+            },
+          },
+        ],
+      });
+      window.DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+        if (node.tagName === 'A' && /^https?:/i.test(node.getAttribute('href') || '')) {
+          node.setAttribute('target', '_blank');
+          node.setAttribute('rel', 'noopener noreferrer');
+        }
+      });
+    }
+    return { ready };
+  })();
+
+  function mdToHtml(text) {
+    if (!md.ready) return null;
+    return window.DOMPurify.sanitize(window.marked.parse(text || ''), { ADD_ATTR: ['target'] });
+  }
+
+  // Which note's content is being rendered — passed by renderMarkdownInto so
+  // wikiResolve can exclude it. Cleared immediately after the sync parse.
+  function mdToHtmlFor(text, selfId) {
+    mdRenderContextId = selfId == null ? null : selfId;
+    try {
+      return mdToHtml(text);
+    } finally {
+      mdRenderContextId = null;
+    }
+  }
+
+  // Flip the Nth GFM task checkbox (0-based, document order) in `src`.
+  function toggleTaskInSource(src, n) {
+    let i = -1;
+    return (src || '')
+      .split('\n')
+      .map((line) => {
+        const m = /^(\s*(?:[-*+]|\d+\.)\s+)\[([ xX])\](.*)$/.exec(line);
+        if (!m) return line;
+        i += 1;
+        if (i !== n) return line;
+        return `${m[1]}[${m[2].toLowerCase() === 'x' ? ' ' : 'x'}]${m[3]}`;
+      })
+      .join('\n');
+  }
+
+  // Render markdown into `el`; wire [[wikilinks]] and (optionally) task checkboxes.
+  // opts.onToggleTask(idx) — called when a checkbox is toggled (else read-only).
+  // opts.onCreateWiki(name) — called when a missing [[link]] is clicked.
+  function renderMarkdownInto(el, text, opts = {}) {
+    const html = mdToHtmlFor(text, opts.selfId);
+    if (html == null) {
+      el.textContent = text || '';
+      return;
+    }
+    el.innerHTML = html;
+    el.classList.add('markdown-body');
+
+    el.querySelectorAll('a.wikilink').forEach((a) => {
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = Number(a.dataset.noteId);
+        if (id) {
+          // Close the fullscreen editor first, else navigation happens behind it.
+          if (!noteOverlay.classList.contains('hidden')) closeNoteFullscreen();
+          jumpTo(id, 'wikilink');
+        } else if (opts.onCreateWiki) {
+          opts.onCreateWiki(a.dataset.wiki || a.textContent || '');
+        }
+      });
+    });
+
+    el.querySelectorAll('input[type="checkbox"]').forEach((box, idx) => {
+      box.disabled = !opts.onToggleTask;
+      if (!opts.onToggleTask) return;
+      box.addEventListener('click', (e) => e.stopPropagation());
+      box.addEventListener('change', () => opts.onToggleTask(idx));
+    });
+  }
+
+  // Clicking a [[link]] whose target doesn't exist: offer to create it, link it
+  // to the note we're on, and jump there. Never duplicates this note or links
+  // it to itself; if a note with that title already exists, links to it instead.
+  async function createLinkedNote(name) {
+    const title = (name || '').trim();
+    if (!title || !currentId) return;
+    const key = title.toLowerCase();
+
+    if (currentNote && (currentNote.title || '').trim().toLowerCase() === key) {
+      toast('That link points to this note.');
+      return;
+    }
+
+    const existing = allNotesCache.find(
+      (n) => (n.title || '').trim().toLowerCase() === key
+    );
+    if (existing && existing.id !== currentId) {
+      await api.link(currentId, existing.id);
+      allNotesCache = await api.listNotes();
+      await loadNeighbors(currentId);
+      await refreshColorData();
+      if (!noteOverlay.classList.contains('hidden')) closeNoteFullscreen();
+      jumpTo(existing.id, 'wikilink');
+      return;
+    }
+
+    if (!(await confirmDialog(`Create note "${title}" and link it here?`, { confirmLabel: 'Create' }))) {
+      return;
+    }
+    const created = await api.createNote({ title, linkTo: currentId });
+    allNotesCache = await api.listNotes();
+    if (!noteOverlay.classList.contains('hidden')) closeNoteFullscreen();
+    jumpTo(created.id, 'wikilink-new');
+  }
+
+  // Inline "[[" autocomplete for a <textarea>: type "[[" then at least one
+  // character, then pick a note — or a "Create …" row for a brand-new one — to
+  // insert [[Title]] and make the graph link. Safety rules: never auto-commits
+  // on a bare Enter (only an arrow-key/hover-highlighted row or a click), never
+  // offers the current note, never creates a note that would duplicate the
+  // current one's title or an existing note's title (links to it instead), and
+  // never links a note to itself.
+  function attachWikiAutocomplete(textarea, { getCurrentId, onLinked }) {
+    let menu = null;
+    let items = [];
+    let active = -1; // -1 = nothing highlighted; only arrow keys / hover set it
+    let span = null; // { start, end } of the query text between [[ and the caret
+
+    const close = () => {
+      if (menu) menu.remove();
+      menu = null;
+      items = [];
+      active = -1;
+      span = null;
+    };
+
+    function queryAtCaret() {
+      const pos = textarea.selectionStart;
+      if (pos !== textarea.selectionEnd) return null;
+      const before = textarea.value.slice(0, pos);
+      const open = before.lastIndexOf('[[');
+      if (open === -1) return null;
+      const between = before.slice(open + 2);
+      // Bail if we're not inside an open, single-line, not-yet-closed [[ .
+      if (/[\][\n]/.test(between) || between.length < 1) return null;
+      // Bail if the caret sits just before a "]]" — that's an existing link.
+      if (/^\s*\]/.test(textarea.value.slice(pos))) return null;
+      return { q: between, start: open + 2, end: pos };
+    }
+
+    function buildItems(q) {
+      const raw = q.trim();
+      const ql = raw.toLowerCase();
+      const cur = getCurrentId();
+      const curTitle = (currentNote && currentNote.title ? currentNote.title : '')
+        .trim()
+        .toLowerCase();
+      const list = allNotesCache
+        .filter((n) => n.id !== cur && (n.title || '').toLowerCase().includes(ql))
+        .slice(0, 8)
+        .map((n) => ({ kind: 'note', id: n.id, title: n.title }));
+      // "Create" only for a genuinely new title that isn't this note's own.
+      const exists = allNotesCache.some(
+        (n) => (n.title || '').trim().toLowerCase() === ql
+      );
+      if (raw && !exists && ql !== curTitle) {
+        list.push({ kind: 'create', title: raw });
+      }
+      return list;
+    }
+
+    function render() {
+      if (!menu) {
+        menu = document.createElement('div');
+        menu.className = 'wiki-menu';
+        document.body.appendChild(menu);
+      }
+      const r = textarea.getBoundingClientRect();
+      menu.style.left = `${r.left}px`;
+      menu.style.top = `${Math.min(r.bottom + 2, window.innerHeight - 200)}px`;
+      menu.style.width = `${r.width}px`;
+      menu.innerHTML = '';
+      items.forEach((it, i) => {
+        const row = document.createElement('div');
+        row.className =
+          'wiki-item' + (i === active ? ' active' : '') + (it.kind === 'create' ? ' create' : '');
+        const name = document.createElement('span');
+        const hint = document.createElement('span');
+        hint.className = 'wiki-item-id';
+        if (it.kind === 'create') {
+          name.textContent = `➕ Create “${it.title}”`;
+          hint.textContent = 'new';
+        } else {
+          name.textContent = it.title || 'Untitled';
+          hint.textContent = `#${it.id}`;
+        }
+        row.append(name, hint);
+        row.addEventListener('mouseenter', () => {
+          active = i;
+          menu.querySelectorAll('.wiki-item').forEach((el, j) =>
+            el.classList.toggle('active', j === i)
+          );
+        });
+        row.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          choose(i);
+        });
+        menu.appendChild(row);
+      });
+    }
+
+    async function choose(i) {
+      const it = items[i];
+      if (!it || !span) return close();
+      const cur = getCurrentId();
+      let targetId;
+      let targetTitle;
+
+      if (it.kind === 'create') {
+        const name = it.title.trim();
+        const existing = allNotesCache.find(
+          (n) => (n.title || '').trim().toLowerCase() === name.toLowerCase()
+        );
+        if (existing && existing.id === cur) return close(); // that's this note
+        if (existing) {
+          targetId = existing.id;
+          targetTitle = existing.title;
+          await api.link(cur, targetId);
+        } else {
+          const created = await api.createNote({ title: name, linkTo: cur });
+          allNotesCache = await api.listNotes();
+          targetId = created.id;
+          targetTitle = created.title;
+        }
+      } else {
+        if (it.id === cur) return close();
+        targetId = it.id;
+        targetTitle = it.title;
+        await api.link(cur, targetId);
+      }
+
+      const v = textarea.value;
+      const insert = `[[${targetTitle}]]`;
+      textarea.value = v.slice(0, span.start - 2) + insert + v.slice(span.end);
+      const caret = span.start - 2 + insert.length;
+      close();
+      textarea.focus();
+      textarea.setSelectionRange(caret, caret);
+      textarea.dispatchEvent(new Event('input'));
+      if (onLinked) await onLinked();
+    }
+
+    function update() {
+      const cq = queryAtCaret();
+      if (!cq) return close();
+      span = { start: cq.start, end: cq.end };
+      items = buildItems(cq.q);
+      if (!items.length) return close();
+      if (active >= items.length) active = items.length - 1;
+      render();
+    }
+
+    textarea.addEventListener('input', update);
+    textarea.addEventListener('click', update);
+    textarea.addEventListener('keydown', (e) => {
+      if (!menu) return;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        active = active + 1 >= items.length ? 0 : active + 1;
+        render();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        active = active <= 0 ? items.length - 1 : active - 1;
+        render();
+      } else if ((e.key === 'Enter' || e.key === 'Tab') && active >= 0) {
+        // Only commit when a row is actually highlighted — a bare Enter keeps
+        // its normal "new line" behaviour and just dismisses the menu.
+        e.preventDefault();
+        choose(active);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        close();
+      } else if (e.key === 'Enter') {
+        close();
+      }
+    });
+    textarea.addEventListener('blur', () => setTimeout(close, 150));
+  }
 
   // --- Colour coding (toggleable) ---
   const COLOR_MODES = ['off', 'path', 'note', 'cluster'];
@@ -210,6 +620,10 @@
 
   const api = {
     listNotes: () => fetch('/api/notes').then((r) => r.json()),
+    searchNotes: (q) =>
+      fetch(`/api/notes/search?q=${encodeURIComponent(q)}`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []),
     rotateWidgetToken: () =>
       fetch('/api/session/widget-token', { method: 'POST' }).then((r) => r.json()),
     getNote: (id) => fetch(`/api/notes/${id}`).then((r) => (r.ok ? r.json() : null)),
@@ -284,8 +698,8 @@
       }).catch(() => {});
     },
     getSession: () => fetch('/api/session').then((r) => (r.ok ? r.json() : { user: null })).catch(() => ({ user: null })),
-    login: (email) =>
-      fetch('/api/session', {
+    requestLoginLink: (email) =>
+      fetch('/api/auth/request-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email }),
@@ -480,14 +894,7 @@
     div.className = 'empty-state';
     div.innerHTML = `<button id="first-note-btn">Create your first note</button>`;
     grid.appendChild(div);
-    document.getElementById('first-note-btn').addEventListener('click', async () => {
-      const title = prompt('Title for your first note:');
-      if (!title || !title.trim()) return;
-      const note = await api.createNote({ title: title.trim() });
-      allNotesCache = await api.listNotes();
-      const tabsList = await api.openTab(note.id);
-      await refreshFromTabs(tabsList);
-    });
+    document.getElementById('first-note-btn').addEventListener('click', () => openPicker());
   }
 
   // Renders the type-specific payload of an attachment note (image/audio/contact/app).
@@ -694,8 +1101,47 @@
     title.addEventListener('input', scheduleSave);
     content.addEventListener('input', scheduleSave);
 
+    attachWikiAutocomplete(content, {
+      getCurrentId: () => currentId,
+      onLinked: async () => {
+        await loadNeighbors(currentId);
+        await refreshColorData();
+      },
+    });
+
+    // Markdown preview toggle. Checkboxes stay interactive in preview mode.
+    const previewBtn = document.createElement('button');
+    previewBtn.type = 'button';
+    previewBtn.className = 'md-preview-toggle secondary';
+    previewBtn.textContent = '👁 Preview';
+
+    const previewDiv = document.createElement('div');
+    previewDiv.className = 'center-content markdown-body preview';
+    previewDiv.hidden = true;
+
+    let previewing = false;
+    const paintPreview = () =>
+      renderMarkdownInto(previewDiv, content.value, {
+        selfId: currentId,
+        onCreateWiki: createLinkedNote,
+        onToggleTask: (idx) => {
+          content.value = toggleTaskInSource(content.value, idx);
+          paintPreview();
+          scheduleSave();
+        },
+      });
+    previewBtn.addEventListener('click', () => {
+      previewing = !previewing;
+      if (previewing) paintPreview();
+      previewDiv.hidden = !previewing;
+      content.hidden = previewing;
+      previewBtn.textContent = previewing ? '✏️ Edit' : '👁 Preview';
+    });
+
     frag.appendChild(title);
+    frag.appendChild(previewBtn);
     frag.appendChild(content);
+    frag.appendChild(previewDiv);
 
     if (linkCount > LINK_LIST_THRESHOLD) frag.appendChild(buildLinksPanel());
 
@@ -764,7 +1210,7 @@
 
     deleteBtn.addEventListener('click', async () => {
       if (currentNote.pinned) return;
-      if (!confirm(`Delete "${currentNote.title}"?`)) return;
+      if (!(await confirmDialog(`Delete "${currentNote.title}"?`, { confirmLabel: 'Delete', danger: true }))) return;
       await api.setStatus(currentId, 'deleted');
       allNotesCache = await api.listNotes();
       renderPinbar();
@@ -798,8 +1244,26 @@
     title.textContent = currentNote.title || 'Untitled';
 
     const content = document.createElement('div');
-    content.className = 'center-content readonly' + (currentNote.content ? '' : ' placeholder');
-    content.textContent = currentNote.content || 'Write here…';
+    const hasContent = Boolean(currentNote.content && currentNote.content.trim());
+    content.className = 'center-content readonly' + (hasContent ? '' : ' placeholder');
+    if (hasContent) {
+      const paint = () =>
+        renderMarkdownInto(content, currentNote.content, {
+          selfId: currentNote.id,
+          onCreateWiki: createLinkedNote,
+          onToggleTask: async (idx) => {
+            currentNote = await api.updateNote(currentId, {
+              title: currentNote.title,
+              content: toggleTaskInSource(currentNote.content, idx),
+            });
+            allNotesCache = await api.listNotes();
+            paint();
+          },
+        });
+      paint();
+    } else {
+      content.textContent = 'Write here…';
+    }
 
     cell.appendChild(title);
     cell.appendChild(content);
@@ -813,7 +1277,7 @@
     }
 
     cell.addEventListener('click', (e) => {
-      if (e.target.closest('a, audio')) return;
+      if (e.target.closest('a, audio, input, label')) return;
       const focus = e.target.closest('.center-title')
         ? 'title'
         : e.target.closest('.center-content')
@@ -1449,11 +1913,17 @@
   alarmSaveBtn.addEventListener('click', async () => {
     if (!alarmEditNote) return;
     const time = alarmTimeInput.value;
-    if (!/^\d{2}:\d{2}$/.test(time)) return alert('Pick a time.');
+    if (!/^\d{2}:\d{2}$/.test(time)) {
+      toast('Pick a time.');
+      return;
+    }
     const days = selectedAlarmDays();
     const body = { time, days };
     if (days.length === 0) {
-      if (!alarmDateInput.value) return alert('Pick a date, or choose repeat days.');
+      if (!alarmDateInput.value) {
+        toast('Pick a date, or choose repeat days.');
+        return;
+      }
       body.date = alarmDateInput.value;
     }
     // Seed the ack to this cycle's trigger so it doesn't ring the instant it's
@@ -1482,19 +1952,25 @@
   });
 
   // --- Topbar search (jump to note) ---
-  searchInput.addEventListener('input', () => {
-    const q = searchInput.value.trim().toLowerCase();
-    if (!q) {
-      searchResults.classList.add('hidden');
-      searchResults.innerHTML = '';
-      return;
-    }
-    const matches = allNotesCache.filter((n) => n.title.toLowerCase().includes(q)).slice(0, 8);
+  let searchSeq = 0;
+  let searchDebounce = null;
+
+  function renderSearchResults(list) {
     searchResults.innerHTML = '';
-    matches.forEach((n) => {
+    list.forEach((n) => {
       const div = document.createElement('div');
       div.className = 'result';
-      div.textContent = n.title;
+      const icon = TYPE_ICON[n.type] ? `${TYPE_ICON[n.type]} ` : '';
+      const title = document.createElement('div');
+      title.className = 'result-title';
+      title.textContent = icon + (n.title || 'Untitled');
+      div.appendChild(title);
+      if (n.snippet) {
+        const snip = document.createElement('div');
+        snip.className = 'result-snippet';
+        snip.textContent = n.snippet;
+        div.appendChild(snip);
+      }
       div.addEventListener('click', () => {
         searchInput.value = '';
         searchResults.classList.add('hidden');
@@ -1502,7 +1978,28 @@
       });
       searchResults.appendChild(div);
     });
-    searchResults.classList.toggle('hidden', matches.length === 0);
+    searchResults.classList.toggle('hidden', list.length === 0);
+  }
+
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value.trim();
+    if (!q) {
+      searchResults.classList.add('hidden');
+      searchResults.innerHTML = '';
+      return;
+    }
+    // Instant first paint from the local title cache…
+    const ql = q.toLowerCase();
+    renderSearchResults(
+      allNotesCache.filter((n) => (n.title || '').toLowerCase().includes(ql)).slice(0, 8)
+    );
+    // …then replace with ranked full-text results from the server.
+    const seq = ++searchSeq;
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(async () => {
+      const rows = await api.searchNotes(q);
+      if (seq === searchSeq && searchInput.value.trim() === q) renderSearchResults(rows);
+    }, 180);
   });
 
   document.addEventListener('click', (e) => {
@@ -1511,25 +2008,7 @@
     }
   });
 
-  newNoteBtn.addEventListener('click', async () => {
-    const title = prompt('Title for new note:');
-    if (!title || !title.trim()) return;
-
-    const data = { title: title.trim() };
-    if (currentId) data.linkTo = currentId;
-    const note = await api.createNote(data);
-    allNotesCache = await api.listNotes();
-    renderPinbar();
-
-    if (currentId) {
-      await loadNeighbors(currentId);
-      await refreshColorData();
-      await render();
-    } else {
-      const tabsList = await api.openTab(note.id);
-      await refreshFromTabs(tabsList);
-    }
-  });
+  newNoteBtn.addEventListener('click', () => openPicker());
 
   // --- Picker (create a note — of any attachment style — or connect an
   // existing one to the current center, which is always the default target) ---
@@ -1550,7 +2029,7 @@
     pickerAudioRow.classList.toggle('hidden', pickerStyle !== 'audio');
     pickerContactRow.classList.toggle('hidden', pickerStyle !== 'contact');
     pickerAppUri.classList.toggle('hidden', pickerStyle !== 'app');
-    pickerConnectSection.classList.toggle('hidden', pickerStyle !== 'text');
+    pickerConnectSection.classList.toggle('hidden', pickerStyle !== 'text' || !pendingLinkTarget);
     pickerContactPickBtn.classList.toggle('hidden', !(navigator.contacts && navigator.contacts.select));
     pickerNewTitle.placeholder = PICKER_TITLE_PLACEHOLDER[pickerStyle];
   }
@@ -1571,14 +2050,14 @@
       return;
     }
     if (!navigator.mediaDevices || !window.MediaRecorder) {
-      alert('Audio recording is not supported in this browser.');
+      toast('Audio recording is not supported in this browser.');
       return;
     }
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch {
-      alert('Microphone permission was denied.');
+      toast('Microphone permission was denied.');
       return;
     }
     const recorder = new MediaRecorder(stream);
@@ -1627,6 +2106,10 @@
     pickerStyleRow
       .querySelectorAll('.picker-style-btn')
       .forEach((b) => b.classList.toggle('active', b.dataset.style === 'text'));
+    // Attachment styles and "connect" both need a note to hang off of; with no
+    // centered note this is a plain new-note create.
+    pickerStyleRow.classList.toggle('hidden', !pendingLinkTarget);
+    pickerCreateBtn.textContent = pendingLinkTarget ? 'Create & connect' : 'Create';
     applyPickerStyleVisibility();
 
     pickerOverlay.classList.remove('hidden');
@@ -1681,23 +2164,35 @@
       if (!title) return;
     } else if (pickerStyle === 'image') {
       const file = pickerPhotoInput.files[0];
-      if (!file) return alert('Choose a photo first.');
+      if (!file) {
+        toast('Choose a photo first.');
+        return;
+      }
       formData.set('type', 'image');
       formData.set('file', file);
     } else if (pickerStyle === 'audio') {
-      if (!pickerRecordedBlob) return alert('Record something first.');
+      if (!pickerRecordedBlob) {
+        toast('Record something first.');
+        return;
+      }
       formData.set('type', 'audio');
       formData.set('file', pickerRecordedBlob, 'recording.webm');
     } else if (pickerStyle === 'contact') {
       const name = pickerContactName.value.trim();
-      if (!name) return alert('Contact name is required.');
+      if (!name) {
+        toast('Contact name is required.');
+        return;
+      }
       formData.set('type', 'contact');
       formData.set('contactName', name);
       formData.set('contactPhone', pickerContactPhone.value);
       formData.set('contactEmail', pickerContactEmail.value);
     } else if (pickerStyle === 'app') {
       const uri = pickerAppUri.value.trim();
-      if (!uri) return alert('App link is required.');
+      if (!uri) {
+        toast('App link is required.');
+        return;
+      }
       formData.set('type', 'app');
       formData.set('appUri', uri);
       formData.set('appLabel', title);
@@ -1707,13 +2202,24 @@
     pickerCreateBtn.disabled = true;
     try {
       if (pickerStyle === 'text') {
-        await api.createNote({ title, linkTo: pendingLinkTarget });
+        const note = await api.createNote(
+          pendingLinkTarget ? { title, linkTo: pendingLinkTarget } : { title }
+        );
+        const hadTarget = !!pendingLinkTarget;
+        closePicker();
+        if (hadTarget) {
+          await afterAttach();
+        } else {
+          allNotesCache = await api.listNotes();
+          renderPinbar();
+          await refreshFromTabs(await api.openTab(note.id));
+        }
       } else {
         if (title) formData.set('title', title);
         await api.createAttachment(pendingLinkTarget, formData);
+        closePicker();
+        await afterAttach();
       }
-      closePicker();
-      await afterAttach();
     } finally {
       pickerCreating = false;
       pickerCreateBtn.disabled = false;
@@ -2160,21 +2666,41 @@
     if (e.key === 'Escape' && !historyOverlay.classList.contains('hidden')) closeHistory();
   });
 
-  // --- Login / account (email identity only) ---
+  // --- Login (passwordless magic link) ---
+  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
   function showLogin() {
     loginError.textContent = '';
+    loginError.style.color = 'var(--danger)';
     loginOverlay.classList.remove('hidden');
     loginEmail.focus();
+    const params = new URLSearchParams(location.search);
+    if (params.get('login') === 'invalid') {
+      loginError.textContent = 'That login link was invalid or expired — request a new one.';
+    }
   }
 
+  let linkSending = false;
   async function doLogin() {
+    if (linkSending) return;
     const email = loginEmail.value.trim();
-    const r = await api.login(email);
-    if (!r.ok) {
+    if (!EMAIL_RE.test(email)) {
+      loginError.style.color = 'var(--danger)';
       loginError.textContent = 'Enter a valid email address.';
       return;
     }
-    location.reload();
+    linkSending = true;
+    loginBtn.disabled = true;
+    loginError.textContent = '';
+    try {
+      await api.requestLoginLink(email);
+    } catch {
+      /* uniform outcome regardless */
+    }
+    linkSending = false;
+    loginBtn.disabled = false;
+    loginError.style.color = 'var(--muted)';
+    loginError.textContent = `If ${email} has an account, a login link is on its way. Check your inbox.`;
   }
 
   loginBtn.addEventListener('click', doLogin);
@@ -2182,30 +2708,61 @@
     if (e.key === 'Enter') doLogin();
   });
 
-  accountBtn.addEventListener('click', async () => {
+  function renderAccountWidgetUrl() {
+    accountWidgetUrl.value = widgetToken
+      ? `${location.origin}/api/widget?token=${widgetToken}`
+      : '(unavailable — reload the page)';
+  }
+
+  function closeAccount() {
+    accountOverlay.classList.add('hidden');
+  }
+
+  accountBtn.addEventListener('click', () => {
     if (!currentUser) {
       showLogin();
       return;
     }
-    const widgetUrl = widgetToken
-      ? `${location.origin}/api/widget?token=${widgetToken}`
-      : '(unavailable — reload the page)';
-    const answer = prompt(
-      `Signed in as ${currentUser.email}.\n\n` +
-        `Home-screen widget feed URL (copy into your widget app):\n` +
-        `Type "switch" to sign in as someone else, or "reset widget" to\n` +
-        `invalidate this URL and get a new one.`,
-      widgetUrl
-    );
-    const cmd = answer && answer.trim().toLowerCase();
-    if (cmd === 'switch') {
-      await api.logout();
-      location.reload();
-    } else if (cmd === 'reset widget') {
-      const res = await api.rotateWidgetToken();
-      widgetToken = res.widgetToken || widgetToken;
-      alert(`New widget feed URL:\n${location.origin}/api/widget?token=${widgetToken}`);
+    accountEmail.textContent = `Signed in as ${currentUser.email}`;
+    renderAccountWidgetUrl();
+    accountOverlay.classList.remove('hidden');
+  });
+
+  accountCloseBtn.addEventListener('click', closeAccount);
+  accountOverlay.addEventListener('click', (e) => {
+    if (e.target === accountOverlay) closeAccount();
+  });
+
+  accountCopyBtn.addEventListener('click', async () => {
+    if (!widgetToken) return;
+    try {
+      await navigator.clipboard.writeText(accountWidgetUrl.value);
+      toast('Widget URL copied');
+    } catch {
+      accountWidgetUrl.focus();
+      accountWidgetUrl.select();
+      toast('Copy the selected URL');
     }
+  });
+
+  accountSwitchBtn.addEventListener('click', async () => {
+    if (!(await confirmDialog('Sign out and sign in as someone else?', { confirmLabel: 'Sign out' }))) return;
+    await api.logout();
+    location.reload();
+  });
+
+  accountResetWidgetBtn.addEventListener('click', async () => {
+    if (
+      !(await confirmDialog('Reset the widget feed URL? The current URL will stop working.', {
+        confirmLabel: 'Reset',
+        danger: true,
+      }))
+    )
+      return;
+    const res = await api.rotateWidgetToken();
+    widgetToken = res.widgetToken || widgetToken;
+    renderAccountWidgetUrl();
+    toast('New widget URL generated');
   });
 
   init();

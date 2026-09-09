@@ -1,17 +1,11 @@
 const crypto = require('crypto');
 const express = require('express');
 const db = require('../db');
+const sessions = require('../sessions');
 
 const router = express.Router();
 
-const COOKIE = 'nico_uid';
-const COOKIE_OPTS = {
-  httpOnly: true,
-  sameSite: 'lax',
-  path: '/',
-  maxAge: 365 * 24 * 60 * 60 * 1000,
-};
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const LEGACY_COOKIE = 'nico_uid';
 
 // Current user for the session cookie, or { user: null } when signed out.
 // Also hands back the widget feed token, minting one on first read.
@@ -45,26 +39,20 @@ router.delete('/widget-token', (req, res) => {
   res.status(204).end();
 });
 
-// "Log in": look up (or create) the user for an email and set the cookie.
-// No password — identity only, until real auth lands.
+// Legacy unauthenticated "log in with just an email" — removed. A session is
+// now only minted by the magic-link callback (POST /api/auth/request-link ->
+// GET /api/auth/callback). Kept as a 410 so any stale client gets a clear
+// signal instead of a silent failure.
 router.post('/', (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  if (!EMAIL_RE.test(email)) {
-    return res.status(400).json({ error: 'a valid email is required' });
-  }
-
-  let user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(email);
-  if (!user) {
-    const info = db.prepare('INSERT INTO users (email) VALUES (?)').run(email);
-    user = { id: info.lastInsertRowid, email };
-  }
-
-  res.cookie(COOKIE, String(user.id), COOKIE_OPTS);
-  res.json({ user });
+  res
+    .status(410)
+    .json({ error: 'use POST /api/auth/request-link', endpoint: '/api/auth/request-link' });
 });
 
 router.delete('/', (req, res) => {
-  res.clearCookie(COOKIE, { path: '/' });
+  sessions.destroy(req.sessionId);
+  res.clearCookie(sessions.SESSION_COOKIE, { path: '/' });
+  res.clearCookie(LEGACY_COOKIE, { path: '/' });
   res.status(204).end();
 });
 
