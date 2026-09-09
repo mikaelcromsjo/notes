@@ -187,8 +187,45 @@ migration), shown + rotatable in the account overlay next to the widget token
 4. **[S] Notion export parser.**
 5. **[S] Apple Notes parser** (HTML→markdown; document the export Shortcut for
    users).
-6. **[S] Share Target**: manifest + `POST /share` + open-on-return.
-7. **[S] Quick-add**: manifest `shortcuts` + `?compose=1` handling + widget "＋".
+6. **[S] Share Target**: manifest + `POST /share` + open-on-return. ✅ DONE (2026-09-09).
+7. **[S] Quick-add**: manifest `shortcuts` + `?compose=1` handling + widget "＋". ✅ DONE (2026-09-09).
+
+   **What shipped (M6+M7 together):**
+   - `public/manifest.webmanifest`: `share_target` (`action:/share`, POST,
+     `multipart/form-data`, params `title`/`text`/`url` + `files.media`
+     `image/*`+`audio/*`) and a `shortcuts` entry "New note" → `/?compose=1`.
+   - `server/upload-config.js` (new) — the `IMAGE_EXT`/`AUDIO_EXT` MIME→ext
+     allowlist + a `diskUpload()` multer factory, extracted verbatim from
+     `routes/notes.js` (which now imports it) so the share target and the
+     attachment route can't drift apart.
+   - `server/index.js`: the cookie→`req.userId` middleware is now a named
+     `resolveSession` mounted on `['/api','/share']` (share target is a
+     top-level OS POST, not an `/api` call). New `app.use('/share', shareRouter)`
+     sits **outside** the `/api` 401 gate.
+   - `server/routes/share.js` (new) — `POST /share`. `title` = shared title →
+     first non-blank line of `text` → "Shared link"/"Shared note"; `content` =
+     `text` + `url` joined. Logged in → one `notes` row (`type` text, or
+     `image`/`audio` with `attachment_path` when a `media` file passes the
+     allowlist; disallowed/oversized file is dropped, note still created),
+     `history.record('create', …, 'Shared "…"')`, `303 → /#<id>`. Logged out
+     (rare: 60-day sliding PWA session) → stash `{title,content}` in a
+     JS-readable `nico_share` cookie (10 min, ≤6 KB, file dropped) and `303 → /`.
+   - `public/app.js` `handleDeepLink()` (runs from `init()` after tabs load):
+     also handles `?compose=1` → `openPicker()` and the `nico_share` cookie →
+     `createSharedNote()` (`api.createNote{title,content}` + open its tab +
+     toast), clearing the cookie / stripping the param either way.
+   - `server/routes/widget.js`: every feed response (graph, `mode=agenda`, empty)
+     gains `compose_url: <origin>/?compose=1` for a widget "＋" button.
+   - **Server-verified on a DB copy** (text / first-line-title / image /
+     logged-out-stash / disallowed-file paths all give the right note + redirect;
+     `compose_url` present); **needs a real-device pass** — Android share sheet
+     into the installed PWA, and the launcher "New note" long-press shortcut.
+
+   **Known limits / follow-ups:** iOS PWAs have no Web Share Target (the Domain 7
+   wrapper restores it); a file shared while logged out is dropped (text kept);
+   `?compose=1` only opens the picker on a cold load, not if the PWA is already
+   foregrounded (search-param change fires no event); the shared note is not
+   auto-linked to the last centered note (plan's optional "link to current").
 8. **[M] Email-to-note**: `inbox_token`, inbound webhook route, account-overlay
    UI. _Needs Domain 1's provider._
 

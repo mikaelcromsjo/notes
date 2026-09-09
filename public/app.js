@@ -1087,16 +1087,60 @@
     handleDeepLink();
   }
 
-  // A digest notification / its "view online" page can open the app straight to
-  // a view: /?d=agenda or /?d=insights. Consume the param so a reload is clean.
+  // Deep links into a fresh load:
+  //   /?d=agenda | /?d=insights  — from a digest notification / its web page
+  //   /?compose=1                — the manifest "New note" shortcut / widget ＋
+  //   a `nico_share` cookie      — text handed over by POST /share while logged
+  //                                out (see server/routes/share.js)
+  // Consume whatever we act on so a reload is clean.
   function handleDeepLink() {
-    const d = new URLSearchParams(location.search).get('d');
-    if (d !== 'agenda' && d !== 'insights') return;
+    const params = new URLSearchParams(location.search);
+    const d = params.get('d');
+    const handledD = d === 'agenda' || d === 'insights';
+    const wantsCompose = params.get('compose') === '1';
+    const shared = consumePendingShare();
+
+    if (!handledD && !wantsCompose && !shared) return;
+
     const url = new URL(location.href);
-    url.searchParams.delete('d');
+    if (handledD) url.searchParams.delete('d');
+    if (wantsCompose) url.searchParams.delete('compose');
     history.replaceState(null, '', url.pathname + url.search + url.hash);
+
     if (d === 'agenda') openAgenda();
-    else openInsights();
+    else if (d === 'insights') openInsights();
+
+    if (shared) createSharedNote(shared);
+    else if (wantsCompose) openPicker();
+  }
+
+  // Read + clear the `nico_share` cookie left by a logged-out POST /share.
+  function consumePendingShare() {
+    const m = document.cookie.match(/(?:^|;\s*)nico_share=([^;]*)/);
+    if (!m) return null;
+    document.cookie = 'nico_share=; Max-Age=0; path=/';
+    try {
+      const data = JSON.parse(decodeURIComponent(m[1]));
+      if (data && (data.title || data.content)) return data;
+    } catch {
+      /* malformed stash — ignore */
+    }
+    return null;
+  }
+
+  async function createSharedNote({ title, content }) {
+    try {
+      const note = await api.createNote({
+        title: (title || 'Shared note').slice(0, 200),
+        content: content || '',
+      });
+      allNotesCache = await api.listNotes();
+      renderPinbar();
+      await refreshFromTabs(await api.openTab(note.id));
+      toast('Saved shared note.');
+    } catch {
+      toast('Could not save the shared note.');
+    }
   }
 
   function renderEmptyState() {

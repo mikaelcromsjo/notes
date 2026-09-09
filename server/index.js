@@ -19,6 +19,7 @@ const pushRouter = require('./routes/push');
 const widgetRouter = require('./routes/widget');
 const historyRouter = require('./routes/history');
 const importRouter = require('./routes/import');
+const shareRouter = require('./routes/share');
 const alarmScheduler = require('./alarm-scheduler');
 const digestScheduler = require('./digest-scheduler');
 
@@ -55,7 +56,9 @@ function parseCookies(header) {
   return out;
 }
 
-app.use('/api', (req, res, next) => {
+// Resolve the session cookie into req.userId for the API and the PWA share
+// target (which is a top-level POST from the OS, not an /api call).
+function resolveSession(req, res, next) {
   sessions.sweepExpired();
   const cookies = parseCookies(req.headers.cookie);
 
@@ -83,7 +86,9 @@ app.use('/api', (req, res, next) => {
 
   req.userId = null;
   next();
-});
+}
+
+app.use(['/api', '/share'], resolveSession);
 
 app.use('/api/session', sessionRouter);
 // Magic-link login: issues/consumes tokens, so it must sit above the cookie gate.
@@ -110,6 +115,10 @@ app.use('/api/digest', digestRouter);
 app.use('/api/push', pushRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/import', importRouter);
+
+// PWA share target — a top-level multipart POST from the OS share sheet, so it
+// lives outside /api (and its 401 gate); resolveSession above still runs.
+app.use('/share', shareRouter);
 
 app.listen(PORT, HOST, () => {
   console.log(`nico-server running at http://${HOST}:${PORT}/`);

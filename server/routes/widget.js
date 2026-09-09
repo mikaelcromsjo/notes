@@ -38,6 +38,7 @@ router.get('/', (req, res) => {
       generated_at: a.generatedAt,
       mode: 'agenda',
       tz: a.tz,
+      compose_url: `${origin}/?compose=1`,
       reminders: {
         overdue: withUrl(a.reminders.overdue),
         today: withUrl(a.reminders.today),
@@ -68,7 +69,12 @@ router.get('/', (req, res) => {
   }
 
   if (!center) {
-    return res.json({ generated_at: new Date().toISOString(), center: null, neighbors: [] });
+    return res.json({
+      generated_at: new Date().toISOString(),
+      compose_url: `${origin}/?compose=1`,
+      center: null,
+      neighbors: [],
+    });
   }
 
   const neighbors = db
@@ -86,6 +92,7 @@ router.get('/', (req, res) => {
 
   res.json({
     generated_at: new Date().toISOString(),
+    compose_url: `${origin}/?compose=1`,
     center: {
       id: center.id,
       title: center.title,
