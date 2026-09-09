@@ -1242,6 +1242,22 @@ button:hover { filter: brightness(1.05); }
   margin-top: 0.75rem;
 }
 
+.digest-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+.digest-row select {
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+}
+
 .empty-state {
   grid-column: 1 / -1;
   display: flex;
@@ -1463,6 +1479,8 @@ button:hover { filter: brightness(1.05); }
   border-color: var(--accent);
   color: var(--accent-contrast);
 }
+
+.agenda-task .agenda-when::before { content: '☐ '; }
 
 @media (max-width: 640px) {
   /* Reclaim vertical space the address bar steals in a plain browser tab, so

@@ -12,10 +12,14 @@ const tabsRouter = require('./routes/tabs');
 const navRouter = require('./routes/nav');
 const statsRouter = require('./routes/stats');
 const alarmsRouter = require('./routes/alarms');
+const agendaRouter = require('./routes/agenda');
+const digestRouter = require('./routes/digest');
+const digestPageRouter = require('./routes/digest-page');
 const pushRouter = require('./routes/push');
 const widgetRouter = require('./routes/widget');
 const historyRouter = require('./routes/history');
 const alarmScheduler = require('./alarm-scheduler');
+const digestScheduler = require('./digest-scheduler');
 
 const app = express();
 const PORT = process.env.PORT || 8040;
@@ -84,8 +88,9 @@ app.use('/api/session', sessionRouter);
 // Magic-link login: issues/consumes tokens, so it must sit above the cookie gate.
 app.use('/api/auth', authRouter);
 
-// Token-authed (widget_token query param), so it sits above the cookie gate.
+// Token-authed (widget_token query param), so these sit above the cookie gate.
 app.use('/api/widget', widgetRouter);
+app.use('/digest', digestPageRouter);
 
 // Everything below the session endpoint needs a user.
 app.use('/api', (req, res, next) => {
@@ -99,6 +104,8 @@ app.use('/api/tabs', tabsRouter);
 app.use('/api/nav', navRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/alarms', alarmsRouter);
+app.use('/api/agenda', agendaRouter);
+app.use('/api/digest', digestRouter);
 app.use('/api/push', pushRouter);
 app.use('/api/history', historyRouter);
 
@@ -107,3 +114,4 @@ app.listen(PORT, HOST, () => {
 });
 
 alarmScheduler.start();
+digestScheduler.start();

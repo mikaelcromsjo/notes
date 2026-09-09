@@ -136,24 +136,50 @@ CREATE INDEX idx_reminders_due ON reminders(next_at) WHERE next_at IS NOT NULL;
    `POST /:id/ack|snooze|schedule`. `notes.alarm_*` backfilled under
    `user_version < 2`, no longer written. `tz` captured on save.
 2. **[S] Snooze**: endpoint + push-notification actions + scheduler handling.
-   ✅ PARTIAL (2026-09-09) — `POST /api/alarms/:id/snooze {until}` +
+   ✅ DONE (2026-09-09) — `POST /api/alarms/:id/snooze {until}` +
    `snooze_until` overriding `next_at` in the scheduler + a "Snooze…" `<select>`
    on the ring popup: 10 min / 1 h / 3 h / Tonight (20:00) / Tomorrow / 1·2·3
-   weeks / 1·2·3 months, all computed in the viewer's TZ. Still TODO: `sw.js`
-   notification action buttons so a background push can be snoozed without
-   opening the app.
+   weeks / 1·2·3 months, all computed in the viewer's TZ. `sw.js` push
+   notifications now carry `reminderId` + two action buttons ("Snooze 10m",
+   "Snooze 1h") — fixed `now + N` offsets that need no TZ knowledge, so the
+   worker POSTs the snooze itself; on fetch failure it re-shows the notification
+   (the scheduler has already stamped `pushed_at` and won't ring again).
 3. **[M] Natural-language recurrence** parser + editor field + `rule` iteration.
+   ❌ DROPPED (2026-09-09) — founder decision: the day-chip UI covers the common
+   case; not worth a vendored parser. Revisit only if beta feedback asks for it.
 4. **[M] Agenda**: `GET /api/agenda`, the overlay, topbar bell + badge, widget
-   agenda mode. ✅ PARTIAL (2026-09-09) — `🔔` topbar bell with an overdue-count
-   badge + an agenda overlay (overdue / today / this week / later), built
-   **client-side** from the `alarms` array so bucketing happens in the viewer's
-   TZ (no `GET /api/agenda` — the server has no reliable TZ; add the endpoint
-   only when the widget needs it). Rows: open the note, snooze (shared
-   `buildSnoozeSelect`), ✓ ack. Still TODO: `GET /api/agenda` + widget agenda
-   mode; the open-`- [ ]`-tasks secondary list (Domain 4 dependency).
+   agenda mode. ✅ DONE (2026-09-09) — `🔔` topbar bell with an overdue-count
+   badge + an agenda overlay (overdue / today / this week / later). Reminder
+   bucketing stays **client-side** from the `alarms` array (viewer TZ). Added:
+   `server/agenda.js` `buildAgenda(userId, {tz})` — reads only the client-written
+   absolute instants (`COALESCE(snooze_until, next_at)`), buckets by wall-day in
+   an IANA zone (explicit `?tz=` → most common `reminders.tz` → UTC), and scans
+   note `content` for open `- [ ]` tasks (grammar mirrors `toggleTaskInSource`).
+   `GET /api/agenda` (cookie-authed, `server/routes/agenda.js`) and
+   `GET /api/widget?mode=agenda&tz=` (token-authed, deep-link URLs added) both
+   call it. The overlay now shows an "Open tasks" section from
+   `GET /api/agenda`'s `openTasks` (the client note cache carries no `content`).
 5. **[L] Digests**: `digest_prefs`, `digest-scheduler.js`, digest builder from
    `stats.js` signals, push + email delivery, `/api/review` + in-app Review tab,
-   settings UI.
+   settings UI. ✅ DONE (2026-09-09) — **reframed by founder**: the digest is the
+   *agenda* on a schedule (overdue / today / this week + open-task notes), not
+   the `stats.js` resurfacing signals (on-this-day / orphans / stale cluster —
+   dropped for v1). Shipped: `users.digest_*` columns (idempotent `ALTER`);
+   `server/digest.js` `buildDigest` (wraps `buildAgenda`) + subject/text/html/
+   push renderers so all three channels show the same thing; `server/routes/
+   digest.js` (`GET /` bundle = the in-app review, `GET`/`PUT /prefs`,
+   `POST /test` = send now); `server/digest-scheduler.js` (5-min tick, local-hour
+   match in `digest_tz`, cadence-window guard, empty-skip, null-safe CAS on
+   `digest_last_sent_at`, delivery via push/`mailer.js`); `sw.js` `type:'digest'`
+   handling; digest settings in the `👤` account overlay. No separate Review tab
+   — the agenda overlay already is the in-app view.
+   **Enriched 2026-09-09 (founder feedback "notification has no info"):** the
+   push body now lists the actual due items, not counts; push + email link to a
+   new standalone **`/digest?token=…`** page (`widget_token`-authed, above the
+   cookie gate) that shows overdue/today/week, open tasks, **every reminder**,
+   and **graph orphans** (the `stats.js` orphans signal after all), with
+   Open-in-app / Insights buttons. `handleDeepLink()` in `app.js` opens the
+   agenda/insights overlay from `/?d=agenda` / `/?d=insights`.
 6. **[S] Location reminders** (in-app / foreground only) — full background
    geofence deferred to the Domain 7 wrapper.
 
@@ -191,11 +217,15 @@ CREATE INDEX idx_reminders_due ON reminders(next_at) WHERE next_at IS NOT NULL;
 
 ## 7. Open questions for the founder
 
-1. Is recurrence-by-natural-language a launch feature or a fast-follow? (Day
-   chips already cover the common case.)
-2. Digest channel priority: push, email, or in-app "Review" tab first?
-3. Which resurfacing signals feel most valuable — "on this day", stale clusters,
-   orphans, loose ends? (Pick 2 for v1.)
+1. ~~Is recurrence-by-natural-language a launch feature or a fast-follow?~~
+   **Answered (2026-09-09): dropped.** Day chips cover the common case.
+2. ~~Digest channel priority: push, email, or in-app "Review" tab first?~~
+   **Answered (2026-09-09): all three shipped together.** In-app = the agenda
+   overlay; push + email off one builder.
+3. ~~Which resurfacing signals feel most valuable?~~ **Answered (2026-09-09):
+   none for v1** — the digest is the agenda (today / this week), not
+   nostalgia/orphan resurfacing. Revisit `stats.js`-signal digests later if beta
+   asks.
 4. Should reminders detach from notes entirely (a bare "remind me to…" that
    creates a note), matching the executive-function positioning?
 5. Location reminders — worth doing before the app-store wrapper exists, given

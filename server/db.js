@@ -116,6 +116,23 @@ if (!userCols.some((c) => c.name === 'widget_token')) {
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_widget_token ON users(widget_token)');
 
+// Digest prefs: an opt-in scheduled push/email of the user's agenda (today +
+// this week). server/digest-scheduler.js reads these hourly; the client owns
+// the schedule TZ the same way reminders do. cadence 'off' | 'daily' | 'weekly';
+// channel 'push' | 'email' | 'both'; hour is a local wall-clock hour 0-23.
+const digestCols = [
+  ["digest_cadence", "TEXT NOT NULL DEFAULT 'off'"],
+  ['digest_hour', 'INTEGER NOT NULL DEFAULT 8'],
+  ['digest_tz', 'TEXT'],
+  ["digest_channel", "TEXT NOT NULL DEFAULT 'push'"],
+  ['digest_last_sent_at', 'TEXT'],
+];
+for (const [name, decl] of digestCols) {
+  if (!userCols.some((c) => c.name === name)) {
+    db.exec(`ALTER TABLE users ADD COLUMN ${name} ${decl}`);
+  }
+}
+
 // Web Push subscriptions — how the alarm scheduler reaches a user when their
 // PWA is backgrounded/closed. One row per browser push endpoint.
 db.exec(`

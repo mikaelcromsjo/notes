@@ -182,6 +182,28 @@
         <button id="account-copy-btn" class="secondary">Copy URL</button>
         <button id="account-reset-widget-btn" class="secondary">Reset widget URL</button>
       </div>
+
+      <div class="picker-divider">digest</div>
+      <label class="picker-hint" for="digest-cadence">Email / push me my agenda</label>
+      <div class="digest-row">
+        <select id="digest-cadence">
+          <option value="off">Off</option>
+          <option value="daily">Every day</option>
+          <option value="weekly">Every Monday</option>
+        </select>
+        <span>at</span>
+        <select id="digest-hour"></select>
+        <select id="digest-channel">
+          <option value="push">Push</option>
+          <option value="email">Email</option>
+          <option value="both">Push + email</option>
+        </select>
+      </div>
+      <p class="picker-hint" id="digest-status" style="margin: 0.4rem 0 0;"></p>
+      <div class="picker-actions">
+        <button id="digest-test-btn" class="secondary">Send one now</button>
+      </div>
+
       <div class="picker-divider">or</div>
       <div class="picker-actions">
         <button id="account-switch-btn" class="secondary">Sign in as someone else</button>

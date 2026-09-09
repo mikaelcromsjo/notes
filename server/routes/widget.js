@@ -1,5 +1,6 @@
 const express = require('express');
 const db = require('../db');
+const { buildAgenda } = require('../agenda');
 
 const router = express.Router();
 
@@ -28,6 +29,24 @@ router.get('/', (req, res) => {
   if (!user) return res.status(401).json({ error: 'invalid or missing widget token' });
 
   const origin = originFor(req);
+
+  // ?mode=agenda → the "what's due" feed instead of the graph neighbourhood.
+  if (req.query.mode === 'agenda') {
+    const a = buildAgenda(user.id, { tz: req.query.tz });
+    const withUrl = (items) => items.map((it) => ({ ...it, url: `${origin}/#${it.noteId}` }));
+    return res.json({
+      generated_at: a.generatedAt,
+      mode: 'agenda',
+      tz: a.tz,
+      reminders: {
+        overdue: withUrl(a.reminders.overdue),
+        today: withUrl(a.reminders.today),
+        week: withUrl(a.reminders.week),
+        later: withUrl(a.reminders.later),
+      },
+      open_tasks: withUrl(a.openTasks),
+    });
+  }
 
   let center = db
     .prepare(

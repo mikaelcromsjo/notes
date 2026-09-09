@@ -76,6 +76,11 @@
   const accountResetWidgetBtn = document.getElementById('account-reset-widget-btn');
   const accountSwitchBtn = document.getElementById('account-switch-btn');
   const accountCloseBtn = document.getElementById('account-close-btn');
+  const digestCadence = document.getElementById('digest-cadence');
+  const digestHour = document.getElementById('digest-hour');
+  const digestChannel = document.getElementById('digest-channel');
+  const digestStatus = document.getElementById('digest-status');
+  const digestTestBtn = document.getElementById('digest-test-btn');
 
   // --- In-app replacements for native alert()/confirm() ---
   function toast(msg) {
@@ -793,6 +798,30 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ nextAt: nextAt || null }),
       }).catch(() => {}),
+    agenda: () => {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      return fetch(`/api/agenda${tz ? `?tz=${encodeURIComponent(tz)}` : ''}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null);
+    },
+    getDigestPrefs: () =>
+      fetch('/api/digest/prefs').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    saveDigestPrefs: (p) =>
+      fetch('/api/digest/prefs', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(p),
+      })
+        .then((r) => r.json())
+        .catch(() => null),
+    sendTestDigest: (cadence) =>
+      fetch('/api/digest/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cadence, tz: Intl.DateTimeFormat().resolvedOptions().timeZone || '' }),
+      })
+        .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
+        .catch(() => ({ ok: false, error: 'network error' })),
     getPushKey: () => fetch('/api/push/key').then((r) => (r.ok ? r.json() : null)).catch(() => null),
     subscribePush: (sub) =>
       fetch('/api/push/subscribe', {
@@ -942,6 +971,19 @@
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) checkAlarms();
     });
+    handleDeepLink();
+  }
+
+  // A digest notification / its "view online" page can open the app straight to
+  // a view: /?d=agenda or /?d=insights. Consume the param so a reload is clean.
+  function handleDeepLink() {
+    const d = new URLSearchParams(location.search).get('d');
+    if (d !== 'agenda' && d !== 'insights') return;
+    const url = new URL(location.href);
+    url.searchParams.delete('d');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+    if (d === 'agenda') openAgenda();
+    else openInsights();
   }
 
   function renderEmptyState() {
@@ -1978,6 +2020,29 @@
     return row;
   }
 
+  // A note carrying unchecked `- [ ]` tasks — the agenda's secondary list.
+  // Counts come from GET /api/agenda (the client note cache has no `content`).
+  function openTaskRow(t) {
+    const row = document.createElement('div');
+    row.className = 'agenda-item agenda-task';
+    const info = document.createElement('div');
+    info.className = 'agenda-info';
+    const title = document.createElement('div');
+    title.className = 'agenda-title linkish';
+    title.textContent = t.title;
+    title.addEventListener('click', () => {
+      agendaOverlay.classList.add('hidden');
+      jumpTo(t.noteId, 'agenda');
+    });
+    const w = document.createElement('div');
+    w.className = 'agenda-when';
+    w.textContent = `${t.open} open task${t.open === 1 ? '' : 's'}`;
+    info.appendChild(title);
+    info.appendChild(w);
+    row.appendChild(info);
+    return row;
+  }
+
   async function openAgenda() {
     agendaOverlay.classList.remove('hidden');
     agendaBody.textContent = 'Loading…';
@@ -2020,6 +2085,18 @@
       agendaBody.appendChild(h);
       items.forEach((a) => agendaBody.appendChild(agendaRow(a, label === 'Overdue')));
     }
+
+    // Secondary list: notes with open `- [ ]` tasks (server-computed).
+    const extra = await api.agenda();
+    const openTasks = (extra && extra.openTasks) || [];
+    if (openTasks.length) {
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = 'Open tasks';
+      agendaBody.appendChild(h);
+      openTasks.forEach((t) => agendaBody.appendChild(openTaskRow(t)));
+    }
+
     if (!any) {
       const p = document.createElement('p');
       p.className = 'muted';
@@ -2964,6 +3041,7 @@
     }
     accountEmail.textContent = `Signed in as ${currentUser.email}`;
     renderAccountWidgetUrl();
+    loadDigestPrefs();
     accountOverlay.classList.remove('hidden');
   });
 
@@ -3002,6 +3080,88 @@
     widgetToken = res.widgetToken || widgetToken;
     renderAccountWidgetUrl();
     toast('New widget URL generated');
+  });
+
+  // --- Digest settings (in the account overlay) -----------------------------
+  const localTzName = () => Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+
+  function fillDigestHours() {
+    if (digestHour.options.length) return;
+    for (let h = 0; h < 24; h += 1) {
+      const o = document.createElement('option');
+      o.value = String(h);
+      o.textContent = `${String(h).padStart(2, '0')}:00`;
+      digestHour.appendChild(o);
+    }
+  }
+
+  function renderDigestStatus(p) {
+    if (!p || p.cadence === 'off') {
+      digestStatus.textContent = 'Off — no scheduled digest.';
+      return;
+    }
+    const when = p.cadence === 'weekly' ? 'Mondays' : 'every day';
+    const chan = { push: 'push', email: 'email', both: 'push + email' }[p.channel] || p.channel;
+    let s = `On — ${when} at ${String(p.hour).padStart(2, '0')}:00 ${p.tz || localTzName() || 'UTC'}, via ${chan}.`;
+    if (p.channel !== 'push' && p.mailConfigured === false) {
+      s += ' ⚠️ email is not configured on this server.';
+    }
+    if (p.lastSentAt) s += ` Last sent ${new Date(p.lastSentAt).toLocaleString()}.`;
+    digestStatus.textContent = s;
+  }
+
+  async function loadDigestPrefs() {
+    fillDigestHours();
+    const p = await api.getDigestPrefs();
+    if (!p) {
+      digestStatus.textContent = '';
+      return;
+    }
+    digestCadence.value = p.cadence || 'off';
+    digestHour.value = String(p.hour == null ? 8 : p.hour);
+    digestChannel.value = p.channel || 'push';
+    renderDigestStatus(p);
+  }
+
+  async function saveDigestPrefs() {
+    const body = {
+      cadence: digestCadence.value,
+      hour: Number(digestHour.value),
+      channel: digestChannel.value,
+      tz: localTzName(),
+    };
+    const p = await api.saveDigestPrefs(body);
+    if (!p) {
+      toast('Could not save digest settings');
+      return;
+    }
+    renderDigestStatus(p);
+    if (body.cadence !== 'off' && body.channel !== 'email') enableAlarmDelivery();
+    toast('Digest settings saved');
+  }
+
+  [digestCadence, digestHour, digestChannel].forEach((el) =>
+    el.addEventListener('change', saveDigestPrefs)
+  );
+
+  digestTestBtn.addEventListener('click', async () => {
+    digestTestBtn.disabled = true;
+    try {
+      const r = await api.sendTestDigest(digestCadence.value === 'weekly' ? 'weekly' : 'daily');
+      if (!r.ok) {
+        toast(r.error || 'Could not send a test digest');
+      } else if (r.errors && r.errors.length) {
+        toast(`Sent with problems: ${r.errors.join('; ')}`);
+      } else {
+        const via = Object.entries(r.sent || {})
+          .filter(([, v]) => v)
+          .map(([k]) => k)
+          .join(' + ');
+        toast(via ? `Test digest sent via ${via}` : 'Nothing was sent');
+      }
+    } finally {
+      digestTestBtn.disabled = false;
+    }
   });
 
   init();

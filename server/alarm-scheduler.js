@@ -35,6 +35,7 @@ async function tick() {
     markPushed.run(nowIso, r.id);
     await sendToUser(r.user_id, {
       type: 'alarm',
+      reminderId: r.id,
       noteId: r.note_id,
       title: r.title || 'Alarm',
       at: r.due_at,
