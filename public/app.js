@@ -553,9 +553,48 @@
   }
 
   function alarmTriggered(a, ref) {
+    if (a.snoozeUntil) {
+      const s = new Date(a.snoozeUntil);
+      if (s > ref) return false; // snoozed into the future — stays quiet
+      return !a.ackAt || new Date(a.ackAt) < s; // snooze elapsed — ring until acked
+    }
     const t = mostRecentAlarmTrigger(a, ref);
     if (!t) return false;
     return !a.ackAt || new Date(a.ackAt) < t;
+  }
+
+  // "Remind me later" snoozes, computed in the viewer's timezone. `tonight`
+  // means 20:00 today, or tomorrow if it's already past.
+  const SNOOZE_OPTIONS = [
+    { label: '10 minutes', minutes: 10 },
+    { label: '1 hour', hours: 1 },
+    { label: '3 hours', hours: 3 },
+    { label: 'Tonight', tonight: true },
+    { label: 'Tomorrow', days: 1 },
+    { label: '1 week', weeks: 1 },
+    { label: '2 weeks', weeks: 2 },
+    { label: '3 weeks', weeks: 3 },
+    { label: '1 month', months: 1 },
+    { label: '2 months', months: 2 },
+    { label: '3 months', months: 3 },
+  ];
+
+  function snoozeUntilIso(
+    { minutes = 0, hours = 0, days = 0, weeks = 0, months = 0, tonight = false },
+    ref = new Date()
+  ) {
+    const d = new Date(ref);
+    if (tonight) {
+      d.setHours(20, 0, 0, 0);
+      if (d <= ref) d.setDate(d.getDate() + 1);
+      return d.toISOString();
+    }
+    if (minutes) d.setMinutes(d.getMinutes() + minutes);
+    if (hours) d.setHours(d.getHours() + hours);
+    if (days) d.setDate(d.getDate() + days);
+    if (weeks) d.setDate(d.getDate() + weeks * 7);
+    if (months) d.setMonth(d.getMonth() + months);
+    return d.toISOString();
   }
 
   // Next scheduled datetime strictly after `ref`, in the viewer's timezone, or
@@ -718,7 +757,13 @@
         .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
         .catch(() => ({ ok: false, error: 'network error' })),
     listAlarms: () => fetch('/api/alarms').then((r) => (r.ok ? r.json() : [])).catch(() => []),
-    setAlarm: (id, data) =>
+    createAlarm: (data) =>
+      fetch('/api/alarms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }).then((r) => r.json()),
+    updateAlarm: (id, data) =>
       fetch(`/api/alarms/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -730,6 +775,12 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ at: new Date().toISOString(), nextAt: nextAt || null }),
+      }),
+    snoozeAlarm: (id, until) =>
+      fetch(`/api/alarms/${id}/snooze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ until }),
       }),
     scheduleAlarm: (id, nextAt) =>
       fetch(`/api/alarms/${id}/schedule`, {
@@ -1166,7 +1217,7 @@
     doneBtn.setAttribute('aria-pressed', String(isDone));
 
     const alarmBtn = document.createElement('button');
-    const hasAlarm = alarms.some((a) => a.id === currentId);
+    const hasAlarm = alarms.some((a) => a.noteId === currentId);
     alarmBtn.className = 'alarm-btn' + (hasAlarm ? ' active' : '');
     alarmBtn.textContent = '⏰';
     alarmBtn.title = hasAlarm ? 'Edit alarm' : 'Set alarm';
@@ -1682,7 +1733,7 @@
       const chip = document.createElement('div');
       chip.className =
         'tab' +
-        (a.id === currentId ? ' active' : '') +
+        (a.noteId === currentId ? ' active' : '') +
         (a.triggered ? ' alarm-triggered' : '');
 
       const title = document.createElement('span');
@@ -1690,7 +1741,7 @@
       title.textContent = `⏰ ${a.time} ${a.title}`;
 
       chip.appendChild(title);
-      chip.addEventListener('click', () => jumpTo(a.id, 'alarm'));
+      chip.addEventListener('click', () => jumpTo(a.noteId, 'alarm'));
       alarmbar.appendChild(chip);
     });
   }
@@ -1702,16 +1753,24 @@
   async function checkAlarms({ popup = true } = {}) {
     const ref = new Date();
     alarms = (await api.listAlarms()).map((a) => ({ ...a, triggered: alarmTriggered(a, ref) }));
-    const next = new Set(alarms.filter((a) => a.triggered).map((a) => a.id));
+
+    // Grid / tab / pin tint is keyed by NOTE id — a note glows if any of its
+    // reminders is ringing.
+    const nextNotes = new Set(alarms.filter((a) => a.triggered).map((a) => a.noteId));
     const changed =
-      next.size !== triggeredAlarmIds.size || [...next].some((id) => !triggeredAlarmIds.has(id));
+      nextNotes.size !== triggeredAlarmIds.size ||
+      [...nextNotes].some((id) => !triggeredAlarmIds.has(id));
+    triggeredAlarmIds = nextNotes;
 
-    triggeredAlarmIds = next;
-    for (const id of [...alarmDismissed]) if (!next.has(id)) alarmDismissed.delete(id);
-    for (const id of [...alarmNotified]) if (!next.has(id)) alarmNotified.delete(id);
+    // Popup dismiss / notified bookkeeping is keyed by REMINDER id.
+    const ringingIds = new Set(alarms.filter((a) => a.triggered).map((a) => a.id));
+    for (const id of [...alarmDismissed]) if (!ringingIds.has(id)) alarmDismissed.delete(id);
+    for (const id of [...alarmNotified]) if (!ringingIds.has(id)) alarmNotified.delete(id);
 
-    // Keep the server's alarm_next_at pointing at the upcoming occurrence.
+    // Keep the server's next_at pointing at the upcoming occurrence — but leave
+    // a reminder that is snoozed into the future alone.
     for (const a of alarms) {
+      if (a.snoozeUntil && new Date(a.snoozeUntil) > ref) continue;
       const want = isoOrNull(nextAlarmOccurrence(a, ref));
       if (want !== (a.nextAt || null)) api.scheduleAlarm(a.id, want);
     }
@@ -1744,9 +1803,9 @@
           alarmNotified.add(a.id);
           reg.showNotification(`⏰ ${a.title}`, {
             body: alarmWhenText(a),
-            tag: `alarm-${a.id}`,
+            tag: `alarm-${a.noteId}`,
             renotify: true,
-            data: { url: `/#${a.id}` },
+            data: { url: `/#${a.noteId}` },
           });
         });
       })
@@ -1775,6 +1834,29 @@
       info.appendChild(t);
       info.appendChild(w);
 
+      const snooze = document.createElement('select');
+      snooze.className = 'apo-snooze';
+      snooze.title = 'Remind me again later';
+      const ph = document.createElement('option');
+      ph.value = '';
+      ph.textContent = 'Snooze…';
+      snooze.appendChild(ph);
+      SNOOZE_OPTIONS.forEach((opt, i) => {
+        const o = document.createElement('option');
+        o.value = String(i);
+        o.textContent = opt.label;
+        snooze.appendChild(o);
+      });
+      snooze.addEventListener('change', async () => {
+        const opt = SNOOZE_OPTIONS[Number(snooze.value)];
+        snooze.value = '';
+        if (!opt) return;
+        await api.snoozeAlarm(a.id, snoozeUntilIso(opt));
+        alarmDismissed.delete(a.id);
+        hideAlarmPopupRow(row);
+        await checkAlarms({ popup: false });
+      });
+
       const ok = document.createElement('button');
       ok.className = 'apo-ok';
       ok.textContent = 'OK';
@@ -1796,6 +1878,7 @@
       });
 
       row.appendChild(info);
+      row.appendChild(snooze);
       row.appendChild(ok);
       row.appendChild(x);
       alarmPopupList.appendChild(row);
@@ -1825,7 +1908,7 @@
 
   function openAlarmEditor(note) {
     alarmEditNote = note;
-    const existing = alarms.find((a) => a.id === note.id);
+    const existing = alarms.find((a) => a.noteId === note.id);
 
     const d = new Date();
     alarmTimeInput.value = existing
@@ -1933,7 +2016,14 @@
     const seed = mostRecentAlarmTrigger(scheduleShape, nowRef);
     body.ackAt = (seed || nowRef).toISOString();
     body.nextAt = isoOrNull(nextAlarmOccurrence(scheduleShape, nowRef));
-    await api.setAlarm(alarmEditNote.id, body);
+    try {
+      body.tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+    } catch {
+      body.tz = null;
+    }
+    const existing = alarms.find((a) => a.noteId === alarmEditNote.id);
+    if (existing) await api.updateAlarm(existing.id, body);
+    else await api.createAlarm({ ...body, noteId: alarmEditNote.id });
     await enableAlarmDelivery();
     closeAlarmEditor();
     await afterAlarmChange();
@@ -1941,7 +2031,8 @@
 
   alarmRemoveBtn.addEventListener('click', async () => {
     if (!alarmEditNote) return;
-    await api.removeAlarm(alarmEditNote.id);
+    const existing = alarms.find((a) => a.noteId === alarmEditNote.id);
+    if (existing) await api.removeAlarm(existing.id);
     closeAlarmEditor();
     await afterAlarmChange();
   });

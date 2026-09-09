@@ -129,8 +129,19 @@ CREATE INDEX idx_reminders_due ON reminders(next_at) WHERE next_at IS NOT NULL;
 ## 4. Milestones
 
 1. **[M] `reminders` table + backfill + route rework**; `public/app.js` moves to
-   the reminder grain. Old `/:noteId` shim kept one release.
+   the reminder grain. Old `/:noteId` shim kept one release. ✅ DONE (2026-09-09) —
+   no `/:noteId` shim (id semantics flip from note→reminder can't be served both
+   ways from one path; single-user beta, static assets, immediate reload). Routes
+   now `GET /` · `POST /` (`noteId` in body) · `PUT`/`DELETE /:id` ·
+   `POST /:id/ack|snooze|schedule`. `notes.alarm_*` backfilled under
+   `user_version < 2`, no longer written. `tz` captured on save.
 2. **[S] Snooze**: endpoint + push-notification actions + scheduler handling.
+   ✅ PARTIAL (2026-09-09) — `POST /api/alarms/:id/snooze {until}` +
+   `snooze_until` overriding `next_at` in the scheduler + a "Snooze…" `<select>`
+   on the ring popup: 10 min / 1 h / 3 h / Tonight (20:00) / Tomorrow / 1·2·3
+   weeks / 1·2·3 months, all computed in the viewer's TZ. Still TODO: `sw.js`
+   notification action buttons so a background push can be snoozed without
+   opening the app.
 3. **[M] Natural-language recurrence** parser + editor field + `rule` iteration.
 4. **[M] Agenda**: `GET /api/agenda`, the overlay, topbar bell + badge, widget
    agenda mode.

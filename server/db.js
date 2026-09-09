@@ -235,6 +235,70 @@ if (db.pragma('user_version', { simple: true }) < 1) {
   db.pragma('user_version = 1');
 }
 
+// --- Reminders: a note can carry one or more wake-ups. Supersedes the
+// notes.alarm_* columns (those are no longer written — kept one release for
+// rollback). time is HH:MM in the viewer's timezone; recurring when days is a
+// CSV of JS getDay() numbers (0=Sun), one-shot when days='' and date is
+// YYYY-MM-DD. Fire times are computed client-side (the box may run another TZ):
+// next_at is the absolute UTC instant of the next ring, rolled forward by the
+// client whenever the app is open. ack_at holds the last "OK" — the reminder is
+// "triggered" while ack_at predates the current occurrence. pushed_at is stamped
+// by server/alarm-scheduler.js once it has pushed for the current next_at, so a
+// ring is pushed at most once. tz is the IANA zone captured at create time (for
+// a future server-side digest fallback). snooze_until, when set, overrides
+// next_at as the due instant and is cleared on ack.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS reminders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id      INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    time         TEXT NOT NULL,
+    days         TEXT NOT NULL DEFAULT '',
+    date         TEXT,
+    tz           TEXT,
+    next_at      TEXT,
+    ack_at       TEXT,
+    pushed_at    TEXT,
+    snooze_until TEXT,
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_reminders_note ON reminders (note_id);
+  CREATE INDEX IF NOT EXISTS idx_reminders_user ON reminders (user_id, time);
+  CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (next_at) WHERE next_at IS NOT NULL;
+`);
+
+// One-time backfill of every armed notes.alarm_* row into reminders. Shares the
+// user_version counter with the FTS rebuild above (1 = FTS built); to force
+// either again bump past 2 and adjust the matching guard.
+if (db.pragma('user_version', { simple: true }) < 2) {
+  const armed = db
+    .prepare(
+      `SELECT id, user_id, alarm_time, alarm_days, alarm_date, alarm_ack_at, alarm_next_at, alarm_pushed_at
+       FROM notes
+       WHERE alarm_time IS NOT NULL AND user_id IS NOT NULL`
+    )
+    .all();
+  const insReminder = db.prepare(
+    `INSERT INTO reminders (note_id, user_id, time, days, date, ack_at, next_at, pushed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  db.transaction(() => {
+    for (const n of armed) {
+      insReminder.run(
+        n.id,
+        n.user_id,
+        n.alarm_time,
+        n.alarm_days || '',
+        n.alarm_date,
+        n.alarm_ack_at,
+        n.alarm_next_at,
+        n.alarm_pushed_at
+      );
+    }
+  })();
+  db.pragma('user_version = 2');
+}
+
 // Retention: navigation history is behavioural data — keep 90 days.
 db.prepare(
   "DELETE FROM nav_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')"

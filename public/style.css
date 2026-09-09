@@ -462,6 +462,7 @@ button:hover { filter: brightness(1.05); }
 .alarm-popup-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
   padding: 0.55rem 0;
   border-top: 1px solid var(--border);
@@ -469,7 +470,16 @@ button:hover { filter: brightness(1.05); }
 
 .alarm-popup-item:first-child { border-top: none; }
 
-.alarm-popup-item .apo-info { flex: 1; min-width: 0; }
+.alarm-popup-item .apo-info { flex: 1 1 100%; min-width: 0; }
+.alarm-popup-item .apo-snooze {
+  margin-right: auto;
+  padding: 0.3rem 0.4rem;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
 .alarm-popup-item .apo-title { font-weight: 600; overflow-wrap: anywhere; }
 .alarm-popup-item .apo-when { font-size: 0.78rem; color: var(--muted); }
 .alarm-popup-item button { padding: 0.3rem 0.55rem; }
