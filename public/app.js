@@ -2925,33 +2925,98 @@
       `${geo.length} mapped · ${allNotesCache.length - geo.length} without location`;
 
     mapMarkers.clearLayers();
-    geo.forEach((note) => {
+
+    // Notes captured at (nearly) the same spot stack invisibly — one pin hides
+    // the rest. Bucket by a lat/lon grid and draw a stack as a single counted
+    // marker whose popup lists every note there. The grid cell is loose and
+    // zoom-aware: ~40 screen-pixels wide but never under 50 m, so zooming in
+    // shrinks the buckets and stacks split back into individual pins.
+    const groupM = Math.max(50, 40 * mapMetersPerPixel());
+    const latCellDeg = groupM / 111320;
+
+    const noteLink = (note) => {
       const icon = TYPE_ICON[note.type] ? `${TYPE_ICON[note.type]} ` : '';
-      L.circleMarker([note.lat, note.lon], {
-        radius: 8,
-        color: '#fff',
-        weight: 2,
-        fillColor: mapColorFor(note),
-        fillOpacity: 0.95,
+      return (
+        `<a href="#${note.id}" data-note-id="${note.id}">` +
+        `${icon}${escapeHtml(note.title || 'Untitled')}</a>`
+      );
+    };
+
+    const groups = new Map();
+    geo.forEach((note) => {
+      const lonCellDeg =
+        latCellDeg / Math.max(Math.cos((note.lat * Math.PI) / 180), 1e-6);
+      const key =
+        Math.round(note.lat / latCellDeg) + ':' + Math.round(note.lon / lonCellDeg);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(note);
+    });
+
+    groups.forEach((notes) => {
+      const lead = notes[0];
+      if (notes.length === 1) {
+        const icon = TYPE_ICON[lead.type] ? `${TYPE_ICON[lead.type]} ` : '';
+        L.circleMarker([lead.lat, lead.lon], {
+          radius: 8,
+          color: '#fff',
+          weight: 2,
+          fillColor: mapColorFor(lead),
+          fillOpacity: 0.95,
+        })
+          .bindPopup(
+            `<b>${icon}${escapeHtml(lead.title || 'Untitled')}</b><br />` +
+              `<a href="#${lead.id}" data-note-id="${lead.id}">Open note</a>`
+          )
+          .addTo(mapMarkers);
+        return;
+      }
+
+      // Sit the counted marker at the bucket's centroid.
+      const lat = notes.reduce((s, n) => s + n.lat, 0) / notes.length;
+      const lon = notes.reduce((s, n) => s + n.lon, 0) / notes.length;
+      L.marker([lat, lon], {
+        icon: L.divIcon({
+          className: 'map-stack-icon',
+          html: `<span style="background:${mapColorFor(lead)}">${notes.length}</span>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+          popupAnchor: [0, -14],
+        }),
       })
         .bindPopup(
-          `<b>${icon}${escapeHtml(note.title || 'Untitled')}</b><br />` +
-            `<a href="#${note.id}" data-note-id="${note.id}">Open note</a>`
+          `<b>${notes.length} notes here</b>` +
+            `<ul class="map-stack-list">` +
+            notes.map((n) => `<li>${noteLink(n)}</li>`).join('') +
+            `</ul>`
         )
         .addTo(mapMarkers);
     });
+  }
 
+  // Metres per screen pixel at the map's current zoom and centre latitude.
+  function mapMetersPerPixel() {
+    const lat = leafletMap.getCenter().lat;
+    return (156543.03392 * Math.cos((lat * Math.PI) / 180)) / 2 ** leafletMap.getZoom();
+  }
+
+  // Initial view when the map opens — fit all located notes, or fall back to the
+  // viewer's own position (then the whole world) when there are none. Kept out
+  // of drawMapMarkers so re-bucketing on zoom doesn't yank the view around.
+  async function centerMapOnNotes() {
+    const geo = allNotesCache.filter(
+      (n) => Number.isFinite(n.lat) && Number.isFinite(n.lon)
+    );
     if (geo.length > 0) {
       leafletMap.fitBounds(geo.map((n) => [n.lat, n.lon]), { padding: [40, 40], maxZoom: 16 });
+      return;
+    }
+    const here = await getLocation();
+    if (here) {
+      leafletMap.setView([here.lat, here.lon], 13);
+      mapStatusEl.textContent = 'No located notes yet — showing your location';
     } else {
-      const here = await getLocation();
-      if (here) {
-        leafletMap.setView([here.lat, here.lon], 13);
-        mapStatusEl.textContent = 'No located notes yet — showing your location';
-      } else {
-        leafletMap.setView([20, 0], 2);
-        mapStatusEl.textContent = 'No located notes yet';
-      }
+      leafletMap.setView([20, 0], 2);
+      mapStatusEl.textContent = 'No located notes yet';
     }
   }
 
@@ -2973,6 +3038,10 @@
       leafletMap.setView([20, 0], 2);
       mapMarkers = L.layerGroup().addTo(leafletMap);
 
+      // Re-bucket the stacks for the new zoom (fires once per zoom gesture,
+      // after the animation settles).
+      leafletMap.on('zoomend', () => { drawMapMarkers(); });
+
       mapEl.addEventListener('click', (e) => {
         const a = e.target.closest('a[data-note-id]');
         if (!a) return;
@@ -2988,6 +3057,7 @@
     syncMapModes();
     await refreshColorData();
     await drawMapMarkers();
+    await centerMapOnNotes();
   }
 
   function closeMap() {

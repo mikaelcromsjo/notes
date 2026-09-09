@@ -1137,7 +1137,7 @@ button:hover { filter: brightness(1.05); }
 .map-status {
   position: absolute;
   top: 0.75rem;
-  left: 0.75rem;
+  left: 3.25rem; /* clear Leaflet's zoom control */
   z-index: 500;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1150,10 +1150,11 @@ button:hover { filter: brightness(1.05); }
 
 .map-modes {
   position: absolute;
-  top: 0.75rem;
-  right: 2.75rem;
+  top: 2.75rem; /* below the close (✕) button */
+  left: 3.25rem; /* aligned with .map-status */
   z-index: 500;
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
 }
 
@@ -1180,6 +1181,30 @@ button:hover { filter: brightness(1.05); }
   border-radius: 8px;
   box-shadow: var(--shadow);
 }
+
+/* Stacked-notes marker: a counted badge standing in for several pins at one spot. */
+.map-stack-icon span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: var(--shadow);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.map-stack-list {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.map-stack-list li { margin: 0.15rem 0; }
 
 .picker h2 {
   margin: 0 0 0.75rem 0;
