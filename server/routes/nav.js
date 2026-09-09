@@ -4,7 +4,7 @@ const db = require('../db');
 const router = express.Router();
 
 const VIA = new Set([
-  'neighbor', 'parent', 'search', 'pin', 'hash', 'from-link', 'create', 'tab', 'unknown',
+  'neighbor', 'parent', 'search', 'pin', 'todo', 'alarm', 'hash', 'from-link', 'create', 'tab', 'unknown',
 ]);
 
 // Record one graph move: the user centered `to`, arriving from `from` (null for

@@ -223,11 +223,12 @@ router.delete('/:id/pin', (req, res) => {
   res.json(note);
 });
 
-const NOTE_STATUSES = new Set(['active', 'done', 'deleted']);
+const NOTE_STATUSES = new Set(['active', 'todo', 'done', 'deleted']);
 
 const STATUS_VERB = {
   deleted: 'Deleted',
   done: 'Completed',
+  todo: 'Flagged to-do',
   active: 'Reopened',
 };
 
@@ -378,6 +379,17 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
   if (!parent) {
     if (req.file) fs.unlink(req.file.path, () => {});
     return res.status(404).json({ error: 'parent note not found' });
+  }
+
+  // Inline image: store the file through the same MIME allowlist + size cap as a
+  // normal attachment, but create no attachment note and no link — the caller
+  // drops a `![](<path>)` into the markdown source instead. No history entry.
+  if (req.body.inline === '1' || req.body.inline === 'true') {
+    if (!req.file || req.file.mimetype.split('/')[0] !== 'image') {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: 'a supported image file is required' });
+    }
+    return res.status(201).json({ path: `/uploads/${req.file.filename}` });
   }
 
   const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = req.body;

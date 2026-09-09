@@ -173,7 +173,17 @@ LIMIT ?;
    `createLinkedNote`) offers "Create note "X" and link it here?" then jumps
    there. Verified the click→navigate / click→create wiring end-to-end with
    jsdom (DOMPurify keeps `class`/`data-note-id`/`href`).
-6. **[S] Inline image paste/drop** with the `inline=1` attachment flag. TODO.
+6. **[S] Inline image paste/drop** with the `inline=1` attachment flag. ✅ DONE
+   (2026-09-09). `POST /api/notes/:id/attachments` gained an `inline` branch
+   (above the `type` validation): stores the file through the same
+   `IMAGE_EXT`/`fileFilter`/50 MB path but creates **no** attachment note, **no**
+   link, **no** history entry — returns `{ path: "/uploads/<file>" }`. Rejects
+   non-image / missing file with 400. `buildNoteEditor` in `public/app.js` wires
+   `paste` + `drop` on the editor textarea → `insertInlineImage()` drops a
+   `![](uploading…#<t>)` placeholder at the caret, uploads, then swaps in
+   `![](<path>)` (or clears the placeholder + toasts on failure); `dragover`
+   preventDefault only when `Files` are present. Server-verified on a DB copy;
+   **needs a real-browser pass** (clipboard image paste, drag from desktop).
 
 ## 5. Dependencies
 

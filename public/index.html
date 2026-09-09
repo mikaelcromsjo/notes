@@ -42,6 +42,7 @@
 
   <nav id="tabbar" class="tabbar"></nav>
   <nav id="pinbar" class="tabbar pinbar hidden"></nav>
+  <nav id="todobar" class="tabbar todobar hidden"></nav>
   <nav id="alarmbar" class="tabbar alarmbar hidden"></nav>
 
   <main id="grid" class="grid">
@@ -173,41 +174,121 @@
   </div>
 
   <div id="account-overlay" class="overlay hidden">
-    <div class="picker">
-      <h2>Account</h2>
-      <p class="picker-hint" id="account-email" style="margin: 0 0 0.8rem;"></p>
-      <label class="picker-hint" for="account-widget-url">Home-screen widget feed URL</label>
-      <input type="text" id="account-widget-url" readonly />
-      <div class="picker-actions">
-        <button id="account-copy-btn" class="secondary">Copy URL</button>
-        <button id="account-reset-widget-btn" class="secondary">Reset widget URL</button>
+    <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="settings-head">
+        <h2>Settings</h2>
+        <button id="account-close-btn" class="settings-close" title="Close" aria-label="Close">✕</button>
       </div>
 
-      <div class="picker-divider">digest</div>
-      <label class="picker-hint" for="digest-cadence">Email / push me my agenda</label>
-      <div class="digest-row">
-        <select id="digest-cadence">
-          <option value="off">Off</option>
-          <option value="daily">Every day</option>
-          <option value="weekly">Every Monday</option>
-        </select>
-        <span>at</span>
-        <select id="digest-hour"></select>
-        <select id="digest-channel">
-          <option value="push">Push</option>
-          <option value="email">Email</option>
-          <option value="both">Push + email</option>
-        </select>
-      </div>
-      <p class="picker-hint" id="digest-status" style="margin: 0.4rem 0 0;"></p>
-      <div class="picker-actions">
-        <button id="digest-test-btn" class="secondary">Send one now</button>
-      </div>
+      <div class="settings-main">
+        <nav class="settings-nav" id="settings-nav">
+          <button type="button" class="settings-nav-item active" data-section="account">Account</button>
+          <button type="button" class="settings-nav-item" data-section="layout">Header rows</button>
+          <button type="button" class="settings-nav-item" data-section="digest">Digest</button>
+          <button type="button" class="settings-nav-item" data-section="import">Import</button>
+        </nav>
 
-      <div class="picker-divider">or</div>
-      <div class="picker-actions">
-        <button id="account-switch-btn" class="secondary">Sign in as someone else</button>
-        <button id="account-close-btn" class="secondary">Close</button>
+        <div class="settings-panels">
+          <section class="settings-section active" data-section="account">
+            <h3>Account</h3>
+            <p class="settings-desc" id="account-email"></p>
+
+            <label class="settings-label" for="account-widget-url">Home-screen widget feed URL</label>
+            <input type="text" id="account-widget-url" readonly />
+            <div class="settings-btn-row">
+              <button id="account-copy-btn" class="secondary">Copy URL</button>
+              <button id="account-reset-widget-btn" class="secondary">Reset widget URL</button>
+            </div>
+
+            <div class="settings-btn-row settings-btn-row-spaced">
+              <button id="account-switch-btn" class="secondary">Sign in as someone else</button>
+            </div>
+          </section>
+
+          <section class="settings-section" data-section="layout">
+            <h3>Header rows</h3>
+            <p class="settings-desc">Choose which rows appear under the top bar. A row also stays hidden while it has nothing to show.</p>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">Tabs</span>
+                <span class="settings-toggle-sub">Open notes you can switch between</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-tabs" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">Pinned</span>
+                <span class="settings-toggle-sub">Shortcuts to notes you pinned</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-pins" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">To-do</span>
+                <span class="settings-toggle-sub">Notes you flagged to do</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-todos" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">Alarms</span>
+                <span class="settings-toggle-sub">Notes with a wake-up set</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-alarms" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+          </section>
+
+          <section class="settings-section" data-section="digest">
+            <h3>Digest</h3>
+            <p class="settings-desc">A scheduled push or email of your agenda — what's overdue, due soon, flagged to-do, and open tasks.</p>
+
+            <label class="settings-label" for="digest-cadence">Send me my agenda</label>
+            <div class="settings-inline-row">
+              <select id="digest-cadence">
+                <option value="off">Off</option>
+                <option value="daily">Every day</option>
+                <option value="weekly">Every Monday</option>
+              </select>
+              <span>at</span>
+              <select id="digest-hour"></select>
+              <select id="digest-channel">
+                <option value="push">Push</option>
+                <option value="email">Email</option>
+                <option value="both">Push + email</option>
+              </select>
+            </div>
+            <p class="settings-desc" id="digest-status"></p>
+            <div class="settings-btn-row">
+              <button id="digest-test-btn" class="secondary">Send one now</button>
+            </div>
+          </section>
+
+          <section class="settings-section" data-section="import">
+            <h3>Import</h3>
+            <p class="settings-desc">Bring notes in from another app. A re-import updates matched notes instead of duplicating them.</p>
+
+            <label class="settings-label" for="import-format">Source</label>
+            <div class="settings-inline-row">
+              <select id="import-format">
+                <option value="obsidian">Obsidian vault</option>
+                <option value="markdown">Markdown folder</option>
+              </select>
+              <input type="file" id="import-file" accept=".zip,.md,.markdown" />
+            </div>
+            <p class="settings-desc" id="import-status"></p>
+            <div class="settings-btn-row">
+              <button id="import-run-btn" class="secondary">Import (.zip or .md)</button>
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   </div>

@@ -134,9 +134,55 @@ migration), shown + rotatable in the account overlay next to the widget token
 
 1. **[M] Import core**: `import_jobs` + `import_source`, `POST /api/import` +
    status route, in-process runner, normalized-record model, the mapping rules,
-   Import UI + progress.
+   Import UI + progress. ✅ DONE (2026-09-09).
 2. **[M] Markdown/Obsidian parser** (the two highest-value formats; share most
-   code).
+   code). ✅ DONE (2026-09-09).
+
+   **What shipped (M1+M2 together — M1 isn't testable without a parser):**
+   - Migration (`server/db.js`): `import_jobs(id TEXT pk, user_id, format,
+     status pending|running|done|error, totals JSON, error, created_at,
+     finished_at)` + `import_source(user_id, format, source_key, note_id,
+     PRIMARY KEY(user_id,format,source_key))`.
+   - `server/importer.js` — `parseFrontMatter` (minimal YAML: title/tags/
+     aliases/dates), `buildRecord` (one `.md` → normalized record), `parseArchive`
+     (adm-zip; skips `.obsidian/ .trash/ .git/ __MACOSX/` + dotfiles), `ingest`
+     (2 passes, 200-row txn chunks, `await setImmediate` between), `runJob`.
+   - `server/routes/import.js` — `POST /api/import` (multer memory, 30 MB cap,
+     `format` ∈ `markdown|obsidian`, `.zip` or single `.md`) → `202 {jobId}` +
+     `setImmediate(runJob)`; `GET /api/import` (last 20), `GET /api/import/:jobId`.
+     Mounted below the cookie gate in `index.js`.
+   - New dep **`adm-zip`** (`^0.5.18`, pure JS, sync API — fits no-build).
+   - Mapping: source `.md` → one `text` note; `source_key` = the file's posix
+     relative path. Folder path → nested **hub notes** (title = last segment),
+     child links to its folder hub, folder hub → parent folder hub. Front-matter
+     + inline `#tags` → **`#tag` hub notes**, tagged note links to each. `[[wiki]]`
+     resolves by title (existing notes win over imported); `[x](./rel.md)`
+     resolves by `source_key`; unresolved → **dropped + reported** in
+     `totals.unresolved` (capped 100) / `unresolvedCount`. Embedded images
+     (`![](rel)` / Obsidian `![[img.png]]`, ext allowlist mirrors
+     `routes/notes.js`, no SVG) copied into `data/uploads/` and the markdown
+     rewritten to `![](/uploads/…)` inline — **no attachment note** (matches the
+     Domain-4 M6 inline-image convention); non-image embeds left as text, counted
+     `skipped`.
+   - **Re-import**: `import_source` → `UPDATE` title/content in place, never
+     insert-dup, never delete. Verified: 2nd run of the same zip = `notes:0,
+     updated:3, links:0, hubs:0`, note count unchanged.
+   - Front-matter `created`/`updated` (`YYYY-MM-DD` or ISO) preserved into
+     `notes.created_at`/`updated_at`.
+   - UI: account overlay (`👤`) "import" section — format `<select>`, file input,
+     Import button, status line polling `GET /api/import/:jobId` every 1.5 s →
+     `"Imported 3 notes, 8 links, 6 hubs, 2 images, 1 dead link."`; refreshes
+     `allNotesCache` + pin bar on done.
+   - **No `history` entries** for import (bulk op, not a graph move) — a bad
+     import is recovered by editing the source and re-importing.
+   - **Server-verified** on a DB copy (fixture Obsidian vault); **needs a
+     real-browser pass** (upload a real vault export, check the graph + rendered
+     images).
+
+   **Known limits / follow-ups:** re-import re-copies embedded images to fresh
+   `/uploads/` files each run (orphans the old ones); no total-uncompressed-size
+   cap on the zip (30 MB compressed only); `#tags` scanned outside code fences
+   only (regex, not a full parser); no `history`/undo for a whole import.
 3. **[S] Google Keep Takeout parser.**
 4. **[S] Notion export parser.**
 5. **[S] Apple Notes parser** (HTML→markdown; document the export Shortcut for

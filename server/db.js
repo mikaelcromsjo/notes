@@ -56,8 +56,11 @@ if (!noteColumns.some((c) => c.name === 'created_from_note_id')) {
 if (!noteColumns.some((c) => c.name === 'attachment_path')) {
   db.exec('ALTER TABLE notes ADD COLUMN attachment_path TEXT');
 }
-// status: 'active' (default) | 'done' | 'deleted'. Set from the center-cell
-// footer buttons: 'deleted' hides the note everywhere, 'done' dims it in place.
+// status: 'active' (default) | 'todo' | 'done' | 'deleted'. Set from the
+// center-cell footer button, which cycles active -> todo -> done -> active:
+// 'deleted' hides the note everywhere, 'done' dims it in place, 'todo' flags it
+// as an open thing to do (surfaced in the agenda + digest). Free TEXT, no CHECK
+// constraint, so new values need no migration.
 if (!noteColumns.some((c) => c.name === 'status')) {
   db.exec("ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
 }
@@ -315,6 +318,35 @@ if (db.pragma('user_version', { simple: true }) < 2) {
   })();
   db.pragma('user_version = 2');
 }
+
+// --- Import & Capture: bulk import of notes from other tools (Markdown folder /
+// Obsidian vault for now). import_jobs tracks one background run; the runner in
+// server/importer.js processes the uploaded archive in-process (like the
+// schedulers) and writes progress into `totals`. import_source maps a stable
+// per-format key (the file's relative path) to the note it created, so a
+// re-import UPDATES the note instead of duplicating it — it never deletes.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS import_jobs (
+    id          TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    format      TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    totals      TEXT NOT NULL DEFAULT '{}',
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    finished_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_import_jobs_user ON import_jobs (user_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS import_source (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    format     TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    note_id    INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (user_id, format, source_key)
+  );
+`);
 
 // Retention: navigation history is behavioural data — keep 90 days.
 db.prepare(

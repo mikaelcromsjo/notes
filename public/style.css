@@ -9,6 +9,8 @@
   --danger: #e0575b;
   --pin: #c9821a;
   --pin-contrast: #ffffff;
+  --todo: #0d9488;
+  --todo-contrast: #ffffff;
   --radius: 12px;
   --shadow: 0 1px 3px rgba(20, 20, 30, 0.08), 0 1px 2px rgba(20, 20, 30, 0.06);
 }
@@ -342,6 +344,27 @@ button:hover { filter: brightness(1.05); }
   background: var(--pin);
   border-color: var(--pin);
   color: var(--pin-contrast);
+}
+
+.todobar {
+  background: color-mix(in srgb, var(--todo) 8%, var(--surface));
+}
+
+.todobar .tab {
+  border-color: color-mix(in srgb, var(--todo) 40%, var(--border));
+  color: var(--todo);
+  cursor: pointer;
+}
+
+.todobar .tab:hover {
+  border-color: var(--todo);
+  color: var(--todo);
+}
+
+.todobar .tab.active {
+  background: var(--todo);
+  border-color: var(--todo);
+  color: var(--todo-contrast);
 }
 
 /* --- Alarms --- */
@@ -954,6 +977,12 @@ button:hover { filter: brightness(1.05); }
   color: var(--accent);
 }
 
+.cell.center .done-btn.todo {
+  background: var(--todo);
+  border-color: var(--todo);
+  color: var(--todo-contrast);
+}
+
 .cell.center .done-btn.active {
   background: var(--accent);
   border-color: var(--accent);
@@ -1242,20 +1271,220 @@ button:hover { filter: brightness(1.05); }
   margin-top: 0.75rem;
 }
 
-.digest-row {
+/* --- Settings modal (account overlay) --- */
+.settings-modal {
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: 92%;
+  max-width: 680px;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.settings-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0.35rem 0.5rem;
+  border-radius: 8px;
+}
+
+.settings-close:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.settings-main {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+.settings-nav {
+  flex: 0 0 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.75rem;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.settings-nav-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  white-space: nowrap;
+}
+
+.settings-nav-item:hover {
+  background: var(--bg);
+  color: var(--text);
+}
+
+.settings-nav-item.active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.settings-panels {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.settings-section { display: none; }
+.settings-section.active { display: block; }
+
+.settings-section h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.settings-desc {
+  margin: 0 0 1rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.settings-label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0 0 0.3rem;
+}
+
+.settings-modal input[type='text'],
+.settings-modal input[type='email'] {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.settings-inline-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 0.4rem;
   font-size: 0.85rem;
 }
-.digest-row select {
+
+.settings-inline-row select,
+.settings-inline-row input[type='file'] {
   padding: 0.4rem 0.5rem;
   border: 1px solid var(--border);
   border-radius: 8px;
   font: inherit;
   color: var(--text);
   background: var(--bg);
+  max-width: 100%;
+}
+
+.settings-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.settings-btn-row-spaced {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+/* Toggle row: label text on the left, a switch on the right. The real
+   <input type=checkbox> is visually hidden but stays keyboard/AT reachable. */
+.settings-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+.settings-toggle:last-child { border-bottom: 1px solid var(--border); }
+
+.settings-toggle-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.settings-toggle-title { font-size: 0.9rem; }
+.settings-toggle-sub { font-size: 0.75rem; color: var(--muted); }
+
+.settings-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.settings-switch {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--border);
+  position: relative;
+  transition: background 0.15s ease;
+}
+
+.settings-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(20, 20, 30, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.settings-toggle input:checked ~ .settings-switch {
+  background: var(--accent);
+}
+.settings-toggle input:checked ~ .settings-switch::after {
+  transform: translateX(16px);
+}
+.settings-toggle input:focus-visible ~ .settings-switch {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .empty-state {
@@ -1493,6 +1722,26 @@ button:hover { filter: brightness(1.05); }
     padding: 0.75rem;
   }
   .cell { padding: 0.6rem; }
+
+  /* Settings modal: near-fullscreen, section nav becomes a scrollable strip
+     above the panel instead of a left rail. */
+  .settings-modal {
+    width: 100%;
+    max-width: none;
+    height: 100%;
+    max-height: 100%;
+    border-radius: 0;
+  }
+  .settings-main { flex-direction: column; }
+  .settings-nav {
+    flex: 0 0 auto;
+    flex-direction: row;
+    gap: 0.4rem;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-panels { padding: 1rem; }
 }
 
 /* Short viewports (phones in landscape): shrink spacing/chrome so all 3 grid

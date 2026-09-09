@@ -2,6 +2,7 @@
   const grid = document.getElementById('grid');
   const tabbar = document.getElementById('tabbar');
   const pinbar = document.getElementById('pinbar');
+  const todobar = document.getElementById('todobar');
   const searchInput = document.getElementById('search-input');
   const searchResults = document.getElementById('search-results');
   const newNoteBtn = document.getElementById('new-note-btn');
@@ -76,11 +77,48 @@
   const accountResetWidgetBtn = document.getElementById('account-reset-widget-btn');
   const accountSwitchBtn = document.getElementById('account-switch-btn');
   const accountCloseBtn = document.getElementById('account-close-btn');
+  const importFormat = document.getElementById('import-format');
+  const importFile = document.getElementById('import-file');
+  const importRunBtn = document.getElementById('import-run-btn');
+  const importStatus = document.getElementById('import-status');
   const digestCadence = document.getElementById('digest-cadence');
   const digestHour = document.getElementById('digest-hour');
   const digestChannel = document.getElementById('digest-channel');
   const digestStatus = document.getElementById('digest-status');
   const digestTestBtn = document.getElementById('digest-test-btn');
+  const settingsNav = document.getElementById('settings-nav');
+
+  // --- Header-row visibility (per device, like zoom / colour mode). A row is
+  // shown only when its toggle is on AND it has something to display. ---
+  const BAR_PREF_KEY = {
+    tabs: 'nico-notes-bar-tabs',
+    pins: 'nico-notes-bar-pins',
+    todos: 'nico-notes-bar-todos',
+    alarms: 'nico-notes-bar-alarms',
+  };
+  const barPrefs = Object.fromEntries(
+    Object.entries(BAR_PREF_KEY).map(([k, key]) => {
+      let v = '1';
+      try {
+        v = localStorage.getItem(key) ?? '1';
+      } catch {
+        /* private mode — default on */
+      }
+      return [k, v !== '0'];
+    })
+  );
+
+  function setBarPref(key, on) {
+    barPrefs[key] = on;
+    try {
+      localStorage.setItem(BAR_PREF_KEY[key], on ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+    renderTabbar();
+    renderPinbar();
+    renderAlarmbar();
+  }
 
   // --- In-app replacements for native alert()/confirm() ---
   function toast(msg) {
@@ -1207,6 +1245,48 @@
       },
     });
 
+    // Inline images: paste or drop an image into the editor → upload it (no
+    // graph node) and drop a `![](…)` at the caret. A placeholder marks the
+    // spot while the upload is in flight.
+    async function insertInlineImage(file) {
+      if (!file || !file.type.startsWith('image/')) return;
+      const tag = `![](uploading…#${Date.now().toString(36)})`;
+      const pos = content.selectionStart;
+      content.value = content.value.slice(0, pos) + tag + content.value.slice(content.selectionEnd);
+      content.dispatchEvent(new Event('input'));
+      try {
+        const fd = new FormData();
+        fd.set('inline', '1');
+        fd.set('file', file, file.name || 'pasted.png');
+        const res = await fetch(`/api/notes/${currentId}/attachments`, { method: 'POST', body: fd });
+        const data = res.ok ? await res.json() : null;
+        if (!data || !data.path) throw new Error('upload failed');
+        content.value = content.value.replace(tag, `![](${data.path})`);
+      } catch (e) {
+        content.value = content.value.replace(tag, '');
+        toast('Image upload failed.');
+      }
+      content.dispatchEvent(new Event('input'));
+    }
+
+    content.addEventListener('paste', (e) => {
+      const item = [...(e.clipboardData?.items || [])].find(
+        (it) => it.kind === 'file' && it.type.startsWith('image/')
+      );
+      if (!item) return;
+      e.preventDefault();
+      insertInlineImage(item.getAsFile());
+    });
+    content.addEventListener('dragover', (e) => {
+      if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
+    });
+    content.addEventListener('drop', (e) => {
+      const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
+      if (!file) return;
+      e.preventDefault();
+      insertInlineImage(file);
+    });
+
     // Markdown preview toggle. Checkboxes stay interactive in preview mode.
     const previewBtn = document.createElement('button');
     previewBtn.type = 'button';
@@ -1243,7 +1323,16 @@
 
     if (linkCount > LINK_LIST_THRESHOLD) frag.appendChild(buildLinksPanel());
 
-    const isDone = currentNote.status === 'done';
+    // Center-cell status button — a tri-state cycle over notes.status:
+    //   active (no marker) → todo (an open thing to do) → done → active.
+    // 'todo' and 'done' both surface in the agenda + digest; only 'done' dims.
+    const statusStep = { active: 'todo', todo: 'done', done: 'active' };
+    const statusFace = {
+      active: { icon: '○', title: 'Mark as to-do', cls: '' },
+      todo: { icon: '◑', title: 'Mark as done', cls: ' todo' },
+      done: { icon: '✅', title: 'Clear status', cls: ' active' },
+    };
+    const curStatus = statusStep[currentNote.status] ? currentNote.status : 'active';
 
     const footer = document.createElement('div');
     footer.className = 'center-footer';
@@ -1258,10 +1347,10 @@
     pinBtn.setAttribute('aria-pressed', String(Boolean(currentNote.pinned)));
 
     const doneBtn = document.createElement('button');
-    doneBtn.className = 'done-btn' + (isDone ? ' active' : '');
-    doneBtn.textContent = '✅';
-    doneBtn.title = isDone ? 'Mark not done' : 'Mark done';
-    doneBtn.setAttribute('aria-pressed', String(isDone));
+    doneBtn.className = 'done-btn' + statusFace[curStatus].cls;
+    doneBtn.textContent = statusFace[curStatus].icon;
+    doneBtn.title = statusFace[curStatus].title;
+    doneBtn.setAttribute('aria-pressed', String(curStatus === 'done'));
 
     const alarmBtn = document.createElement('button');
     const hasAlarm = alarms.some((a) => a.noteId === currentId);
@@ -1300,7 +1389,7 @@
     });
 
     doneBtn.addEventListener('click', async () => {
-      currentNote = await api.setStatus(currentId, isDone ? 'active' : 'done');
+      currentNote = await api.setStatus(currentId, statusStep[curStatus]);
       allNotesCache = await api.listNotes();
       renderPinbar();
       await onRerender();
@@ -1701,6 +1790,7 @@
   // --- Tab bar ---
   function renderTabbar() {
     tabbar.innerHTML = '';
+    tabbar.classList.toggle('hidden', !barPrefs.tabs);
 
     tabs.forEach((tab) => {
       const chip = document.createElement('div');
@@ -1748,11 +1838,11 @@
     tabbar.appendChild(newTabBtn);
   }
 
-  // --- Pin bar: always-visible shortcuts to pinned notes ---
+  // --- Pin bar: shortcuts to pinned notes ---
   function renderPinbar() {
     const pinned = allNotesCache.filter((n) => n.pinned);
     pinbar.innerHTML = '';
-    pinbar.classList.toggle('hidden', pinned.length === 0);
+    pinbar.classList.toggle('hidden', pinned.length === 0 || !barPrefs.pins);
 
     pinned.forEach((note) => {
       const chip = document.createElement('div');
@@ -1769,12 +1859,38 @@
       chip.addEventListener('click', () => jumpTo(note.id, 'pin'));
       pinbar.appendChild(chip);
     });
+
+    // The to-do bar tracks the same note cache, so keep it in lockstep.
+    renderTodobar();
+  }
+
+  // --- To-do bar: a row (like the pin bar) of every note flagged status:'todo' ---
+  function renderTodobar() {
+    const todos = allNotesCache.filter((n) => n.status === 'todo');
+    todobar.innerHTML = '';
+    todobar.classList.toggle('hidden', todos.length === 0 || !barPrefs.todos);
+
+    todos.forEach((note) => {
+      const chip = document.createElement('div');
+      chip.className =
+        'tab' +
+        (note.id === currentId ? ' active' : '') +
+        (triggeredAlarmIds.has(note.id) ? ' alarm-triggered' : '');
+
+      const title = document.createElement('span');
+      title.className = 'tab-title';
+      title.textContent = `◑ ${note.title}`;
+
+      chip.appendChild(title);
+      chip.addEventListener('click', () => jumpTo(note.id, 'todo'));
+      todobar.appendChild(chip);
+    });
   }
 
   // --- Alarm bar: a row (like the pin bar) of every note that has an alarm ---
   function renderAlarmbar() {
     alarmbar.innerHTML = '';
-    alarmbar.classList.toggle('hidden', alarms.length === 0);
+    alarmbar.classList.toggle('hidden', alarms.length === 0 || !barPrefs.alarms);
 
     alarms.forEach((a) => {
       const chip = document.createElement('div');
@@ -2043,6 +2159,24 @@
     return row;
   }
 
+  // A note the user flagged to-do via the center-cell status button.
+  function todoRow(t) {
+    const row = document.createElement('div');
+    row.className = 'agenda-item agenda-task';
+    const info = document.createElement('div');
+    info.className = 'agenda-info';
+    const title = document.createElement('div');
+    title.className = 'agenda-title linkish';
+    title.textContent = t.title;
+    title.addEventListener('click', () => {
+      agendaOverlay.classList.add('hidden');
+      jumpTo(t.noteId, 'agenda');
+    });
+    info.appendChild(title);
+    row.appendChild(info);
+    return row;
+  }
+
   async function openAgenda() {
     agendaOverlay.classList.remove('hidden');
     agendaBody.textContent = 'Loading…';
@@ -2086,8 +2220,17 @@
       items.forEach((a) => agendaBody.appendChild(agendaRow(a, label === 'Overdue')));
     }
 
-    // Secondary list: notes with open `- [ ]` tasks (server-computed).
+    // Secondary lists (server-computed): notes flagged to-do, then notes
+    // carrying open `- [ ]` tasks in their body.
     const extra = await api.agenda();
+    const todos = (extra && extra.todos) || [];
+    if (todos.length) {
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = 'To-do';
+      agendaBody.appendChild(h);
+      todos.forEach((t) => agendaBody.appendChild(todoRow(t)));
+    }
     const openTasks = (extra && extra.openTasks) || [];
     if (openTasks.length) {
       any = true;
@@ -3034,6 +3177,36 @@
     accountOverlay.classList.add('hidden');
   }
 
+  // Settings section list: clicking a nav item swaps the visible panel.
+  function showSettingsSection(name) {
+    settingsNav.querySelectorAll('.settings-nav-item').forEach((b) => {
+      b.classList.toggle('active', b.dataset.section === name);
+    });
+    accountOverlay.querySelectorAll('.settings-section').forEach((s) => {
+      s.classList.toggle('active', s.dataset.section === name);
+    });
+  }
+  settingsNav.addEventListener('click', (e) => {
+    const btn = e.target.closest('.settings-nav-item');
+    if (btn) showSettingsSection(btn.dataset.section);
+  });
+
+  // Header-row toggles (the "Header rows" section).
+  const barToggleEls = {
+    tabs: document.getElementById('bar-toggle-tabs'),
+    pins: document.getElementById('bar-toggle-pins'),
+    todos: document.getElementById('bar-toggle-todos'),
+    alarms: document.getElementById('bar-toggle-alarms'),
+  };
+  Object.entries(barToggleEls).forEach(([key, el]) => {
+    el.addEventListener('change', () => setBarPref(key, el.checked));
+  });
+  function syncBarToggles() {
+    Object.entries(barToggleEls).forEach(([key, el]) => {
+      el.checked = barPrefs[key];
+    });
+  }
+
   accountBtn.addEventListener('click', () => {
     if (!currentUser) {
       showLogin();
@@ -3041,6 +3214,8 @@
     }
     accountEmail.textContent = `Signed in as ${currentUser.email}`;
     renderAccountWidgetUrl();
+    syncBarToggles();
+    showSettingsSection('account');
     loadDigestPrefs();
     accountOverlay.classList.remove('hidden');
   });
@@ -3080,6 +3255,67 @@
     widgetToken = res.widgetToken || widgetToken;
     renderAccountWidgetUrl();
     toast('New widget URL generated');
+  });
+
+  // --- Import (in the account overlay) ------------------------------------
+  let importBusy = false;
+
+  async function pollImport(jobId) {
+    importStatus.textContent = 'Importing…';
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 1500));
+      let job;
+      try {
+        job = await fetch(`/api/import/${jobId}`).then((r) => (r.ok ? r.json() : null));
+      } catch {
+        continue;
+      }
+      if (!job) continue;
+      if (job.status === 'error') {
+        importStatus.textContent = `Import failed: ${job.error || 'unknown error'}`;
+        return;
+      }
+      if (job.status === 'done') {
+        const t = job.totals || {};
+        const bits = [`${t.notes || 0} notes`];
+        if (t.updated) bits.push(`${t.updated} updated`);
+        if (t.links) bits.push(`${t.links} links`);
+        if (t.hubs) bits.push(`${t.hubs} hubs`);
+        if (t.images) bits.push(`${t.images} images`);
+        if (t.skipped) bits.push(`${t.skipped} skipped`);
+        if (t.unresolvedCount) bits.push(`${t.unresolvedCount} dead links`);
+        importStatus.textContent = `Imported ${bits.join(', ')}.`;
+        allNotesCache = await api.listNotes();
+        renderPinbar();
+        return;
+      }
+    }
+  }
+
+  importRunBtn.addEventListener('click', async () => {
+    if (importBusy) return;
+    const file = importFile.files[0];
+    if (!file) {
+      importStatus.textContent = 'Choose a .zip or .md file first.';
+      return;
+    }
+    importBusy = true;
+    importRunBtn.disabled = true;
+    importStatus.textContent = 'Uploading…';
+    try {
+      const fd = new FormData();
+      fd.set('format', importFormat.value);
+      fd.set('file', file);
+      const res = await fetch('/api/import', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`);
+      await pollImport(data.jobId);
+    } catch (e) {
+      importStatus.textContent = `Import failed: ${e.message}`;
+    } finally {
+      importBusy = false;
+      importRunBtn.disabled = false;
+    }
   });
 
   // --- Digest settings (in the account overlay) -----------------------------

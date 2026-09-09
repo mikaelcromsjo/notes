@@ -21,6 +21,14 @@ const taskNotesStmt = db.prepare(
    WHERE user_id = ? AND status != 'deleted' AND content LIKE '%[ ]%'`
 );
 
+// Notes the user flagged as an open thing to do (the center-cell status button's
+// middle state). Distinct from `- [ ]` checkbox lines inside a note's body.
+const todoNotesStmt = db.prepare(
+  `SELECT id, title, updated_at FROM notes
+   WHERE user_id = ? AND status = 'todo'
+   ORDER BY updated_at DESC`
+);
+
 // Unchecked task line, matching public/app.js toggleTaskInSource's grammar
 // (bullet or "N." ordered marker, then "[ ]", then some text).
 const OPEN_TASK_RE = /^[ \t]*(?:[-*+]|\d+\.)[ \t]+\[ \][ \t]*\S/gm;
@@ -102,10 +110,15 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   }
   openTasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 
+  const todos = todoNotesStmt
+    .all(userId)
+    .map((n) => ({ noteId: n.id, title: n.title, updatedAt: n.updated_at }));
+
   return {
     generatedAt: now.toISOString(),
     tz: zone,
     reminders: buckets,
+    todos,
     openTasks: openTasks.slice(0, OPEN_TASKS_LIMIT),
   };
 }

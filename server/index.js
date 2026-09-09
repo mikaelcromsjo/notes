@@ -18,6 +18,7 @@ const digestPageRouter = require('./routes/digest-page');
 const pushRouter = require('./routes/push');
 const widgetRouter = require('./routes/widget');
 const historyRouter = require('./routes/history');
+const importRouter = require('./routes/import');
 const alarmScheduler = require('./alarm-scheduler');
 const digestScheduler = require('./digest-scheduler');
 
@@ -108,6 +109,7 @@ app.use('/api/agenda', agendaRouter);
 app.use('/api/digest', digestRouter);
 app.use('/api/push', pushRouter);
 app.use('/api/history', historyRouter);
+app.use('/api/import', importRouter);
 
 app.listen(PORT, HOST, () => {
   console.log(`nico-server running at http://${HOST}:${PORT}/`);

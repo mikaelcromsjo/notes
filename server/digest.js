@@ -2,10 +2,10 @@ const db = require('./db');
 const { buildAgenda } = require('./agenda');
 
 // The digest is the user's agenda on a schedule: what's overdue, due today, and
-// due this week, plus notes carrying open `- [ ]` tasks. It reuses buildAgenda
-// so the in-app view, the scheduled push, and the email all show the same
-// thing. `later` reminders are left out — a digest is about what needs
-// attention now. The standalone "view online" page (buildDigestPage /
+// due this week, plus notes flagged to-do and notes carrying open `- [ ]` tasks.
+// It reuses buildAgenda so the in-app view, the scheduled push, and the email
+// all show the same thing. `later` reminders are left out — a digest is about
+// what needs attention now. The standalone "view online" page (buildDigestPage /
 // digestPageDoc) adds context the notification can't fit: every reminder, and a
 // few graph orphans to resurface.
 
@@ -16,10 +16,12 @@ function publicOrigin() {
 function buildDigest(userId, { tz, now = new Date() } = {}) {
   const a = buildAgenda(userId, { tz, now });
   const { overdue, today, week } = a.reminders;
+  const todos = a.todos || [];
   const counts = {
     overdue: overdue.length,
     today: today.length,
     week: week.length,
+    todos: todos.length,
     openTasks: a.openTasks.length,
   };
   return {
@@ -28,9 +30,11 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
     overdue,
     today,
     week,
+    todos,
     openTasks: a.openTasks,
     counts,
-    isEmpty: counts.overdue + counts.today + counts.week + counts.openTasks === 0,
+    isEmpty:
+      counts.overdue + counts.today + counts.week + counts.todos + counts.openTasks === 0,
   };
 }
 
@@ -89,6 +93,7 @@ function summaryLine(d, cadence) {
   if (d.counts.overdue) bits.push(`${d.counts.overdue} overdue`);
   if (d.counts.today) bits.push(`${d.counts.today} due today`);
   if (cadence === 'weekly' && d.counts.week) bits.push(`${d.counts.week} this week`);
+  if (d.counts.todos) bits.push(`${d.counts.todos} to-do`);
   if (d.counts.openTasks) {
     bits.push(`${d.counts.openTasks} note${d.counts.openTasks === 1 ? '' : 's'} with open tasks`);
   }
@@ -112,6 +117,7 @@ function digestText(d, cadence, { viewUrl } = {}) {
   if (cadence === 'weekly') {
     out += section('This week', d.week.map((r) => `${r.title} — ${whenLabel(r)}  ${origin}/#${r.noteId}`));
   }
+  out += section('To-do', d.todos.map((t) => `${t.title}  ${origin}/#${t.noteId}`));
   out += section(
     'Open tasks',
     d.openTasks.map((t) => `${t.title} (${t.open} open)  ${origin}/#${t.noteId}`)
@@ -144,6 +150,7 @@ function digestHtml(d, cadence, { viewUrl } = {}) {
     htmlList('Overdue', d.overdue.map((r) => link(r, whenLabel(r)))) +
     htmlList('Today', d.today.map((r) => link(r, r.time || ''))) +
     (cadence === 'weekly' ? htmlList('This week', d.week.map((r) => link(r, whenLabel(r)))) : '') +
+    htmlList('To-do', d.todos.map((t) => link({ noteId: t.noteId, title: t.title }, ''))) +
     htmlList('Open tasks', d.openTasks.map((t) => link({ noteId: t.noteId, title: t.title }, `${t.open} open`))) +
     (viewUrl
       ? `<p style="margin:16px 0 0;font:14px system-ui"><a href="${esc(viewUrl)}" style="color:#2563eb">See everything →</a> <span style="color:#888">every reminder, orphaned notes, insights</span></p>`
@@ -164,6 +171,7 @@ function digestPush(d, cadence, { url } = {}) {
   const shown = lines.length;
   const dueTotal = d.counts.overdue + d.counts.today + (cadence === 'weekly' ? d.counts.week : 0);
   if (dueTotal > shown) lines.push(`+${dueTotal - shown} more`);
+  if (d.counts.todos) lines.push(`${d.counts.todos} to-do`);
   if (d.counts.openTasks) {
     lines.push(`${d.counts.openTasks} note${d.counts.openTasks === 1 ? '' : 's'} with open tasks`);
   }
@@ -199,6 +207,7 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
     pageSection('Overdue', page.overdue.map((r) => L(r, whenLabel(r)))) +
     pageSection('Today', page.today.map((r) => L(r, r.time || ''))) +
     pageSection('This week', page.week.map((r) => L(r, whenLabel(r)))) +
+    pageSection('To-do', page.todos.map((t) => L({ noteId: t.noteId, title: t.title }, ''))) +
     pageSection(
       'Open tasks',
       page.openTasks.map((t) => L({ noteId: t.noteId, title: t.title }, `${t.open} open`))
