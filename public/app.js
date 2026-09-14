@@ -2,12 +2,16 @@
   const grid = document.getElementById('grid');
   const tabbar = document.getElementById('tabbar');
   const pinbar = document.getElementById('pinbar');
+  const latestbar = document.getElementById('latestbar');
   const todobar = document.getElementById('todobar');
   const searchInput = document.getElementById('search-input');
   const searchResults = document.getElementById('search-results');
   const newNoteBtn = document.getElementById('new-note-btn');
 
   const colorModeBtn = document.getElementById('color-mode-btn');
+  const imageOverlay = document.getElementById('image-overlay');
+  const imageOverlayClose = document.getElementById('image-overlay-close');
+  const imageOverlayImg = document.getElementById('image-overlay-img');
   const mapBtn = document.getElementById('map-btn');
   const insightsBtn = document.getElementById('insights-btn');
   const insightsOverlay = document.getElementById('insights-overlay');
@@ -35,7 +39,16 @@
   const pickerCreateBtn = document.getElementById('picker-create-btn');
   const pickerCancelBtn = document.getElementById('picker-cancel-btn');
   const pickerStyleRow = document.getElementById('picker-style-row');
+  const pickerPhotoRow = document.getElementById('picker-photo-row');
   const pickerPhotoInput = document.getElementById('picker-photo-input');
+  const pickerCameraInput = document.getElementById('picker-camera-input');
+  const pickerCameraBtn = document.getElementById('picker-camera-btn');
+  const pickerGalleryBtn = document.getElementById('picker-gallery-btn');
+  const pickerPhotoStatus = document.getElementById('picker-photo-status');
+  const pickerFileRow = document.getElementById('picker-file-row');
+  const pickerFileInput = document.getElementById('picker-file-input');
+  const pickerFileBtn = document.getElementById('picker-file-btn');
+  const pickerFileStatus = document.getElementById('picker-file-status');
   const pickerAudioRow = document.getElementById('picker-audio-row');
   const pickerRecordBtn = document.getElementById('picker-record-btn');
   const pickerRecordStatus = document.getElementById('picker-record-status');
@@ -108,6 +121,7 @@
   const BAR_PREF_KEY = {
     tabs: 'nico-notes-bar-tabs',
     pins: 'nico-notes-bar-pins',
+    latest: 'nico-notes-bar-latest',
     todos: 'nico-notes-bar-todos',
     alarms: 'nico-notes-bar-alarms',
   };
@@ -132,6 +146,7 @@
     }
     renderTabbar();
     renderPinbar();
+    renderLatestbar();
     renderAlarmbar();
   }
 
@@ -348,7 +363,8 @@
     // Rebuild the { parent, neighbors, links, linkCount } shape loadNeighbors
     // wants, from the local link + note mirror. No nav_events offline, so the
     // ranking degrades to link-recency (exactly the server's cold-start order)
-    // and `parent` falls back to recorded provenance.
+    // and `parent` falls back to recorded provenance, then to the oldest link
+    // (same hierarchy heuristic as the server — see notes.js /neighbors).
     async localNeighbors(id) {
       const nid = typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id;
       const [links, notesArr] = [await this.cachedLinks(), await this.cachedList()];
@@ -357,14 +373,73 @@
         .filter((l) => !l._deleted && (l.a === nid || l.b === nid))
         .map((l) => ({ other: l.a === nid ? l.b : l.a, at: l.created_at }))
         .sort((x, y) => String(y.at).localeCompare(String(x.at)))
-        .map(({ other }) => byId.get(other))
-        .filter((n) => n && n.status !== 'deleted')
-        .map((n) => ({ id: n.id, title: n.title, type: n.type, status: n.status }));
+        .map(({ other, at }) => {
+          const n = byId.get(other);
+          if (!n || n.status === 'deleted') return null;
+          return {
+            id: n.id,
+            title: n.title,
+            type: n.type,
+            status: n.status,
+            created_from_note_id: n.created_from_note_id,
+            note_created_at: n.created_at,
+            linked_at: at,
+          };
+        })
+        .filter(Boolean);
 
       const center = byId.get(nid);
       let parent = null;
       if (center && center.created_from_note_id) {
-        parent = rows.find((r) => r.id === center.created_from_note_id) || null;
+        const fallback = rows.find((r) => r.id === center.created_from_note_id) || null;
+        // 'done' notes sink everywhere else — never surface one as the back-link.
+        parent = fallback && fallback.status !== 'done' ? fallback : null;
+      }
+      // Structural fallback: no recorded provenance. First, drop any
+      // candidate that's provably this note's child rather than its parent:
+      // created_from_note_id says so explicitly, or its own created_at
+      // exactly matches the link's created_at — born at the moment this link
+      // was made, same shape as created_from_note_id, just on notes old
+      // enough to predate that column being recorded.
+      if (!parent) {
+        const candidates = rows.filter(
+          (r) => r.created_from_note_id !== nid && r.note_created_at !== r.linked_at
+        );
+        // `rows` (and so `candidates`) is newest-link-first, so the last
+        // non-done entry is the oldest surviving link. But if a done note had
+        // to be skipped to get there, the true oldest link got archived and
+        // the next survivor is often just an incidental note, not a real
+        // parent — prefer the most-linked survivor instead (mirrors the
+        // server's /neighbors logic).
+        let skippedDone = false;
+        let oldestSurvivor = null;
+        for (let i = candidates.length - 1; i >= 0; i--) {
+          if (candidates[i].status === 'done') {
+            skippedDone = true;
+            continue;
+          }
+          oldestSurvivor = candidates[i];
+          break;
+        }
+        if (oldestSurvivor && skippedDone) {
+          const degree = new Map();
+          for (const l of links) {
+            if (l._deleted) continue;
+            degree.set(l.a, (degree.get(l.a) || 0) + 1);
+            degree.set(l.b, (degree.get(l.b) || 0) + 1);
+          }
+          const orderIndex = new Map(rows.map((r, i) => [r.id, i])); // 0 = newest
+          const survivors = candidates.filter((r) => r.status !== 'done');
+          survivors.sort((a, b) => {
+            const da = degree.get(a.id) || 0;
+            const dbDeg = degree.get(b.id) || 0;
+            if (da !== dbDeg) return dbDeg - da;
+            return orderIndex.get(b.id) - orderIndex.get(a.id); // larger index = older = first
+          });
+          parent = survivors[0];
+        } else {
+          parent = oldestSurvivor;
+        }
       }
       const parentId = parent ? parent.id : null;
       const ordered = rows.filter((r) => r.id !== parentId);
@@ -372,6 +447,161 @@
       ordered.sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0));
       const neighbors = ordered.slice(0, parent ? 7 : 8);
       return { parent, neighbors, links: rows, linkCount: rows.length };
+    },
+    // Bulk version of localNeighbors' parent inference, run once for the
+    // whole cached graph so features that need "children of X" (the
+    // subtree-scoped to-do bar) don't recompute per note. Same rules as the
+    // server's buildHierarchy (server/hierarchy.js). Caveat: a note never
+    // individually opened may be missing created_from_note_id/created_at in
+    // the mirror (the notes list endpoint doesn't carry them), so its child
+    // detection degrades to plain oldest-link — the same best-effort trade
+    // every offline path here already makes.
+    async buildLocalHierarchy() {
+      const [links, notesArr] = [await this.cachedLinks(), await this.cachedList()];
+      const byId = new Map(notesArr.map((n) => [n.id, n]));
+
+      const neighborsOf = new Map(notesArr.map((n) => [n.id, []]));
+      const degree = new Map();
+      for (const l of links) {
+        if (l._deleted) continue;
+        degree.set(l.a, (degree.get(l.a) || 0) + 1);
+        degree.set(l.b, (degree.get(l.b) || 0) + 1);
+        if (neighborsOf.has(l.a) && neighborsOf.has(l.b)) {
+          neighborsOf.get(l.a).push({ id: l.b, linked_at: l.created_at });
+          neighborsOf.get(l.b).push({ id: l.a, linked_at: l.created_at });
+        }
+      }
+
+      const parentOf = new Map();
+      for (const n of notesArr) {
+        const rows = neighborsOf
+          .get(n.id)
+          .slice()
+          .sort((a, b) => String(b.linked_at).localeCompare(String(a.linked_at))) // newest first
+          .map(({ id, linked_at }) => {
+            const other = byId.get(id);
+            return other ? { ...other, linked_at } : null;
+          })
+          .filter(Boolean);
+
+        let parent = null;
+        if (n.created_from_note_id) {
+          const fb = rows.find((r) => r.id === n.created_from_note_id);
+          if (fb && fb.status !== 'done') parent = fb.id;
+        }
+        if (parent == null) {
+          const candidates = rows.filter(
+            (r) => r.created_from_note_id !== n.id && r.created_at !== r.linked_at
+          );
+          let skippedDone = false;
+          let oldestSurvivor = null;
+          for (let i = candidates.length - 1; i >= 0; i--) {
+            if (candidates[i].status === 'done') {
+              skippedDone = true;
+              continue;
+            }
+            oldestSurvivor = candidates[i];
+            break;
+          }
+          if (oldestSurvivor && skippedDone) {
+            const survivors = candidates.filter((r) => r.status !== 'done');
+            survivors.sort((a, b) => {
+              const da = degree.get(a.id) || 0;
+              const dbDeg = degree.get(b.id) || 0;
+              if (da !== dbDeg) return dbDeg - da;
+              return a.linked_at < b.linked_at ? -1 : a.linked_at > b.linked_at ? 1 : 0;
+            });
+            parent = survivors[0] ? survivors[0].id : null;
+          } else {
+            parent = oldestSurvivor ? oldestSurvivor.id : null;
+          }
+        }
+        parentOf.set(n.id, parent);
+      }
+
+      // Break any cycle the per-note heuristic produced (most visibly the
+      // graph's own root, which nothing marks as deliberately parentless) by
+      // cutting the parent pointer out of whichever cycle member has the
+      // highest degree — mirrors the server's buildHierarchy exactly.
+      const state = new Map();
+      for (const n of notesArr) {
+        if (state.get(n.id) === 2) continue;
+        const path = [];
+        let cur = n.id;
+        while (cur != null && !state.has(cur)) {
+          state.set(cur, 1);
+          path.push(cur);
+          cur = parentOf.get(cur);
+        }
+        if (cur != null && state.get(cur) === 1) {
+          const cycle = path.slice(path.indexOf(cur));
+          let root = cycle[0];
+          for (const id of cycle) if ((degree.get(id) || 0) > (degree.get(root) || 0)) root = id;
+          parentOf.set(root, null);
+        }
+        for (const id of path) state.set(id, 2);
+      }
+
+      const childrenOf = new Map();
+      for (const [id, p] of parentOf) {
+        if (p == null) continue;
+        if (!childrenOf.has(p)) childrenOf.set(p, []);
+        childrenOf.get(p).push(id);
+      }
+      return { byId, parentOf, childrenOf, degree };
+    },
+    // Every descendant id of rootId, any depth (BFS, cycle-safe) — excludes
+    // rootId itself. Mirrors the server's hierarchy.js subtreeIds.
+    _walkSubtreeIds(childrenOf, rootId) {
+      const out = [];
+      const seen = new Set([rootId]);
+      const queue = [...(childrenOf.get(rootId) || [])];
+      for (const id of queue) seen.add(id);
+      while (queue.length) {
+        const id = queue.shift();
+        out.push(id);
+        for (const c of childrenOf.get(id) || []) {
+          if (!seen.has(c)) {
+            seen.add(c);
+            queue.push(c);
+          }
+        }
+      }
+      return out;
+    },
+    // Every 'todo'-flagged note anywhere under rootId in the inferred
+    // hierarchy, any depth.
+    async localSubtreeTodos(rootId) {
+      const nid = typeof rootId === 'string' && /^\d+$/.test(rootId) ? Number(rootId) : rootId;
+      const { byId, childrenOf } = await this.buildLocalHierarchy();
+      return this._walkSubtreeIds(childrenOf, nid)
+        .map((id) => byId.get(id))
+        .filter((n) => n && n.status === 'todo')
+        .map((n) => ({ id: n.id, title: n.title }));
+    },
+    // Every note id anywhere under rootId, any depth — generic version of
+    // localSubtreeTodos, for scoping other per-note lists (the alarm bar).
+    async localSubtreeIds(rootId) {
+      const nid = typeof rootId === 'string' && /^\d+$/.test(rootId) ? Number(rootId) : rootId;
+      const { childrenOf } = await this.buildLocalHierarchy();
+      return this._walkSubtreeIds(childrenOf, nid);
+    },
+    // The most globally significant root: among every parentless note, the
+    // one anchoring the largest subtree. Mirrors the server's hierarchy.js
+    // probableRoot (see there for why degree alone is the wrong proxy).
+    async localProbableRoot() {
+      const { byId, parentOf, childrenOf } = await this.buildLocalHierarchy();
+      let best = null;
+      let bestSize = -1;
+      for (const [id, p] of parentOf) {
+        if (p != null) continue;
+        const size = this._walkSubtreeIds(childrenOf, id).length;
+        if (size > bestSize) {
+          best = id;
+          bestSize = size;
+        }
+      }
+      return best == null ? null : byId.get(best);
     },
     localSearch(q) {
       const ql = String(q || '').toLowerCase().trim();
@@ -1125,7 +1355,9 @@
         ? 'Photo'
         : type === 'audio'
           ? 'Recording'
-          : fields.contactName || fields.appLabel || fields.appUri || 'Attachment');
+          : type === 'file'
+            ? blobName || 'File'
+            : fields.contactName || fields.appLabel || fields.appUri || 'Attachment');
     const note = {
       id: tmpId,
       title,
@@ -1324,7 +1556,7 @@
   let currentUser = null;
   let widgetToken = null;
 
-  const TYPE_ICON = { image: '🖼️', audio: '🎤', contact: '👤', app: '🔗' };
+  const TYPE_ICON = { image: '🖼️', audio: '🎤', file: '📎', contact: '👤', app: '🔗' };
 
   // --- Markdown rendering (vendored marked + DOMPurify, no build step) ---
   function escapeHtml(s) {
@@ -1670,13 +1902,11 @@
   }
 
   // --- Colour coding (toggleable) ---
-  const COLOR_MODES = ['off', 'path', 'note', 'cluster'];
-  const COLOR_LABEL = { off: 'off', path: 'path heat', note: 'note heat', cluster: 'clusters' };
+  const COLOR_MODES = ['off', 'path', 'note'];
+  const COLOR_LABEL = { off: 'off', path: 'path heat', note: 'note heat' };
   let colorMode = localStorage.getItem('nico-notes-color-mode') || 'off';
   if (!COLOR_MODES.includes(colorMode)) colorMode = 'off';
   let noteHeat = {};
-  let clusters = {};
-  let clusterHues = {};
 
   async function loadNeighbors(id) {
     const data = await api.getNeighbors(id);
@@ -1971,6 +2201,61 @@
         .then((r) => (r.ok ? r.json() : []))
         .catch(() => cache.localSearch(q));
     },
+    // Every open ('todo') note anywhere below `id` in the inferred hierarchy —
+    // powers the to-do bar's "under here" scoping.
+    getSubtreeTodos: async (id) => {
+      if (id == null || isTmp(id)) return [];
+      if (navigator.onLine) {
+        try {
+          const r = await fetch(`/api/notes/${id}/subtree-todos`);
+          if (r.ok) return (await r.json()).todos || [];
+        } catch {
+          /* fall through to local */
+        }
+      }
+      return cache.localSubtreeTodos(id);
+    },
+    // Every note id anywhere below `id` in the inferred hierarchy — powers
+    // the alarm bar's "under here" scoping, same idea as getSubtreeTodos.
+    getSubtreeIds: async (id) => {
+      if (id == null || isTmp(id)) return [];
+      if (navigator.onLine) {
+        try {
+          const r = await fetch(`/api/notes/${id}/subtree-ids`);
+          if (r.ok) return (await r.json()).ids || [];
+        } catch {
+          /* fall through to local */
+        }
+      }
+      return cache.localSubtreeIds(id);
+    },
+    // The graph's most globally significant root — used as the landing note
+    // when there's no better context to resume (e.g. the last tab just closed).
+    getProbableRoot: async () => {
+      if (navigator.onLine) {
+        try {
+          const r = await fetch('/api/notes/probable-root');
+          if (r.ok) return (await r.json()).note || null;
+        } catch {
+          /* fall through to local */
+        }
+      }
+      return cache.localProbableRoot();
+    },
+    // Context tags already in use somewhere (`@word` in a note's title or
+    // content), most-used first, plus a few common GTD defaults — for the
+    // tag-insert menu, not a source of truth (the note text is that).
+    // No offline mirror: typing `@word` directly works with no connection
+    // either way, this is only a reuse convenience.
+    getTags: async () => {
+      try {
+        const r = await fetch('/api/notes/tags');
+        if (r.ok) return (await r.json()).tags || [];
+      } catch {
+        /* offline or failed — the menu just shows the empty-state message */
+      }
+      return [];
+    },
     rotateWidgetToken: () =>
       fetch('/api/session/widget-token', { method: 'POST' }).then((r) => r.json()),
     getNote: async (id) => {
@@ -2091,6 +2376,10 @@
           if (rehoming) {
             await mirrorLink(rehomeFrom, b, { removed: true });
             await cache.patchNeighborLink(rehomeFrom, b, { removed: true });
+            // A move is stronger evidence than link chronology — mirror the
+            // server's provenance stamp so the offline hierarchy fallback
+            // reflects it too (see server/routes/links.js's rehome handler).
+            await cache.putNote({ id: b, created_from_note_id: a }, { fromServer: false });
           }
           return r;
         } catch (err) {
@@ -2103,6 +2392,7 @@
       if (rehoming) {
         await putLocalLink(rehomeFrom, b, ts, true);
         await cache.patchNeighborLink(rehomeFrom, b, { removed: true });
+        await cache.putNote({ id: b, created_from_note_id: a }, { fromServer: false });
       }
       await enqueue(
         'link',
@@ -2202,7 +2492,6 @@
     // Stats blobs are cached so the grid's colour modes keep their tints offline
     // (rather than falling back to no colour) — updated on every online fetch.
     getNoteHeat: () => cachedStat('note-heat', 'statNoteHeat', {}),
-    getClusters: () => cachedStat('clusters', 'statClusters', { clusters: {} }),
     getInsights: () => cachedStat('insights', 'statInsights', null),
     getHistory: () => fetch('/api/history').then((r) => (r.ok ? r.json() : [])).catch(() => []),
     undoHistory: (id) =>
@@ -2332,11 +2621,20 @@
       scheduleFlush();
       return { ok: true, armed: true };
     },
-    agenda: () => {
+    // Server-computed extras (to-do notes, open tasks, waiting-for) — mirror the
+    // last successful response so the agenda overlay still shows them offline,
+    // same pattern as listTabs/listAlarms rather than going blank.
+    agenda: async () => {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-      return fetch(`/api/agenda${tz ? `?tz=${encodeURIComponent(tz)}` : ''}`)
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null);
+      try {
+        const r = await fetch(`/api/agenda${tz ? `?tz=${encodeURIComponent(tz)}` : ''}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        if (store) store.setMeta('agenda', data).catch(() => {});
+        return data;
+      } catch {
+        return store ? store.meta('agenda', null) : null;
+      }
     },
     getDigestPrefs: () =>
       fetch('/api/digest/prefs').then((r) => (r.ok ? r.json() : null)).catch(() => null),
@@ -2369,14 +2667,6 @@
   async function refreshColorData() {
     if (colorMode === 'note') {
       noteHeat = await api.getNoteHeat();
-    } else if (colorMode === 'cluster') {
-      const data = await api.getClusters();
-      clusters = data.clusters || {};
-      const ids = [...new Set(Object.values(clusters))];
-      clusterHues = {};
-      ids.forEach((cid, i) => {
-        clusterHues[cid] = Math.round((360 * i) / Math.max(1, ids.length));
-      });
     }
   }
 
@@ -2389,9 +2679,6 @@
     } else if (colorMode === 'note') {
       const h = noteHeat[note.id] || 0;
       if (h > 0) return `color-mix(in srgb, var(--pin) ${Math.round(h * 55)}%, transparent)`;
-    } else if (colorMode === 'cluster') {
-      const cid = clusters[note.id];
-      if (cid != null) return `hsl(${clusterHues[cid] || 0} 70% 88% / 0.75)`;
     }
     return null;
   }
@@ -2472,16 +2759,22 @@
       renderEmptyState();
       return;
     }
+    // No tabs left (e.g. you just closed the last one) — land on the graph's
+    // probable root rather than an arbitrary note, with the most-recently-
+    // updated one as a fallback if that lookup comes up empty.
+    const root = await api.getProbableRoot();
+    const landingId =
+      root && allNotesCache.some((n) => n.id === root.id) ? root.id : allNotesCache[0].id;
     if (net.online) {
-      const opened = await api.openTab(allNotesCache[0].id);
+      const opened = await api.openTab(landingId);
       if (Array.isArray(opened) && opened.length > tabs.length) {
         await refreshFromTabs(opened);
         return;
       }
     }
-    // Offline (or the open didn't take): centre the newest cached note without
-    // a server tab row.
-    tabs = [{ id: 'local', note_id: allNotesCache[0].id, is_active: 1 }];
+    // Offline (or the open didn't take): centre the landing note without a
+    // server tab row.
+    tabs = [{ id: 'local', note_id: landingId, is_active: 1 }];
     await refreshFromTabs(tabs);
   }
 
@@ -2613,7 +2906,11 @@
     });
 
     async function paint() {
-      const all = (await store.getAll('outbox')).sort((a, b) => a.seq - b.seq);
+      // 'nav' entries are just background nav-history pings — not interesting
+      // for the user to review, retry, or discard, so keep them out of the list.
+      const all = (await store.getAll('outbox'))
+        .filter((e) => e.kind !== 'nav')
+        .sort((a, b) => a.seq - b.seq);
       box.innerHTML = '';
       const h = document.createElement('h2');
       const failed = all.filter((e) => e.status === 'failed');
@@ -2695,6 +2992,27 @@
     await paint();
   }
 
+  // A persistent bottom bar with a Reload button — unlike toast(), it doesn't
+  // auto-dismiss, for messages the user must act on.
+  function showReloadBar(message) {
+    let host = document.getElementById('toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toast-host';
+      document.body.appendChild(host);
+    }
+    const bar = document.createElement('div');
+    bar.className = 'toast update-toast';
+    const label = document.createElement('span');
+    label.textContent = message;
+    const btn = document.createElement('button');
+    btn.textContent = 'Reload';
+    btn.addEventListener('click', () => location.reload());
+    bar.append(label, btn);
+    host.appendChild(bar);
+    requestAnimationFrame(() => bar.classList.add('show'));
+  }
+
   // The service worker precaches the shell, so an already-open tab keeps running
   // the previous app.js/style.css after a deploy until it's reloaded. When a new
   // worker takes control, offer a reload rather than forcing one.
@@ -2704,22 +3022,7 @@
     navigator.serviceWorker.addEventListener('message', (e) => {
       if (!e.data || e.data.type !== 'sw-activated' || workerUpdatePrompted) return;
       workerUpdatePrompted = true;
-      let host = document.getElementById('toast-host');
-      if (!host) {
-        host = document.createElement('div');
-        host.id = 'toast-host';
-        document.body.appendChild(host);
-      }
-      const bar = document.createElement('div');
-      bar.className = 'toast update-toast';
-      const label = document.createElement('span');
-      label.textContent = 'A new version is ready.';
-      const btn = document.createElement('button');
-      btn.textContent = 'Reload';
-      btn.addEventListener('click', () => location.reload());
-      bar.append(label, btn);
-      host.appendChild(bar);
-      requestAnimationFrame(() => bar.classList.add('show'));
+      showReloadBar('A new version is ready.');
     });
   }
 
@@ -2734,15 +3037,25 @@
     currentUser = sess.user;
     widgetToken = sess.widgetToken || null;
     accountBtn.title = `Signed in as ${currentUser.email}`;
-    await loadIdmap();
-    await loadRidmap();
-    await refreshPending();
-    await reconcileDirty();
-    allNotesCache = await api.listNotes();
-    await syncLinks();
-    const tabsList = await api.listTabs();
-    await refreshFromTabs(tabsList);
-    await checkAlarms();
+    try {
+      await loadIdmap();
+      await loadRidmap();
+      await refreshPending();
+      await reconcileDirty();
+      allNotesCache = await api.listNotes();
+      await syncLinks();
+      const tabsList = await api.listTabs();
+      await refreshFromTabs(tabsList);
+      await checkAlarms();
+    } catch (err) {
+      // Any unhandled throw in this chain (most likely an offline edge case)
+      // used to leave the page stuck on the bare shell forever, nothing ever
+      // rendered and no error surfaced. Log it and hand the user a way out —
+      // the recurring timers below still get scheduled, so a retriable failure
+      // (network) can also self-heal without a reload.
+      console.error('init: failed partway through boot', err);
+      showReloadBar("Couldn't finish loading — reload to try again.");
+    }
     ensurePushSubscription();
     flushOutbox();
     setInterval(() => checkAlarms(), 30000);
@@ -2782,7 +3095,7 @@
     else if (d === 'insights') openInsights();
 
     if (shared) createSharedNote(shared);
-    else if (wantsCompose) openPicker();
+    else if (wantsCompose) openPicker({ standalone: true });
   }
 
   // Read + clear the `nico_share` cookie left by a logged-out POST /share.
@@ -2824,38 +3137,98 @@
   }
 
   // An attachment note created offline stores its file in the `blobs` store and
-  // carries a "blob-pending:<key>" path until it uploads. Point the element at
-  // the in-memory blob so it shows immediately.
-  function setMediaSrc(el, path) {
+  // carries a "blob-pending:<key>" path until it uploads. Resolve it to a URL
+  // usable as-is (a same-origin path, or an object URL for the in-memory blob).
+  function resolveMediaUrl(path) {
     const m = /^blob-pending:(.+)$/.exec(path || '');
-    if (!m) {
-      el.src = path;
-      return;
-    }
-    if (!store) return;
-    store
+    if (!m) return Promise.resolve(path);
+    if (!store) return Promise.resolve(null);
+    return store
       .get('blobs', m[1])
-      .then((rec) => {
-        if (rec && rec.blob) el.src = URL.createObjectURL(rec.blob);
-      })
-      .catch(() => {});
+      .then((rec) => (rec && rec.blob ? URL.createObjectURL(rec.blob) : null))
+      .catch(() => null);
+  }
+
+  function setMediaSrc(el, path) {
+    resolveMediaUrl(path).then((url) => {
+      if (url) el.src = url;
+    });
+  }
+
+  // Suggested filename for a downloaded attachment: the note's title, sanitized,
+  // with the uploaded file's real extension appended (from the stored path —
+  // never the client-supplied name, see upload-config.js) unless it's already there.
+  function attachmentFilename(note) {
+    const ext = (/\.[A-Za-z0-9]{1,8}$/.exec(note.attachment_path || '') || [''])[0];
+    const base = (note.title || 'attachment').replace(/[^\w.\- ]+/g, '_').trim() || 'attachment';
+    return ext && !base.toLowerCase().endsWith(ext.toLowerCase()) ? base + ext : base;
+  }
+
+  // A small "⬇ Download" link, forcing save-as instead of navigating — resolves
+  // blob-pending (not-yet-synced offline) attachments the same as the preview.
+  // `label` overrides the default "⬇ Download" text (the file type shows its name).
+  function buildDownloadLink(note, label) {
+    const link = document.createElement('a');
+    link.className = 'center-attachment-file center-attachment-download';
+    link.textContent = label || '⬇ Download';
+    link.download = attachmentFilename(note);
+    link.href = '#';
+    resolveMediaUrl(note.attachment_path).then((url) => {
+      if (url) link.href = url;
+    });
+    return link;
   }
 
   // Renders the type-specific payload of an attachment note (image/audio/contact/app).
-  function buildAttachmentPreview(note) {
+  // `compact` (the grid center cell) caps it at one button — tap-to-view/play
+  // stays, but "extra" actions like Download drop out; the fullscreen editor
+  // passes nothing and gets the full set.
+  function buildAttachmentPreview(note, { compact = false } = {}) {
     if (note.type === 'image' && note.attachment_path) {
+      // Wrap the image in a link (`display: contents` in CSS, so the <img>
+      // stays the actual flex item — see style.css) so a click opens the
+      // full-size original in the in-app lightbox (not `target="_blank"`,
+      // which in a standalone/installed PWA can open a bare window with no
+      // way back — see openImageLightbox). The href still resolves, so
+      // middle-click / long-press / "open in new tab" keep working normally.
+      const frag = document.createDocumentFragment();
+      const viewLink = document.createElement('a');
+      viewLink.className = 'center-attachment-image-link';
+      viewLink.title = 'Open full size';
+      viewLink.href = '#';
       const img = document.createElement('img');
       img.className = 'center-attachment-image';
-      setMediaSrc(img, note.attachment_path);
       img.alt = note.title;
-      return img;
+      viewLink.appendChild(img);
+      frag.appendChild(viewLink);
+      let resolvedUrl = null;
+      resolveMediaUrl(note.attachment_path).then((url) => {
+        if (url) {
+          img.src = url;
+          viewLink.href = url;
+          resolvedUrl = url;
+        }
+      });
+      viewLink.addEventListener('click', (e) => {
+        if (!resolvedUrl) return;
+        e.preventDefault();
+        openImageLightbox(resolvedUrl, note.title);
+      });
+      if (!compact) frag.appendChild(buildDownloadLink(note));
+      return frag;
     }
     if (note.type === 'audio' && note.attachment_path) {
+      const frag = document.createDocumentFragment();
       const audio = document.createElement('audio');
       audio.className = 'center-attachment-audio';
       audio.controls = true;
       setMediaSrc(audio, note.attachment_path);
-      return audio;
+      frag.appendChild(audio);
+      if (!compact) frag.appendChild(buildDownloadLink(note));
+      return frag;
+    }
+    if (note.type === 'file' && note.attachment_path) {
+      return buildDownloadLink(note, `📎 ${note.title || 'Download file'}`);
     }
     if (note.type === 'contact' && note.attachment_path) {
       let contact;
@@ -2872,6 +3245,9 @@
         tel.textContent = `📞 ${contact.phone}`;
         box.appendChild(tel);
       }
+      // Compact (grid) view: the call button above already covers the one
+      // thing worth a tap at a glance — email and vcard-import are fullscreen-only.
+      if (compact) return box.childElementCount ? box : null;
       if (contact.email) {
         const mail = document.createElement('a');
         mail.href = `mailto:${contact.email}`;
@@ -3030,7 +3406,8 @@
           content: content.value,
         });
         currentNote = updated;
-        status.textContent = 'Saved';
+        status.textContent = '';
+        toast('Saved');
         allNotesCache = await api.listNotes();
         renderPinbar();
 
@@ -3131,12 +3508,17 @@
 
     if (linkCount > LINK_LIST_THRESHOLD) frag.appendChild(buildLinksPanel());
 
-    // Center-cell status button — a tri-state cycle over notes.status:
-    //   active (no marker) → todo (an open thing to do) → done → active.
-    // 'todo' and 'done' both surface in the agenda + digest; only 'done' dims.
-    const statusStep = { active: 'todo', todo: 'done', done: 'active' };
+    // Center-cell status button — a 4-state cycle over notes.status:
+    //   active (no marker) → waiting (blocked on something else, a GTD
+    //   "waiting for" — link it to whoever/whatever like any other note) →
+    //   todo (an open thing to do) → done → active.
+    // 'waiting' and 'todo' both surface in the in-app agenda; only 'todo'
+    // (not 'waiting' — it isn't actionable yet) is pushed/emailed by the
+    // digest. Only 'done' dims.
+    const statusStep = { active: 'waiting', waiting: 'todo', todo: 'done', done: 'active' };
     const statusFace = {
-      active: { icon: '○', title: 'Mark as to-do', cls: '' },
+      active: { icon: '○', title: 'Mark as waiting', cls: '' },
+      waiting: { icon: '⏳', title: 'Mark as to-do', cls: ' waiting' },
       todo: { icon: '◑', title: 'Mark as done', cls: ' todo' },
       done: { icon: '✅', title: 'Clear status', cls: ' active' },
     };
@@ -3179,7 +3561,122 @@
     addBtn.title = 'Add a linked note';
     addBtn.addEventListener('click', () => openPicker());
 
+    // GTD context tags: no stored field — a tag is just an `@word` in the
+    // note's own text (see server/agenda.js-style content scanning), so
+    // there's nothing to keep in sync and the vocabulary is whatever you've
+    // ever typed. This button is a convenience for reusing one instead of
+    // typing it from scratch (and a nudge against spelling drift); typing
+    // `@anything` directly works exactly the same with no button at all.
+    const tagBtn = document.createElement('button');
+    tagBtn.className = 'tag-btn';
+    tagBtn.textContent = '🏷️';
+    tagBtn.title = 'Add a context tag (e.g. @phone)';
+
+    function insertTag(tag) {
+      const pos = content.selectionStart;
+      const before = content.value.slice(0, pos);
+      const needsSpace = pos > 0 && !/\s$/.test(before);
+      const insert = `${needsSpace ? ' ' : ''}@${tag} `;
+      content.value = before + insert + content.value.slice(content.selectionEnd);
+      const newPos = pos + insert.length;
+      content.dispatchEvent(new Event('input'));
+      content.focus();
+      content.setSelectionRange(newPos, newPos);
+    }
+
+    async function openTagModal() {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      const box = document.createElement('div');
+      box.className = 'picker tag-modal';
+      overlay.appendChild(box);
+      const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') close();
+      };
+      document.addEventListener('keydown', onKey);
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close();
+      });
+
+      const h = document.createElement('h2');
+      h.textContent = 'Add a tag';
+      box.appendChild(h);
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = 'New tag — e.g. phone';
+      input.autocomplete = 'off';
+      box.appendChild(input);
+
+      const results = document.createElement('div');
+      results.className = 'picker-results';
+      box.appendChild(results);
+
+      // Same normalization either way in: a picked existing tag is already
+      // clean, but free-typed text (leading @, stray spaces) gets tidied up
+      // so it stays a single `@word` token in the note text.
+      function commit(raw) {
+        const tag = raw.trim().replace(/^@+/, '').trim().replace(/\s+/g, '-');
+        if (!tag) return;
+        insertTag(tag);
+        close();
+      }
+
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          commit(input.value);
+        }
+      });
+
+      const addBtn = document.createElement('button');
+      addBtn.textContent = 'Add';
+      addBtn.addEventListener('click', () => commit(input.value));
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', close);
+
+      const actionsRow = document.createElement('div');
+      actionsRow.className = 'picker-actions';
+      actionsRow.appendChild(addBtn);
+      actionsRow.appendChild(cancelBtn);
+      box.appendChild(actionsRow);
+
+      document.body.appendChild(overlay);
+      input.focus();
+
+      const tags = await api.getTags();
+      results.innerHTML = '';
+      if (!tags.length) {
+        const p = document.createElement('p');
+        p.className = 'picker-hint';
+        p.textContent = 'No tags yet — type one above.';
+        results.appendChild(p);
+        return;
+      }
+      const label = document.createElement('p');
+      label.className = 'picker-hint';
+      label.textContent = 'Or pick one already in use:';
+      results.appendChild(label);
+      tags.forEach((t) => {
+        const div = document.createElement('div');
+        div.className = 'result';
+        div.textContent = `@${t}`;
+        div.addEventListener('click', () => commit(t));
+        results.appendChild(div);
+      });
+    }
+
+    tagBtn.addEventListener('click', () => openTagModal());
+
     actions.appendChild(addBtn);
+    actions.appendChild(tagBtn);
     actions.appendChild(pinBtn);
     actions.appendChild(alarmBtn);
     actions.appendChild(deleteBtn);
@@ -3231,8 +3728,7 @@
 
     applyCellColor(cell, currentNote);
 
-    const preview = buildAttachmentPreview(currentNote);
-    if (preview) cell.appendChild(preview);
+    const preview = buildAttachmentPreview(currentNote, { compact: true });
 
     const title = document.createElement('div');
     title.className = 'center-title readonly';
@@ -3261,6 +3757,7 @@
     }
 
     cell.appendChild(title);
+    if (preview) cell.appendChild(preview);
     cell.appendChild(content);
 
     if (linkCount > LINK_LIST_THRESHOLD) {
@@ -3479,7 +3976,16 @@
       const base = icon ? `${icon} ${neighbor.title}` : neighbor.title;
       title.textContent = (isBack ? '↩ ' : '') + base;
       cell.appendChild(title);
-      cell.addEventListener('click', () => goTo(neighbor.id, navVia));
+
+      const preview = buildAttachmentPreview(neighbor, { compact: true });
+      if (preview) cell.appendChild(preview);
+
+      cell.addEventListener('click', (e) => {
+        // Let the attachment's own link/player take the tap (view/download/
+        // play) instead of navigating the grid to this note.
+        if (e.target.closest('a, audio, input, label')) return;
+        goTo(neighbor.id, navVia);
+      });
     }
 
     return cell;
@@ -3542,6 +4048,11 @@
   });
 
   let pendingLinkTarget = null; // currentId, fixed each time picker opens
+  // True while the picker is creating an independent note (see openPicker's
+  // `standalone`) — changes how the "or connect note" search behaves, since
+  // there's no already-existing note yet to exclude already-linked results
+  // against.
+  let pickerStandalone = false;
 
   function makeEmptyCell() {
     const cell = document.createElement('div');
@@ -3668,13 +4179,48 @@
       pinbar.appendChild(chip);
     });
 
-    // The to-do bar tracks the same note cache, so keep it in lockstep.
+    // The latest and to-do bars track the same note cache, so keep them in lockstep.
+    renderLatestbar();
     renderTodobar();
   }
 
-  // --- To-do bar: a row (like the pin bar) of every note flagged status:'todo' ---
-  function renderTodobar() {
-    const todos = allNotesCache.filter((n) => n.status === 'todo');
+  // --- Latest bar: shortcuts to the most recently edited notes account-wide. ---
+  const LATEST_BAR_COUNT = 8;
+  function renderLatestbar() {
+    const latest = [...allNotesCache]
+      .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+      .slice(0, LATEST_BAR_COUNT);
+    latestbar.innerHTML = '';
+    latestbar.classList.toggle('hidden', latest.length === 0 || !barPrefs.latest);
+
+    latest.forEach((note) => {
+      const chip = document.createElement('div');
+      chip.className =
+        'tab' +
+        (note.id === currentId ? ' active' : '') +
+        (triggeredAlarmIds.has(note.id) ? ' alarm-triggered' : '');
+
+      const title = document.createElement('span');
+      title.className = 'tab-title';
+      title.textContent = `🕓 ${note.title}`;
+
+      chip.appendChild(title);
+      chip.addEventListener('click', () => jumpTo(note.id, 'latest'));
+      latestbar.appendChild(chip);
+    });
+  }
+
+  // --- To-do bar: a row (like the pin bar) of every open note under the
+  // current one in the inferred hierarchy — not every open note account-wide,
+  // so it reads as "what's left to do in this project" rather than a global
+  // task list. ---
+  let todobarGen = 0;
+  async function renderTodobar() {
+    const gen = ++todobarGen;
+    const root = currentId;
+    const todos = root != null ? await api.getSubtreeTodos(root) : [];
+    if (gen !== todobarGen) return; // a newer call already landed — drop this one
+
     todobar.innerHTML = '';
     todobar.classList.toggle('hidden', todos.length === 0 || !barPrefs.todos);
 
@@ -3695,12 +4241,26 @@
     });
   }
 
-  // --- Alarm bar: a row (like the pin bar) of every note that has an alarm ---
-  function renderAlarmbar() {
-    alarmbar.innerHTML = '';
-    alarmbar.classList.toggle('hidden', alarms.length === 0 || !barPrefs.alarms);
+  // --- Alarm bar: a row (like the pin bar) of every alarm under the current
+  // note in the inferred hierarchy — scoped the same way as the to-do bar, so
+  // it reads as "what's ringing in this project" rather than every alarm
+  // account-wide. ---
+  let alarmbarGen = 0;
+  async function renderAlarmbar() {
+    const gen = ++alarmbarGen;
+    const root = currentId;
+    const subtreeIds = root != null ? await api.getSubtreeIds(root) : [];
+    if (gen !== alarmbarGen) return; // a newer call already landed — drop this one
+    const underHere = new Set(subtreeIds);
 
-    alarms.forEach((a) => {
+    alarmbar.innerHTML = '';
+    // Location reminders have no clock — `⏰ ${a.time} ${a.title}` would read
+    // as a broken chip with a blank time. They're surfaced via the map and
+    // agenda instead, not this time-based bar.
+    const scheduled = alarms.filter((a) => a.kind !== 'location' && underHere.has(a.noteId));
+    alarmbar.classList.toggle('hidden', scheduled.length === 0 || !barPrefs.alarms);
+
+    scheduled.forEach((a) => {
       const chip = document.createElement('div');
       chip.className =
         'tab' +
@@ -4085,7 +4645,52 @@
       const h = document.createElement('h3');
       h.textContent = 'To-do';
       agendaBody.appendChild(h);
-      todos.forEach((t) => agendaBody.appendChild(todoRow(t)));
+
+      // Group by @context tag (server/tags.js) — a todo with several tags
+      // appears under each one, since it genuinely fits either context. Only
+      // adds grouping once something's actually tagged; with no tags in use
+      // yet this renders exactly like the old flat list.
+      const byTag = new Map();
+      const untagged = [];
+      todos.forEach((t) => {
+        const tags = t.tags || [];
+        if (!tags.length) {
+          untagged.push(t);
+          return;
+        }
+        tags.forEach((tag) => {
+          if (!byTag.has(tag)) byTag.set(tag, []);
+          byTag.get(tag).push(t);
+        });
+      });
+      [...byTag.keys()].sort().forEach((tag) => {
+        const sub = document.createElement('div');
+        sub.className = 'agenda-subhead';
+        sub.textContent = `@${tag}`;
+        agendaBody.appendChild(sub);
+        byTag.get(tag).forEach((t) => agendaBody.appendChild(todoRow(t)));
+      });
+      if (untagged.length) {
+        if (byTag.size) {
+          const sub = document.createElement('div');
+          sub.className = 'agenda-subhead';
+          sub.textContent = 'Other';
+          agendaBody.appendChild(sub);
+        }
+        untagged.forEach((t) => agendaBody.appendChild(todoRow(t)));
+      }
+    }
+    // Waiting: local (allNotesCache already has status for every note) — not
+    // server-computed like the others, since it's deliberately left out of
+    // buildAgenda/the digest (blocked on someone else isn't something to
+    // act on yet, so it shouldn't be pushed/emailed as if it were).
+    const waiting = allNotesCache.filter((n) => n.status === 'waiting');
+    if (waiting.length) {
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = 'Waiting';
+      agendaBody.appendChild(h);
+      waiting.forEach((n) => agendaBody.appendChild(todoRow({ noteId: n.id, title: n.title })));
     }
     const openTasks = (extra && extra.openTasks) || [];
     if (openTasks.length) {
@@ -4428,7 +5033,7 @@
     }
   });
 
-  newNoteBtn.addEventListener('click', () => openPicker());
+  newNoteBtn.addEventListener('click', () => openPicker({ standalone: true }));
 
   // --- Picker (create a note — of any attachment style — or connect an
   // existing one to the current center, which is always the default target) ---
@@ -4436,6 +5041,7 @@
     text: 'New note title…',
     image: 'Caption (optional)…',
     audio: 'Caption (optional)…',
+    file: 'Override name (optional)…',
     contact: 'Override title (optional)…',
     app: 'Label…',
   };
@@ -4445,11 +5051,19 @@
   let pickerRecordedBlob = null;
 
   function applyPickerStyleVisibility() {
-    pickerPhotoInput.classList.toggle('hidden', pickerStyle !== 'image');
+    pickerPhotoRow.classList.toggle('hidden', pickerStyle !== 'image');
+    pickerFileRow.classList.toggle('hidden', pickerStyle !== 'file');
     pickerAudioRow.classList.toggle('hidden', pickerStyle !== 'audio');
     pickerContactRow.classList.toggle('hidden', pickerStyle !== 'contact');
     pickerAppUri.classList.toggle('hidden', pickerStyle !== 'app');
-    pickerConnectSection.classList.toggle('hidden', pickerStyle !== 'text' || !pendingLinkTarget);
+    // Standalone create: always offer the search, even before a target is
+    // chosen — that's how you choose one. Otherwise (a centered note's own
+    // "add linked note"/empty-cell flow) it only makes sense once there's a
+    // fixed note to connect.
+    pickerConnectSection.classList.toggle(
+      'hidden',
+      pickerStyle !== 'text' || (!pendingLinkTarget && !pickerStandalone)
+    );
     pickerContactPickBtn.classList.toggle('hidden', !(navigator.contacts && navigator.contacts.select));
     pickerNewTitle.placeholder = PICKER_TITLE_PLACEHOLDER[pickerStyle];
   }
@@ -4462,6 +5076,26 @@
         .forEach((b) => b.classList.toggle('active', b === btn));
       applyPickerStyleVisibility();
     });
+  });
+
+  // Photo: two paths to the same <input type=file>. The camera input carries
+  // `capture`, the gallery one doesn't; picking from one clears the other so
+  // only a single file is ever submitted.
+  function showPhotoPick(fromInput) {
+    const other = fromInput === pickerCameraInput ? pickerPhotoInput : pickerCameraInput;
+    other.value = '';
+    const f = fromInput.files[0];
+    pickerPhotoStatus.textContent = f ? f.name : '';
+  }
+  pickerCameraBtn.addEventListener('click', () => pickerCameraInput.click());
+  pickerGalleryBtn.addEventListener('click', () => pickerPhotoInput.click());
+  pickerCameraInput.addEventListener('change', () => showPhotoPick(pickerCameraInput));
+  pickerPhotoInput.addEventListener('change', () => showPhotoPick(pickerPhotoInput));
+
+  pickerFileBtn.addEventListener('click', () => pickerFileInput.click());
+  pickerFileInput.addEventListener('change', () => {
+    const f = pickerFileInput.files[0];
+    pickerFileStatus.textContent = f ? f.name : '';
   });
 
   pickerRecordBtn.addEventListener('click', async () => {
@@ -4508,12 +5142,30 @@
     }
   });
 
-  function openPicker() {
-    pendingLinkTarget = currentId;
+  // `standalone: true` forces a plain, unlinked create even with a note
+  // centered — the header's "new note" button is a fresh, independent note,
+  // not a child of whatever you happen to be looking at (unlike the footer's
+  // "add a linked note" button or clicking an empty grid cell, which are
+  // both explicitly about the centered note).
+  // Attachment styles and "Create & connect" both need a note to hang off
+  // of — reflect whatever pendingLinkTarget currently is. Called again after
+  // a standalone create picks a connect target via search, not just at open.
+  function syncPickerConnectUI() {
+    pickerStyleRow.classList.toggle('hidden', !pendingLinkTarget);
+    pickerCreateBtn.textContent = pendingLinkTarget ? 'Create & connect' : 'Create';
+  }
+
+  function openPicker({ standalone = false } = {}) {
+    pendingLinkTarget = standalone ? null : currentId;
+    pickerStandalone = standalone;
     pickerSearch.value = '';
     pickerNewTitle.value = '';
     pickerResults.innerHTML = '';
     pickerPhotoInput.value = '';
+    pickerCameraInput.value = '';
+    pickerPhotoStatus.textContent = '';
+    pickerFileInput.value = '';
+    pickerFileStatus.textContent = '';
     pickerAppUri.value = '';
     pickerContactName.value = '';
     pickerContactPhone.value = '';
@@ -4526,10 +5178,7 @@
     pickerStyleRow
       .querySelectorAll('.picker-style-btn')
       .forEach((b) => b.classList.toggle('active', b.dataset.style === 'text'));
-    // Attachment styles and "connect" both need a note to hang off of; with no
-    // centered note this is a plain new-note create.
-    pickerStyleRow.classList.toggle('hidden', !pendingLinkTarget);
-    pickerCreateBtn.textContent = pendingLinkTarget ? 'Create & connect' : 'Create';
+    syncPickerConnectUI();
     applyPickerStyleVisibility();
 
     pickerOverlay.classList.remove('hidden');
@@ -4540,6 +5189,7 @@
   function closePicker() {
     pickerOverlay.classList.add('hidden');
     pendingLinkTarget = null;
+    pickerStandalone = false;
     if (pickerRecorder) pickerRecorder.stop();
   }
 
@@ -4550,10 +5200,18 @@
 
   pickerSearch.addEventListener('input', () => {
     const q = pickerSearch.value.trim().toLowerCase();
-    const linkedIds = new Set(neighbors.map((n) => n.id));
-    let matches = allNotesCache.filter(
-      (n) => n.id !== currentId && !linkedIds.has(n.id)
-    );
+    // Standalone: the note being created doesn't exist yet, so nothing is
+    // "already linked" to it — every note is a fair connect target. (Fixes
+    // e.g. searching for a note that happens to already be linked to
+    // whatever's centered — that exclusion only makes sense for the other,
+    // non-standalone case below, connecting the centered note itself.)
+    let matches;
+    if (pickerStandalone) {
+      matches = allNotesCache;
+    } else {
+      const linkedIds = new Set(neighbors.map((n) => n.id));
+      matches = allNotesCache.filter((n) => n.id !== currentId && !linkedIds.has(n.id));
+    }
     if (q) matches = matches.filter((n) => n.title.toLowerCase().includes(q));
     matches = matches.slice(0, 8);
 
@@ -4563,6 +5221,16 @@
       div.className = 'result';
       div.textContent = n.title;
       div.addEventListener('click', async () => {
+        if (pickerStandalone) {
+          // No note to link yet — just choose this as the connect target;
+          // "Create & connect" (or picking an attachment style) does the rest.
+          pendingLinkTarget = n.id;
+          pickerSearch.value = n.title;
+          pickerResults.innerHTML = '';
+          syncPickerConnectUI();
+          applyPickerStyleVisibility();
+          return;
+        }
         await api.link(pendingLinkTarget, n.id);
         await loadNeighbors(currentId);
         await refreshColorData();
@@ -4583,12 +5251,20 @@
     if (pickerStyle === 'text') {
       if (!title) return;
     } else if (pickerStyle === 'image') {
-      const file = pickerPhotoInput.files[0];
+      const file = pickerCameraInput.files[0] || pickerPhotoInput.files[0];
       if (!file) {
-        toast('Choose a photo first.');
+        toast('Take a photo or choose one from your gallery first.');
         return;
       }
       formData.set('type', 'image');
+      formData.set('file', file);
+    } else if (pickerStyle === 'file') {
+      const file = pickerFileInput.files[0];
+      if (!file) {
+        toast('Choose a file first.');
+        return;
+      }
+      formData.set('type', 'file');
       formData.set('file', file);
     } else if (pickerStyle === 'audio') {
       if (!pickerRecordedBlob) {
@@ -4627,6 +5303,7 @@
         );
         const hadTarget = !!pendingLinkTarget;
         closePicker();
+        toast('Created.');
         if (hadTarget) {
           await afterAttach();
         } else {
@@ -4642,6 +5319,7 @@
         if (title) formData.set('title', title);
         await api.createAttachment(pendingLinkTarget, formData);
         closePicker();
+        toast('Added.');
         await afterAttach();
       }
     } finally {
@@ -4744,7 +5422,10 @@
   // --- Colour coding toggle ---
   function applyColorModeButton() {
     colorModeBtn.title = `Colour coding: ${COLOR_LABEL[colorMode]}`;
-    colorModeBtn.classList.toggle('active', colorMode !== 'off');
+    // Each mode gets its own colour (off = transparent) so the button itself
+    // shows which one is active, not just its hover tooltip.
+    colorModeBtn.classList.toggle('mode-path', colorMode === 'path');
+    colorModeBtn.classList.toggle('mode-note', colorMode === 'note');
     localStorage.setItem('nico-notes-color-mode', colorMode);
   }
 
@@ -4831,7 +5512,7 @@
     );
 
     const h3 = document.createElement('h3');
-    h3.textContent = 'Never walked';
+    h3.textContent = 'Orphans';
     insightsBody.appendChild(h3);
     insightsBody.appendChild(
       insightsList(data.orphans, (li, n) => {
@@ -4873,11 +5554,6 @@
   function mapColorFor(note) {
     if (colorMode === 'note') {
       return lerpHex('4f6df5', 'c9821a', noteHeat[note.id] || 0);
-    }
-    if (colorMode === 'cluster') {
-      const cid = clusters[note.id];
-      if (cid != null && clusterHues[cid] != null) return `hsl(${clusterHues[cid]} 65% 52%)`;
-      return '#9aa0a8';
     }
     return '#4f6df5';
   }
@@ -5112,6 +5788,29 @@
     if (onClose) onClose();
   }
 
+  // Full-size image viewer: an in-app overlay (with its own close button)
+  // instead of `target="_blank"`, which — in an installed/standalone PWA —
+  // can open a bare window with no back/close affordance at all.
+  function openImageLightbox(url, alt) {
+    imageOverlayImg.src = url;
+    imageOverlayImg.alt = alt || '';
+    imageOverlay.classList.remove('hidden');
+  }
+
+  function closeImageLightbox() {
+    imageOverlay.classList.add('hidden');
+    // Not `src = ''` — that re-requests the current page in some browsers.
+    imageOverlayImg.removeAttribute('src');
+  }
+
+  imageOverlayClose.addEventListener('click', closeImageLightbox);
+  imageOverlay.addEventListener('click', (e) => {
+    if (e.target === imageOverlay) closeImageLightbox();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !imageOverlay.classList.contains('hidden')) closeImageLightbox();
+  });
+
   mapBtn.addEventListener('click', () => openMap());
   mapOverlayClose.addEventListener('click', closeMap);
   mapOverlay.addEventListener('click', (e) => {
@@ -5313,6 +6012,7 @@
   const barToggleEls = {
     tabs: document.getElementById('bar-toggle-tabs'),
     pins: document.getElementById('bar-toggle-pins'),
+    latest: document.getElementById('bar-toggle-latest'),
     todos: document.getElementById('bar-toggle-todos'),
     alarms: document.getElementById('bar-toggle-alarms'),
   };

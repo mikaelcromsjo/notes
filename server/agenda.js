@@ -1,4 +1,5 @@
 const db = require('./db');
+const { extractTags } = require('./tags');
 
 // A cross-note "what's due" view. The client still owns fire-time math (the box
 // is UTC, "08:00" means the viewer's 08:00), so this only ever reads the
@@ -23,8 +24,10 @@ const taskNotesStmt = db.prepare(
 
 // Notes the user flagged as an open thing to do (the center-cell status button's
 // middle state). Distinct from `- [ ]` checkbox lines inside a note's body.
+// `content` is only pulled to extract GTD `@context` tags (server/tags.js)
+// for the agenda's by-tag grouping — never sent on to the client as-is.
 const todoNotesStmt = db.prepare(
-  `SELECT id, title, updated_at FROM notes
+  `SELECT id, title, content, updated_at FROM notes
    WHERE user_id = ? AND status = 'todo'
    ORDER BY updated_at DESC`
 );
@@ -112,9 +115,12 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   }
   openTasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 
-  const todos = todoNotesStmt
-    .all(userId)
-    .map((n) => ({ noteId: n.id, title: n.title, updatedAt: n.updated_at }));
+  const todos = todoNotesStmt.all(userId).map((n) => ({
+    noteId: n.id,
+    title: n.title,
+    updatedAt: n.updated_at,
+    tags: [...new Set([...extractTags(n.title), ...extractTags(n.content)])],
+  }));
 
   return {
     generatedAt: now.toISOString(),

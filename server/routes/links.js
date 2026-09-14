@@ -40,6 +40,12 @@ router.post('/', (req, res) => {
     Number(rehomeFrom) !== Number(b) &&
     db.prepare('SELECT 1 FROM notes WHERE id = ? AND user_id = ?').get(rehomeFrom, req.userId);
 
+  // Recorded pre-move so undo can restore it exactly, rather than leaving
+  // stale provenance pointing at whichever anchor a later undo/redo landed on.
+  const prevCreatedFrom = isRehome
+    ? db.prepare('SELECT created_from_note_id FROM notes WHERE id = ?').get(bNum).created_from_note_id
+    : null;
+
   db.transaction(() => {
     db.prepare(
       'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
@@ -52,6 +58,16 @@ router.post('/', (req, res) => {
         fb,
         req.userId
       );
+      // A move is explicit intent, stronger evidence than link chronology —
+      // stamp it as provenance so the "probable parent" hierarchy (and
+      // anything built on it) reflects the move immediately, rather than an
+      // older surviving link on the card outranking it (see notes.js
+      // /neighbors' "probable parent" for why oldest-link normally wins).
+      db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ? AND user_id = ?').run(
+        aNum,
+        bNum,
+        req.userId
+      );
     }
   })();
 
@@ -59,7 +75,7 @@ router.post('/', (req, res) => {
     history.record(
       req.userId,
       'rehome',
-      { card: Number(b), from: Number(rehomeFrom), to: Number(a) },
+      { card: Number(b), from: Number(rehomeFrom), to: Number(a), prevCreatedFrom },
       `Moved "${history.noteTitle(req.userId, b)}" from "${history.noteTitle(
         req.userId,
         rehomeFrom

@@ -59,6 +59,16 @@ function applyUndo(action, p, uid) {
       const [fa, fb] = pair(p.from, p.card);
       addLink(fa, fb, uid);
     }
+    // Restore whatever provenance the card had before this move stamped it —
+    // 'prevCreatedFrom' is absent on history recorded before that stamping
+    // existed, so older entries just leave the field alone.
+    if (Object.prototype.hasOwnProperty.call(p, 'prevCreatedFrom') && ownNote(p.card, uid)) {
+      db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ? AND user_id = ?').run(
+        p.prevCreatedFrom,
+        p.card,
+        uid
+      );
+    }
     return { noteId: p.card };
   }
 
@@ -125,6 +135,12 @@ function applyRedo(action, p, uid) {
     addLink(ta, tb, uid);
     const [fa, fb] = pair(p.from, p.card);
     removeLink(fa, fb, uid);
+    // Re-apply the same provenance stamp the original move made.
+    db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ? AND user_id = ?').run(
+      p.to,
+      p.card,
+      uid
+    );
     return { noteId: p.card };
   }
 

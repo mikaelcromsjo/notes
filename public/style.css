@@ -11,6 +11,12 @@
   --pin-contrast: #ffffff;
   --todo: #0d9488;
   --todo-contrast: #ffffff;
+  --waiting: #b45309;
+  --waiting-contrast: #ffffff;
+  --latest: #c2185b;
+  --latest-contrast: #ffffff;
+  --note-heat: #8b5cf6;
+  --note-heat-contrast: #ffffff;
   --radius: 12px;
   --shadow: 0 1px 3px rgba(20, 20, 30, 0.08), 0 1px 2px rgba(20, 20, 30, 0.06);
 }
@@ -261,6 +267,20 @@ button:hover { filter: brightness(1.05); }
   color: var(--accent-contrast);
 }
 
+/* Colour-mode toggle: off = transparent (no class), path heat = blue, note
+   heat = purple — the button itself shows which mode is active. */
+#color-mode-btn.mode-path {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+#color-mode-btn.mode-note {
+  background: var(--note-heat);
+  border-color: var(--note-heat);
+  color: var(--note-heat-contrast);
+}
+
 .tabbar {
   flex: 0 0 auto;
   display: flex;
@@ -351,6 +371,27 @@ button:hover { filter: brightness(1.05); }
   color: var(--pin-contrast);
 }
 
+.latestbar {
+  background: color-mix(in srgb, var(--latest) 8%, var(--surface));
+}
+
+.latestbar .tab {
+  border-color: color-mix(in srgb, var(--latest) 40%, var(--border));
+  color: var(--latest);
+  cursor: pointer;
+}
+
+.latestbar .tab:hover {
+  border-color: var(--latest);
+  color: var(--latest);
+}
+
+.latestbar .tab.active {
+  background: var(--latest);
+  border-color: var(--latest);
+  color: var(--latest-contrast);
+}
+
 .todobar {
   background: color-mix(in srgb, var(--todo) 8%, var(--surface));
 }
@@ -422,15 +463,6 @@ button:hover { filter: brightness(1.05); }
 @keyframes alarm-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.72; }
-}
-
-.cell.center .alarm-btn {
-  background: transparent;
-  border-color: var(--border);
-  color: var(--muted);
-  padding: 0.4rem 0.55rem;
-  font-size: 0.95rem;
-  line-height: 1;
 }
 
 .cell.center .alarm-btn:hover {
@@ -625,7 +657,10 @@ button:hover { filter: brightness(1.05); }
 .cell.neighbor {
   cursor: pointer;
   position: relative;
-  justify-content: center;
+  /* Title on top; an attachment preview (if any) fills the space below it
+     instead of the whole card being centered as one block. */
+  justify-content: flex-start;
+  gap: 0.4rem;
   /* let a press-drag on the card start a reorganise gesture instead of
      scrolling — required for drag-and-drop to work on Android */
   touch-action: none;
@@ -940,6 +975,14 @@ button:hover { filter: brightness(1.05); }
   margin-top: 0.4rem;
 }
 
+/* display: contents means the <a> generates no box of its own — the <img> is
+   still a direct flex item of the center-cell container (so the original
+   `max-height: 40%` keeps resolving against it), while a click anywhere on
+   the visible image still follows the link (open full size, new tab). */
+.center-attachment-image-link {
+  display: contents;
+}
+
 .center-attachment-image {
   width: 100%;
   max-height: 40%;
@@ -947,11 +990,17 @@ button:hover { filter: brightness(1.05); }
   border-radius: 8px;
   background: var(--bg);
   flex: 0 0 auto;
+  cursor: pointer;
 }
 
 .center-attachment-audio {
   width: 100%;
   flex: 0 0 auto;
+}
+
+.center-attachment-image-link + .center-attachment-download,
+.center-attachment-audio + .center-attachment-download {
+  margin-top: 0.4rem;
 }
 
 .center-attachment-contact {
@@ -962,7 +1011,8 @@ button:hover { filter: brightness(1.05); }
 }
 
 .center-attachment-contact a,
-.center-attachment-app {
+.center-attachment-app,
+.center-attachment-file {
   display: inline-block;
   font-size: 0.82rem;
   color: var(--accent);
@@ -971,10 +1021,15 @@ button:hover { filter: brightness(1.05); }
   border-radius: 8px;
   padding: 0.3rem 0.6rem;
   width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .center-attachment-contact a:hover,
-.center-attachment-app:hover {
+.center-attachment-app:hover,
+.center-attachment-file:hover {
   border-color: var(--accent);
 }
 
@@ -1014,19 +1069,28 @@ button:hover { filter: brightness(1.05); }
 .cell.center .pin-btn,
 .cell.center .done-btn,
 .cell.center .delete-btn,
-.cell.center .add-link-btn {
+.cell.center .add-link-btn,
+.cell.center .alarm-btn,
+.cell.center .tag-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
   background: transparent;
   border-color: var(--border);
   color: var(--muted);
-  padding: 0.4rem 0.55rem;
   font-size: 0.95rem;
   line-height: 1;
 }
 
-.cell.center .add-link-btn:hover {
+.cell.center .add-link-btn:hover,
+.cell.center .tag-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
+
 
 .cell.center .pin-btn:hover {
   border-color: var(--pin);
@@ -1042,6 +1106,12 @@ button:hover { filter: brightness(1.05); }
 .cell.center .done-btn:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.cell.center .done-btn.waiting {
+  background: var(--waiting);
+  border-color: var(--waiting);
+  color: var(--waiting-contrast);
 }
 
 .cell.center .done-btn.todo {
@@ -1253,6 +1323,31 @@ button:hover { filter: brightness(1.05); }
   filter: none;
 }
 
+.image-fullscreen {
+  position: relative;
+  width: 92%;
+  max-width: 1100px;
+  height: 88vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-fullscreen-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+#image-overlay .note-fullscreen-close {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
 .map-fullscreen {
   position: relative;
   background: var(--surface);
@@ -1427,6 +1522,7 @@ button:hover { filter: brightness(1.05); }
 .picker-field-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.6rem;
   margin-bottom: 0.5rem;
 }
@@ -1909,6 +2005,13 @@ button:hover { filter: brightness(1.05); }
 }
 .agenda-body h3:first-child { margin-top: 0; }
 .agenda-body .muted { color: var(--muted); }
+
+.agenda-subhead {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 0.6rem 0 0.15rem;
+}
 
 .agenda-item {
   display: flex;

@@ -25,64 +25,8 @@ router.get('/note-heat', (req, res) => {
   res.json(out);
 });
 
-// Label propagation over the user's link graph -> { clusters: { id: clusterId } }.
-// Cheap, dependency-free community detection for the "clusters" colour mode.
-router.get('/clusters', (req, res) => {
-  const uid = req.userId;
-  const notes = db
-    .prepare("SELECT id FROM notes WHERE user_id = ? AND status != 'deleted'")
-    .all(uid)
-    .map((r) => r.id);
-  const links = db
-    .prepare(
-      `SELECT l.note_a, l.note_b FROM links l
-       JOIN notes a ON a.id = l.note_a
-       WHERE a.user_id = ?`
-    )
-    .all(uid);
-
-  const adj = new Map(notes.map((id) => [id, []]));
-  for (const { note_a, note_b } of links) {
-    if (adj.has(note_a) && adj.has(note_b)) {
-      adj.get(note_a).push(note_b);
-      adj.get(note_b).push(note_a);
-    }
-  }
-
-  const label = new Map(notes.map((id) => [id, id]));
-  for (let iter = 0; iter < 20; iter++) {
-    let changed = false;
-    for (const id of notes) {
-      const nbrs = adj.get(id);
-      if (!nbrs.length) continue;
-      const counts = new Map();
-      for (const nb of nbrs) {
-        const l = label.get(nb);
-        counts.set(l, (counts.get(l) || 0) + 1);
-      }
-      let best = label.get(id);
-      let bestC = -1;
-      for (const [l, c] of counts) {
-        if (c > bestC || (c === bestC && l < best)) {
-          best = l;
-          bestC = c;
-        }
-      }
-      if (best !== label.get(id)) {
-        label.set(id, best);
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-
-  const clusters = {};
-  for (const [id, l] of label) clusters[id] = l;
-  res.json({ clusters });
-});
-
-// Insights overlay payload: most-visited notes, strongest paths, never-walked
-// notes, and the raw event count.
+// Insights overlay payload: most-visited notes, strongest paths, orphaned
+// (linkless) notes, and the raw event count.
 router.get('/insights', (req, res) => {
   const uid = req.userId;
 
@@ -111,14 +55,14 @@ router.get('/insights', (req, res) => {
     )
     .all(uid);
 
+  // Orphan = structurally disconnected — no links at all, so it can't be
+  // reached via the grid, only by search. A linked note that just hasn't been
+  // navigated to yet isn't an orphan; it's reachable, only unvisited.
   const orphans = db
     .prepare(
       `SELECT n.id, n.title FROM notes n
        WHERE n.user_id = ? AND n.status != 'deleted'
-         AND NOT EXISTS (
-           SELECT 1 FROM nav_events e
-           WHERE e.user_id = ? AND (e.to_note_id = n.id OR e.from_note_id = n.id)
-         )
+         AND NOT EXISTS (SELECT 1 FROM links l WHERE l.user_id = ? AND (l.note_a = n.id OR l.note_b = n.id))
        ORDER BY n.updated_at DESC LIMIT 20`
     )
     .all(uid, uid);

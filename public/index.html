@@ -42,6 +42,7 @@
 
   <nav id="tabbar" class="tabbar"></nav>
   <nav id="pinbar" class="tabbar pinbar hidden"></nav>
+  <nav id="latestbar" class="tabbar latestbar hidden"></nav>
   <nav id="todobar" class="tabbar todobar hidden"></nav>
   <nav id="alarmbar" class="tabbar alarmbar hidden"></nav>
 
@@ -64,13 +65,26 @@
         <button type="button" class="picker-style-btn active" data-style="text">📝 Text</button>
         <button type="button" class="picker-style-btn" data-style="image">📷 Photo</button>
         <button type="button" class="picker-style-btn" data-style="audio">🎤 Audio</button>
+        <button type="button" class="picker-style-btn" data-style="file">📎 File</button>
         <button type="button" class="picker-style-btn" data-style="contact">👤 Contact</button>
         <button type="button" class="picker-style-btn" data-style="app">🔗 App link</button>
       </div>
 
       <input type="text" id="picker-new-title" placeholder="New note title…" />
 
-      <input type="file" id="picker-photo-input" class="hidden" accept="image/*" capture="environment" />
+      <div id="picker-photo-row" class="hidden picker-field-row">
+        <button type="button" id="picker-camera-btn">📷 Take photo</button>
+        <button type="button" id="picker-gallery-btn" class="secondary">🖼️ Choose from gallery</button>
+        <span id="picker-photo-status" class="picker-hint"></span>
+      </div>
+      <input type="file" id="picker-camera-input" class="hidden" accept="image/*" capture="environment" />
+      <input type="file" id="picker-photo-input" class="hidden" accept="image/*" />
+
+      <div id="picker-file-row" class="hidden picker-field-row">
+        <button type="button" id="picker-file-btn">📎 Choose file</button>
+        <span id="picker-file-status" class="picker-hint"></span>
+      </div>
+      <input type="file" id="picker-file-input" class="hidden" />
 
       <div id="picker-audio-row" class="hidden picker-field-row">
         <button type="button" id="picker-record-btn">🎤 Start recording</button>
@@ -107,9 +121,15 @@
       <div class="map-modes" id="map-modes">
         <button data-mode="off">Plain</button>
         <button data-mode="note">Heat</button>
-        <button data-mode="cluster">Clusters</button>
       </div>
       <div id="map"></div>
+    </div>
+  </div>
+
+  <div id="image-overlay" class="overlay hidden">
+    <div class="image-fullscreen">
+      <button id="image-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <img id="image-overlay-img" class="image-fullscreen-img" alt="" />
     </div>
   </div>
 
@@ -254,6 +274,15 @@
                 <span class="settings-toggle-sub">Shortcuts to notes you pinned</span>
               </span>
               <input type="checkbox" id="bar-toggle-pins" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">Latest</span>
+                <span class="settings-toggle-sub">Notes you edited most recently</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-latest" />
               <span class="settings-switch" aria-hidden="true"></span>
             </label>
 

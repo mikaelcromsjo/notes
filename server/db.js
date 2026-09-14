@@ -56,11 +56,15 @@ if (!noteColumns.some((c) => c.name === 'created_from_note_id')) {
 if (!noteColumns.some((c) => c.name === 'attachment_path')) {
   db.exec('ALTER TABLE notes ADD COLUMN attachment_path TEXT');
 }
-// status: 'active' (default) | 'todo' | 'done' | 'deleted'. Set from the
-// center-cell footer button, which cycles active -> todo -> done -> active:
-// 'deleted' hides the note everywhere, 'done' dims it in place, 'todo' flags it
-// as an open thing to do (surfaced in the agenda + digest). Free TEXT, no CHECK
-// constraint, so new values need no migration.
+// status: 'active' (default) | 'waiting' | 'todo' | 'done' | 'deleted'. Set
+// from the center-cell footer button, which cycles
+// active -> waiting -> todo -> done -> active: 'deleted' hides the note
+// everywhere, 'done' dims it in place, 'todo' flags it as an open thing to
+// do (surfaced in the agenda + digest), 'waiting' flags it as blocked on
+// something else (a GTD "waiting for" — link it to whoever/whatever it's
+// waiting on like any other note; surfaced in the in-app agenda only, not
+// pushed/emailed by the digest, since it isn't something to act on yet).
+// Free TEXT, no CHECK constraint, so new values need no migration.
 if (!noteColumns.some((c) => c.name === 'status')) {
   db.exec("ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
 }

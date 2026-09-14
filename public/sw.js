@@ -13,7 +13,7 @@
 //
 // Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
 // a byte change to this file is itself what makes the browser re-run install.
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v9';
 const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [

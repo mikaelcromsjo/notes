@@ -4,6 +4,8 @@ const express = require('express');
 const db = require('../db');
 const history = require('../history');
 const { uploadsDir, diskUpload } = require('../upload-config');
+const { buildHierarchy, subtreeIds, probableRoot } = require('../hierarchy');
+const { extractTags } = require('../tags');
 
 const router = express.Router();
 
@@ -113,6 +115,41 @@ router.get('/search', (req, res) => {
   }
 });
 
+// GTD context tags are just `@word` mentions in a note's own text (see
+// server/tags.js) — no column, nothing to keep in sync. This lists what's
+// already in use, for the editor's tag-insert modal — a reuse convenience,
+// typing `@word` directly works with no server involved at all. Must be
+// declared before "/:id" for the same reason as "/search" above.
+const DEFAULT_TAGS = ['phone', 'errands', 'home', 'computer', 'anywhere'];
+
+router.get('/tags', (req, res) => {
+  // Finished (done) or removed notes don't need re-surfacing as suggestions.
+  const rows = db
+    .prepare(
+      "SELECT title, content FROM notes WHERE user_id = ? AND status NOT IN ('deleted', 'done')"
+    )
+    .all(req.userId);
+
+  const counts = new Map();
+  for (const { title, content } of rows) {
+    for (const tag of new Set([...extractTags(title), ...extractTags(content)])) {
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+
+  const used = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([tag]) => tag);
+  const tags = [...used, ...DEFAULT_TAGS.filter((t) => !counts.has(t))].slice(0, 8);
+  res.json({ tags });
+});
+
+// The most globally significant root note — the landing spot when there's no
+// better context to resume (e.g. the last open tab was just closed). Must be
+// declared before "/:id" for the same reason as "/search" above.
+router.get('/probable-root', (req, res) => {
+  const root = probableRoot(req.userId);
+  res.json({ note: root ? { id: root.id, title: root.title } : null });
+});
+
 router.get('/:id', (req, res) => {
   const note = db
     .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
@@ -178,7 +215,10 @@ router.delete('/:id', (req, res) => {
 
   db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
 
-  if ((note.type === 'image' || note.type === 'audio') && note.attachment_path) {
+  if (
+    (note.type === 'image' || note.type === 'audio' || note.type === 'file') &&
+    note.attachment_path
+  ) {
     const filePath = path.join(uploadsDir, path.basename(note.attachment_path));
     fs.unlink(filePath, () => {});
   }
@@ -206,12 +246,13 @@ router.delete('/:id/pin', (req, res) => {
   res.json(note);
 });
 
-const NOTE_STATUSES = new Set(['active', 'todo', 'done', 'deleted']);
+const NOTE_STATUSES = new Set(['active', 'waiting', 'todo', 'done', 'deleted']);
 
 const STATUS_VERB = {
   deleted: 'Deleted',
   done: 'Completed',
   todo: 'Flagged to-do',
+  waiting: 'Flagged waiting',
   active: 'Reopened',
 };
 
@@ -244,7 +285,11 @@ router.put('/:id/status', (req, res) => {
 });
 
 // Linked, non-deleted notes ranked by "probable next step", plus the single
-// "probable parent" (strongest inbound transition, falling back to provenance).
+// "probable parent" — recorded provenance, falling back to the oldest link.
+// Deliberately *not* based on nav_events: as you go back and forth between a
+// child and its parent, that back-and-forth would itself pile up "inbound
+// transition" weight and could point "back" at whichever note you happened
+// to arrive from, rather than the note's actual place in the hierarchy.
 // Shape: { parent: <neighbor|null>, neighbors: [<neighbor with .p and .score>] }.
 router.get('/:id/neighbors', (req, res) => {
   const id = Number(req.params.id);
@@ -258,6 +303,7 @@ router.get('/:id/neighbors', (req, res) => {
   const linked = db
     .prepare(
       `SELECT n.id, n.title, n.updated_at, n.type, n.attachment_path, n.status,
+              n.created_from_note_id, n.created_at AS note_created_at,
               l.created_at AS linked_at
        FROM links l
        JOIN notes n ON n.id = CASE WHEN l.note_a = ? THEN l.note_b ELSE l.note_a END
@@ -282,17 +328,6 @@ router.get('/:id/neighbors', (req, res) => {
       .all(uid, id)
   );
   const fwdTotal = [...fwd.values()].reduce((s, w) => s + w, 0);
-
-  const back = weightMap(
-    db
-      .prepare(
-        `SELECT from_note_id AS nid, ${decaySum} AS w
-         FROM nav_events
-         WHERE user_id = ? AND to_note_id = ? AND from_note_id IS NOT NULL
-         GROUP BY from_note_id`
-      )
-      .all(uid, id)
-  );
 
   const pop = weightMap(
     db
@@ -319,18 +354,66 @@ router.get('/:id/neighbors', (req, res) => {
     return { ...row, p, score };
   });
 
-  // Probable parent: strongest inbound transition, else recorded provenance.
+  // Probable parent: recorded provenance first. 'done' notes are dimmed/sunk
+  // everywhere else, so they're never picked as the back-link either — a
+  // finished note shouldn't be where "back" lands.
   let parent = null;
-  let bestBack = 0;
-  for (const row of scored) {
-    const w = back.get(row.id) || 0;
-    if (w > bestBack) {
-      bestBack = w;
-      parent = row;
-    }
+  if (center.created_from_note_id) {
+    const fallback = scored.find((r) => r.id === center.created_from_note_id) || null;
+    parent = fallback && fallback.status !== 'done' ? fallback : null;
   }
-  if (!parent && center.created_from_note_id) {
-    parent = scored.find((r) => r.id === center.created_from_note_id) || null;
+  // Structural fallback: no recorded provenance. First, drop any candidate
+  // that's provably this note's child rather than its parent:
+  //  - created_from_note_id says so explicitly, or
+  //  - the candidate's own created_at exactly matches the link's created_at,
+  //    meaning it was born at the moment this link was made — the same
+  //    "spawned via a `[[wikilink]]`" shape as created_from_note_id, just on
+  //    notes old enough (or imported) to predate that column being recorded.
+  if (!parent) {
+    const candidates = scored.filter(
+      (r) => r.created_from_note_id !== id && r.note_created_at !== r.linked_at
+    );
+    // `linked` (and so `candidates`, which preserves its order) is sorted by
+    // link creation DESC, so the last non-done entry is the oldest surviving
+    // link, i.e. the note's probable parent in the hierarchy.
+    let skippedDone = false;
+    let oldestSurvivor = null;
+    for (let i = candidates.length - 1; i >= 0; i--) {
+      if (candidates[i].status === 'done') {
+        skippedDone = true;
+        continue;
+      }
+      oldestSurvivor = candidates[i];
+      break;
+    }
+    // But if a 'done' note had to be skipped to get there, the *true* oldest
+    // link got archived — the next-oldest survivor is often just an
+    // incidental note linked around the same time, not a real parent. In
+    // that case prefer the most-linked survivor instead: a structural parent
+    // tends to be a hub other notes also point to, which chronology alone
+    // can't tell once the actual oldest link is gone.
+    if (oldestSurvivor && skippedDone) {
+      const degreeRows = db
+        .prepare(
+          `SELECT nid, COUNT(*) AS deg FROM (
+             SELECT note_a AS nid FROM links WHERE user_id = ?
+             UNION ALL
+             SELECT note_b AS nid FROM links WHERE user_id = ?
+           ) GROUP BY nid`
+        )
+        .all(uid, uid);
+      const degree = new Map(degreeRows.map((r) => [r.nid, r.deg]));
+      const survivors = candidates.filter((r) => r.status !== 'done');
+      survivors.sort((a, b) => {
+        const da = degree.get(a.id) || 0;
+        const dbDeg = degree.get(b.id) || 0;
+        if (da !== dbDeg) return dbDeg - da;
+        return a.linked_at < b.linked_at ? -1 : a.linked_at > b.linked_at ? 1 : 0;
+      });
+      parent = survivors[0];
+    } else {
+      parent = oldestSurvivor;
+    }
   }
 
   const parentId = parent ? parent.id : null;
@@ -349,11 +432,41 @@ router.get('/:id/neighbors', (req, res) => {
   res.json({ parent, neighbors, linkCount: linked.length, links });
 });
 
-const ATTACHMENT_TYPES = new Set(['image', 'audio', 'contact', 'app']);
+// Every 'todo'-flagged note anywhere under this one in the inferred hierarchy
+// (any depth) — the to-do header bar scopes to this instead of every open
+// note account-wide, so it reads as "what's left to do in this project."
+router.get('/:id/subtree-todos', (req, res) => {
+  const id = Number(req.params.id);
+  const uid = req.userId;
+  const center = db.prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
+  if (!center) return res.status(404).json({ error: 'not found' });
+
+  const { byId, childrenOf } = buildHierarchy(uid);
+  const todos = subtreeIds(childrenOf, id)
+    .map((nid) => byId.get(nid))
+    .filter((n) => n && n.status === 'todo')
+    .map((n) => ({ id: n.id, title: n.title }));
+  res.json({ todos });
+});
+
+// Every note id anywhere under this one, any depth — excludes the note
+// itself. Generic version of subtree-todos, for scoping other per-note lists
+// (the alarm header bar) to "under here" instead of account-wide.
+router.get('/:id/subtree-ids', (req, res) => {
+  const id = Number(req.params.id);
+  const uid = req.userId;
+  const center = db.prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
+  if (!center) return res.status(404).json({ error: 'not found' });
+
+  const { childrenOf } = buildHierarchy(uid);
+  res.json({ ids: subtreeIds(childrenOf, id) });
+});
+
+const ATTACHMENT_TYPES = new Set(['image', 'audio', 'file', 'contact', 'app']);
 
 // Create a new note of a given attachment type, linked to :id (the note it was
-// captured from). One note per attachment — image/audio upload a file; contact
-// and app store their data directly on the note.
+// captured from). One note per attachment — image/audio/file upload a file;
+// contact and app store their data directly on the note.
 router.post('/:id/attachments', upload.single('file'), (req, res) => {
   const parentId = Number(req.params.id);
   const parent = db
@@ -384,17 +497,20 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
   let attachmentPath = null;
   let defaultTitle = 'Attachment';
 
-  if (type === 'image' || type === 'audio') {
+  if (type === 'image' || type === 'audio' || type === 'file') {
     if (!req.file) {
-      return res.status(400).json({ error: 'a supported image or audio file is required' });
+      return res.status(400).json({ error: 'a supported file is required' });
     }
-    const kind = req.file.mimetype.split('/')[0];
-    if (kind !== type) {
-      fs.unlink(req.file.path, () => {});
-      return res.status(400).json({ error: `file type does not match "${type}"` });
+    if (type !== 'file') {
+      const kind = req.file.mimetype.split('/')[0];
+      if (kind !== type) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ error: `file type does not match "${type}"` });
+      }
     }
     attachmentPath = `/uploads/${req.file.filename}`;
-    defaultTitle = type === 'image' ? 'Photo' : 'Recording';
+    defaultTitle =
+      type === 'image' ? 'Photo' : type === 'audio' ? 'Recording' : req.file.originalname || 'File';
   } else if (type === 'contact') {
     if (!contactName || !contactName.trim()) {
       return res.status(400).json({ error: 'contactName is required for contact attachments' });

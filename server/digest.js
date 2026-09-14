@@ -49,15 +49,13 @@ const allRemindersStmt = db.prepare(
    ORDER BY r.time ASC, n.title ASC`
 );
 
-// Notes that have never appeared in a nav event — the same "orphans" signal the
-// insights overlay shows (server/routes/stats.js).
+// Structurally disconnected — no links at all — the same "orphans" signal the
+// insights overlay shows (server/routes/stats.js). A linked-but-unvisited note
+// isn't an orphan; it's reachable via the grid, just not visited yet.
 const orphansStmt = db.prepare(
   `SELECT n.id, n.title FROM notes n
    WHERE n.user_id = ? AND n.status != 'deleted'
-     AND NOT EXISTS (
-       SELECT 1 FROM nav_events e
-       WHERE e.user_id = ? AND (e.to_note_id = n.id OR e.from_note_id = n.id)
-     )
+     AND NOT EXISTS (SELECT 1 FROM links l WHERE l.user_id = ? AND (l.note_a = n.id OR l.note_b = n.id))
    ORDER BY n.updated_at DESC LIMIT 8`
 );
 
@@ -217,7 +215,7 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
       (page.allReminders || []).map((r) => L(r, r.snoozed ? `${r.rhythm} · snoozed` : r.rhythm))
     ) +
     pageSection(
-      'Notes you never open',
+      'Orphans',
       (page.orphans || []).map((o) => L({ noteId: o.noteId, title: o.title }, ''))
     );
 
