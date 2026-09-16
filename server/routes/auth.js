@@ -3,6 +3,7 @@ const express = require('express');
 const db = require('../db');
 const sessions = require('../sessions');
 const mailer = require('../mailer');
+const { seedSampleGraph } = require('../onboarding');
 
 const router = express.Router();
 
@@ -108,15 +109,18 @@ router.get('/callback', (req, res) => {
   if (consumed.changes !== 1) return fail(); // lost a race
 
   let user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(row.email);
+  let isNew = false;
   if (!user) {
     const info = db.prepare('INSERT INTO users (email) VALUES (?)').run(row.email);
     user = { id: info.lastInsertRowid, email: row.email };
+    isNew = true;
+    seedSampleGraph(user.id);
   }
 
   const sessionId = sessions.create(user.id, req);
   res.cookie(sessions.SESSION_COOKIE, sessionId, sessions.COOKIE_OPTS);
   res.clearCookie(LEGACY_COOKIE, { path: '/' });
-  res.redirect('/');
+  res.redirect(isNew ? '/?fresh=1' : '/');
 });
 
 // --- Session management ("signed-in devices" / log out everywhere) ---------

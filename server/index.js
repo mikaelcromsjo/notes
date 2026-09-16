@@ -19,6 +19,7 @@ const pushRouter = require('./routes/push');
 const widgetRouter = require('./routes/widget');
 const historyRouter = require('./routes/history');
 const importRouter = require('./routes/import');
+const onboardingRouter = require('./routes/onboarding');
 const shareRouter = require('./routes/share');
 const accountRouter = require('./routes/account');
 const alarmScheduler = require('./alarm-scheduler');
@@ -32,6 +33,25 @@ const uploadsDir = path.join(__dirname, '..', 'data', 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
 
 app.use(express.json());
+
+// Marketing landing page for signed-out visitors; signed-in users (and
+// anyone who has ever had a session, valid or expired) go straight to the
+// app, matching the existing behaviour before this route existed.
+// `/app` always serves the app shell directly, e.g. as a link target from
+// the landing page.
+app.get('/', (req, res) => {
+  sessions.sweepExpired();
+  const cookies = parseCookies(req.headers.cookie);
+  const sess = sessions.resolve(cookies[sessions.SESSION_COOKIE]);
+  const legacyUid = Number(cookies[sessions.LEGACY_COOKIE]);
+  const loggedIn = Boolean(sess) || (Number.isInteger(legacyUid) && legacyUid > 0);
+  res.sendFile(path.join(__dirname, '..', 'public', loggedIn ? 'index.html' : 'landing.html'));
+});
+
+app.get('/app', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
 // Defence in depth for user uploads: forbid MIME sniffing and load any file
 // that is opened top-level as a scriptless, opaque-origin document.
@@ -121,6 +141,7 @@ app.use('/api/digest', digestRouter);
 app.use('/api/push', pushRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/import', importRouter);
+app.use('/api/onboarding', onboardingRouter);
 
 // PWA share target — a top-level multipart POST from the OS share sheet, so it
 // lives outside /api (and its 401 gate); resolveSession above still runs.

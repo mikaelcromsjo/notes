@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Notes</title>
+
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+
+  <style>
+    :root {
+      --space-lg: 12px; --space-xl: 16px; --space-2xl: 20px; --space-3xl: 24px; --space-4xl: 32px;
+
+      --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      --font-family-mono: 'Monaco', 'Courier New', monospace;
+      --font-size-xs: 12px; --font-size-sm: 13px; --font-size-base: 15px; --font-size-lg: 17px;
+
+      --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 12px; --radius-pill: 20px;
+
+      --color-bg-primary: #0a0a0f;
+      --color-bg-secondary: #0d0d14;
+      --color-bg-tertiary: #101018;
+      --color-bg-elevated: #14152a;
+
+      --color-text-primary: #ffffff;
+      --color-text-secondary: #a3a8bd;
+      --color-text-tertiary: #71768c;
+
+      --color-border-primary: #1a1a24;
+      --color-border-secondary: #262a45;
+      --color-border-interactive: #3a4270;
+
+      --color-primary: #4f6df5;
+      --color-primary-hover: #6c85ff;
+      --color-primary-bg: rgba(79, 109, 245, 0.14);
+
+      --bg-gradient: linear-gradient(135deg, #0a0e29, #1b2a63, #10163e);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      font-family: var(--font-family);
+      font-size: var(--font-size-base);
+      color: var(--color-text-secondary);
+      background: var(--color-bg-primary);
+      background-image: var(--bg-gradient);
+      background-attachment: fixed;
+      min-height: 100vh;
+    }
+
+    a { color: var(--color-primary); text-decoration: none; transition: color .15s ease; }
+    a:hover { color: var(--color-primary-hover); }
+
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: var(--space-lg) var(--space-4xl);
+      border-radius: var(--radius-md);
+      font-size: var(--font-size-base);
+      font-weight: 600;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all .15s ease;
+    }
+    .btn-primary { background: var(--color-primary); color: #fff; border-color: var(--color-primary); }
+    .btn-primary:hover { background: var(--color-primary-hover); border-color: var(--color-primary-hover); color: #fff; }
+    .btn-ghost { background: transparent; color: var(--color-text-secondary); border-color: var(--color-border-secondary); }
+    .btn-ghost:hover { color: var(--color-text-primary); border-color: var(--color-border-interactive); }
+
+    .card {
+      background-color: var(--color-bg-tertiary);
+      border: 1px solid var(--color-border-primary);
+      border-radius: var(--radius-md);
+      padding: var(--space-3xl) var(--space-2xl);
+      transition: all .15s ease;
+    }
+    .card:hover { border-color: var(--color-border-secondary); background-color: var(--color-bg-elevated); }
+
+    /* Hero */
+    .hero { max-width: 720px; margin: 0 auto; padding: 88px 24px 48px; text-align: center; }
+    .badge {
+      display: inline-block; padding: 4px 14px; border-radius: var(--radius-pill);
+      background: var(--color-primary-bg); color: var(--color-primary);
+      font-size: var(--font-size-xs); font-weight: 600; text-transform: uppercase;
+      letter-spacing: 1.5px; margin-bottom: 20px;
+    }
+    .hero h1 { font-size: 3rem; font-weight: 700; color: var(--color-text-primary); margin: 0 0 20px; line-height: 1.15; }
+    .tagline { font-size: 1.15rem; color: var(--color-text-secondary); margin: 0 0 36px; font-weight: 300; line-height: 1.6; }
+    .cta { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; }
+
+    /* Value props */
+    .values { max-width: 960px; margin: 0 auto; padding: 32px 24px 56px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 32px; }
+    .values h2 { color: var(--color-text-primary); font-size: 1.3rem; font-weight: 600; margin-bottom: 10px; }
+    .values p { font-size: var(--font-size-sm); line-height: 1.7; }
+
+    /* Steps */
+    .steps { max-width: 960px; margin: 0 auto; padding: 0 24px 56px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    .step { text-align: center; padding: 8px; }
+    .step-num {
+      width: 32px; height: 32px; margin: 0 auto 14px; border-radius: 50%;
+      background: var(--color-bg-secondary); border: 1px solid var(--color-border-secondary);
+      color: var(--color-primary); font-weight: 600;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .step-title { color: var(--color-text-primary); font-weight: 600; margin-bottom: 6px; }
+    .step-desc { font-size: var(--font-size-xs); color: var(--color-text-tertiary); line-height: 1.6; }
+
+    /* Feature cards */
+    .features { max-width: 960px; margin: 0 auto; padding: 0 24px 64px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+    .feature-card { text-align: center; }
+    .feature-icon { font-size: 1.8rem; margin-bottom: 12px; }
+    .feature-title { color: var(--color-text-primary); font-weight: 600; margin-bottom: 8px; font-size: var(--font-size-sm); }
+    .feature-desc { font-size: var(--font-size-xs); color: var(--color-text-tertiary); line-height: 1.6; }
+
+    /* How it works panel */
+    .how { max-width: 960px; margin: 0 auto 56px; padding: 0 24px; }
+    .how-panel { border-radius: var(--radius-xl); padding: 36px 32px; }
+    .how-panel h2 { color: var(--color-text-primary); font-size: 1.3rem; font-weight: 600; margin-bottom: 10px; }
+    .how-panel p { font-size: var(--font-size-sm); line-height: 1.7; max-width: 640px; margin-bottom: 20px; }
+    .how-panel ol { list-style: none; font-family: var(--font-family-mono); font-size: var(--font-size-xs); color: var(--color-text-secondary); line-height: 2; }
+    .how-panel .n { color: var(--color-primary); }
+
+    /* CTA panel */
+    .signup { max-width: 720px; margin: 0 auto 64px; padding: 0 24px; text-align: center; }
+    .signup-panel { border-radius: var(--radius-xl); padding: 40px 32px; border-color: var(--color-primary-bg); }
+    .signup-panel h2 { color: var(--color-text-primary); font-size: 1.3rem; font-weight: 600; margin-bottom: 10px; }
+    .signup-panel p { font-size: var(--font-size-sm); margin-bottom: 24px; }
+
+    footer {
+      text-align: center; padding: 24px; border-top: 1px solid var(--color-border-primary);
+      color: var(--color-text-tertiary); font-size: var(--font-size-xs); line-height: 1.9;
+    }
+
+    @media (max-width: 768px) {
+      .hero h1 { font-size: 2rem; }
+      .hero { padding: 48px 20px 32px; }
+      .values, .steps, .features { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="hero">
+    <div class="badge">Personal notes, reimagined</div>
+    <h1>Notes</h1>
+    <p class="tagline">
+      Your notes as a living map. Link them together, tap to move between
+      them, and never lose track of what's due — online or off.
+    </p>
+    <div class="cta">
+      <a href="/app" class="btn btn-primary">Open the app</a>
+      <a href="https://github.com/mikaelcromsjo/notes" class="btn btn-ghost">View on GitHub</a>
+    </div>
+  </div>
+
+  <div class="values">
+    <div>
+      <h2>Navigate by connection, not by folder</h2>
+      <p>Every note sits at the center of its own neighborhood — the notes you've linked to it, or moved between most. Tap a neighbor to step there. No folder tree to maintain, no tags to remember: your notes stay organized by how they actually connect.</p>
+    </div>
+    <div>
+      <h2>Works offline, syncs when you're back</h2>
+      <p>Install it like a native app. Read, write, and link notes with no connection at all — every change queues up and replays automatically the moment you're back online, with no lost edits.</p>
+    </div>
+  </div>
+
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-title">Write a note</div>
+      <div class="step-desc">Jot something down and link it to related notes with <code>[[wikilinks]]</code> as you go.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-title">Move through the graph</div>
+      <div class="step-desc">Your note sits centered, surrounded by its closest links — tap any neighbor to move there.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-title">Stay on top of it</div>
+      <div class="step-desc">Set a reminder, check your agenda, or get a daily digest of what's due.</div>
+    </div>
+  </div>
+
+  <div class="features">
+    <div class="card feature-card">
+      <div class="feature-icon">🕸️</div>
+      <div class="feature-title">Link-graph navigation</div>
+      <div class="feature-desc">Every note is centered in a grid of its nearest links, ranked by what you actually visit most.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="feature-icon">📡</div>
+      <div class="feature-title">Offline-first</div>
+      <div class="feature-desc">Installable as a PWA. Full read/write/link offline, synced automatically when you reconnect.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="feature-icon">🔔</div>
+      <div class="feature-title">Reminders &amp; agenda</div>
+      <div class="feature-desc">Set a reminder on any note; see what's overdue, due today, or coming up this week.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="feature-icon">✉️</div>
+      <div class="feature-title">Daily / weekly digest</div>
+      <div class="feature-desc">A push notification or email summary of what's due, sent on your own schedule.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="feature-icon">🗺️</div>
+      <div class="feature-title">Map view</div>
+      <div class="feature-desc">Notes with a location show up on a map, so places become part of your graph too.</div>
+    </div>
+    <div class="card feature-card">
+      <div class="feature-icon">🔍</div>
+      <div class="feature-title">Instant search</div>
+      <div class="feature-desc">Full-text search across every note, with instant local matching as you type.</div>
+    </div>
+  </div>
+
+  <div class="how">
+    <div class="card how-panel">
+      <h2>Ranked by how you actually use it</h2>
+      <p>The grid around a note isn't alphabetical or chronological — neighbors are ranked by navigation history, so the links you follow most often surface first. New notes fall back to link recency. The graph reflects how you think, not how you filed things.</p>
+      <ol>
+        <li><span class="n">•</span> Tap the top half of the centered note to read it</li>
+        <li><span class="n">•</span> Tap the bottom half to edit it directly</li>
+        <li><span class="n">•</span> Tap any neighbor card to move the whole graph there</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="signup">
+    <div class="card signup-panel">
+      <h2>Start your own graph</h2>
+      <p>Sign in with just your email — no password to remember, a one-time link does the rest.</p>
+      <div>
+        <a href="/app" class="btn btn-primary">Open the app</a>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div>An installable PWA — works offline, syncs everywhere</div>
+    <div><a href="https://github.com/mikaelcromsjo/notes">github.com/mikaelcromsjo/notes</a></div>
+  </footer>
+
+</body>
+</html>
