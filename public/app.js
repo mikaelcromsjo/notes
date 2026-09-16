@@ -298,6 +298,40 @@
         /* storage unavailable — run online-only */
       }
     },
+    // Bulk warm-cache merge (phase 5): folds { id, content, attachment_path,
+    // updated_at } — the fields the list payload omits — for every note into
+    // the mirror in one transaction. Same merge rule as mergeNotes: a note
+    // with an unsynced local edit is left alone until its outbox entry lands.
+    async mergeFullNotes(rows) {
+      if (!store) return;
+      try {
+        await store.tx('notes', 'readwrite', async (t) => {
+          const os = t.objectStore('notes');
+          for (const r of rows) {
+            const prev = await store.reqAsPromise(os.get(r.id));
+            if (prev && prev._dirty) continue;
+            if (
+              prev &&
+              prev.content === r.content &&
+              prev.attachment_path === r.attachment_path &&
+              prev._serverUpdatedAt === r.updated_at
+            ) {
+              continue;
+            }
+            os.put({
+              ...prev,
+              id: r.id,
+              content: r.content,
+              attachment_path: r.attachment_path,
+              updated_at: r.updated_at,
+              _serverUpdatedAt: r.updated_at,
+            });
+          }
+        });
+      } catch {
+        /* storage unavailable — run online-only, same as mergeNotes */
+      }
+    },
     // A note straight from the server (full row): authoritative, so it clears
     // the local-edit flag unless the outbox still holds an entry for it.
     async putNote(note, { fromServer = true } = {}) {
@@ -713,6 +747,115 @@
     await flushOutbox();
     if (!syncing) await resyncFromServer();
     if (currentUser) checkAlarms({ popup: false });
+    warmCache();
+  }
+
+  // --- Warm cache (phase 5): note text is cheap even at thousands of notes,
+  // so pull it all in the background on every online app-open/reconnect
+  // instead of only ever caching a note once it's been individually opened.
+  // Attachment *files* are a different budget — see warmAttachmentCache.
+  // Never awaited by a caller that needs to render now; failures just mean
+  // the next run (next open / next reconnect) tries again.
+  async function warmCache() {
+    if (!store || !navigator.onLine || !currentUser) return;
+    try {
+      const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : null));
+      if (rows) await cache.mergeFullNotes(rows);
+    } catch {
+      /* offline mid-flight — next warm cache run retries */
+    }
+    await warmAttachmentCache();
+  }
+
+  // Detected once at load: how durable this origin's IndexedDB actually is.
+  // An installed Android PWA gets Chrome's automatic persistent-storage grant
+  // and a real quota that's a large slice of free disk, so it's safe to keep
+  // far more than a bare browser tab (which can vanish on uninstall / manual
+  // clear, no separate "app" to preserve) or iOS Safari (which purges unused
+  // site data after 7 days unless the app is added to the home screen).
+  const STANDALONE =
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+    navigator.standalone === true;
+  const IS_ANDROID = /Android/i.test(navigator.userAgent);
+  const IS_IOS = /iP(hone|ad|od)/i.test(navigator.userAgent);
+  const ASSET_CACHE_BASELINE = IS_ANDROID
+    ? STANDALONE
+      ? 500 * 1024 * 1024
+      : 150 * 1024 * 1024
+    : IS_IOS
+    ? STANDALONE
+      ? 200 * 1024 * 1024
+      : 50 * 1024 * 1024
+    : 500 * 1024 * 1024; // desktop: rarely storage-constrained
+
+  // The environment baseline above, clamped to what the browser actually
+  // reports as free (never plan to use more than half of current headroom,
+  // so a nearly-full phone degrades instead of hitting QuotaExceededError).
+  async function assetCacheBudget() {
+    try {
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().catch(() => {});
+      }
+      const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : null;
+      const quota = (est && est.quota) || 0;
+      const usage = (est && est.usage) || 0;
+      const headroom = quota ? Math.max(0, quota * 0.5 - usage) : 0;
+      return headroom ? Math.min(ASSET_CACHE_BASELINE, headroom) : ASSET_CACHE_BASELINE;
+    } catch {
+      return ASSET_CACHE_BASELINE;
+    }
+  }
+
+  // Downloads the most-recently-updated attachments up to the size budget,
+  // newest first, and evicts anything that no longer fits or no longer
+  // exists. `meta['assetIndex']` tracks {size, updatedAt} per cached path
+  // without touching the blob-carrying `assets` store, so the budget/eviction
+  // math never has to load the blobs themselves into memory.
+  async function warmAttachmentCache() {
+    if (!store) return;
+    let manifest;
+    try {
+      manifest = await fetch('/api/notes/attachments-manifest').then((r) => (r.ok ? r.json() : null));
+    } catch {
+      return;
+    }
+    if (!Array.isArray(manifest)) return;
+
+    const budget = await assetCacheBudget();
+    const index = (await store.meta('assetIndex', {})) || {};
+    const live = new Set(manifest.map((m) => m.attachment_path));
+
+    for (const p of Object.keys(index)) {
+      if (!live.has(p)) {
+        delete index[p];
+        await store.del('assets', p).catch(() => {});
+      }
+    }
+
+    let total = 0;
+    for (const m of manifest) {
+      const size = m.attachment_size || 0;
+      const cached = index[m.attachment_path];
+      if (total + size > budget) {
+        // Past the budget line — drop it if an earlier, looser run cached it.
+        if (cached) {
+          delete index[m.attachment_path];
+          await store.del('assets', m.attachment_path).catch(() => {});
+        }
+        continue;
+      }
+      total += size;
+      if (cached && cached.updatedAt === m.updated_at) continue; // already current
+      try {
+        const blob = await fetch(m.attachment_path).then((r) => (r.ok ? r.blob() : null));
+        if (!blob) continue;
+        await store.put('assets', { path: m.attachment_path, blob, noteId: m.id });
+        index[m.attachment_path] = { size, updatedAt: m.updated_at, noteId: m.id };
+      } catch {
+        /* network dropped mid-download — next warm cache run retries */
+      }
+    }
+    await store.setMeta('assetIndex', index);
   }
 
   async function resyncFromServer() {
@@ -2654,6 +2797,8 @@
       })
         .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
         .catch(() => ({ ok: false, error: 'network error' })),
+    onboardingBegin: () =>
+      fetch('/api/onboarding/begin', { method: 'POST' }).then((r) => r.ok).catch(() => false),
     getPushKey: () => fetch('/api/push/key').then((r) => (r.ok ? r.json() : null)).catch(() => null),
     subscribePush: (sub) =>
       fetch('/api/push/subscribe', {
@@ -3047,6 +3192,7 @@
       const tabsList = await api.listTabs();
       await refreshFromTabs(tabsList);
       await checkAlarms();
+      warmCache(); // background; never blocks first render
     } catch (err) {
       // Any unhandled throw in this chain (most likely an offline edge case)
       // used to leave the page stuck on the bare shell forever, nothing ever
@@ -3082,13 +3228,17 @@
     const d = params.get('d');
     const handledD = d === 'agenda' || d === 'insights';
     const wantsCompose = params.get('compose') === '1';
+    const isFresh = params.get('fresh') === '1';
+    const wantsBegin = params.get('ob') === 'begin';
     const shared = consumePendingShare();
 
-    if (!handledD && !wantsCompose && !shared) return;
+    if (!handledD && !wantsCompose && !isFresh && !wantsBegin && !shared) return;
 
     const url = new URL(location.href);
     if (handledD) url.searchParams.delete('d');
     if (wantsCompose) url.searchParams.delete('compose');
+    if (isFresh) url.searchParams.delete('fresh');
+    if (wantsBegin) url.searchParams.delete('ob');
     history.replaceState(null, '', url.pathname + url.search + url.hash);
 
     if (d === 'agenda') openAgenda();
@@ -3096,6 +3246,14 @@
 
     if (shared) createSharedNote(shared);
     else if (wantsCompose) openPicker({ standalone: true });
+    else if (isFresh) openNoteFullscreen('preview');
+    else if (wantsBegin) {
+      // A link clicked inside a note's own content (Skip-the-intro or the
+      // tour's closing state) — see server/onboarding.js. Reload rather than
+      // hand-patch every client cache, same call the restore flow makes
+      // after replacing all account data wholesale.
+      api.onboardingBegin().finally(() => location.reload());
+    }
   }
 
   // Read + clear the `nico_share` cookie left by a logged-out POST /share.
@@ -3139,20 +3297,42 @@
   // An attachment note created offline stores its file in the `blobs` store and
   // carries a "blob-pending:<key>" path until it uploads. Resolve it to a URL
   // usable as-is (a same-origin path, or an object URL for the in-memory blob).
+  // Offline (and not blob-pending), skip the network and go straight to
+  // whatever warmAttachmentCache() has already downloaded into `assets` —
+  // null if this file was never opened before and fell outside the cache
+  // budget, which callers turn into a "not available offline" notice.
   function resolveMediaUrl(path) {
     const m = /^blob-pending:(.+)$/.exec(path || '');
-    if (!m) return Promise.resolve(path);
+    if (m) {
+      if (!store) return Promise.resolve(null);
+      return store
+        .get('blobs', m[1])
+        .then((rec) => (rec && rec.blob ? URL.createObjectURL(rec.blob) : null))
+        .catch(() => null);
+    }
+    if (!path) return Promise.resolve(null);
+    if (navigator.onLine) return Promise.resolve(path);
     if (!store) return Promise.resolve(null);
     return store
-      .get('blobs', m[1])
+      .get('assets', path)
       .then((rec) => (rec && rec.blob ? URL.createObjectURL(rec.blob) : null))
       .catch(() => null);
   }
 
-  function setMediaSrc(el, path) {
+  function setMediaSrc(el, path, onMissing) {
     resolveMediaUrl(path).then((url) => {
       if (url) el.src = url;
+      else if (onMissing) onMissing();
     });
+  }
+
+  // Small muted "can't show this offline" stand-in for a missing image/audio/
+  // download — same treatment everywhere a resolveMediaUrl() comes back null.
+  function mediaUnavailableNotice(label) {
+    const span = document.createElement('span');
+    span.className = 'center-attachment-unavailable';
+    span.textContent = label || '📵 Not available offline';
+    return span;
   }
 
   // Suggested filename for a downloaded attachment: the note's title, sanitized,
@@ -3174,7 +3354,15 @@
     link.download = attachmentFilename(note);
     link.href = '#';
     resolveMediaUrl(note.attachment_path).then((url) => {
-      if (url) link.href = url;
+      if (url) {
+        link.href = url;
+        return;
+      }
+      link.removeAttribute('href');
+      link.removeAttribute('download');
+      link.classList.add('center-attachment-unavailable');
+      link.textContent = `${label || '⬇ Download'} — not available offline`;
+      link.addEventListener('click', (e) => e.preventDefault());
     });
     return link;
   }
@@ -3207,6 +3395,8 @@
           img.src = url;
           viewLink.href = url;
           resolvedUrl = url;
+        } else {
+          viewLink.replaceWith(mediaUnavailableNotice('🖼 Not available offline'));
         }
       });
       viewLink.addEventListener('click', (e) => {
@@ -3222,7 +3412,9 @@
       const audio = document.createElement('audio');
       audio.className = 'center-attachment-audio';
       audio.controls = true;
-      setMediaSrc(audio, note.attachment_path);
+      setMediaSrc(audio, note.attachment_path, () =>
+        audio.replaceWith(mediaUnavailableNotice('🔊 Not available offline'))
+      );
       frag.appendChild(audio);
       if (!compact) frag.appendChild(buildDownloadLink(note));
       return frag;
@@ -3377,7 +3569,7 @@
   // title + content with autosave, the meta line, and the pin / 🗑 delete / ✅
   // done footer. (The grid center cell renders a read-only version, not this.)
   // `onRerender` runs after a pin/done toggle; `afterDelete` after a soft-delete.
-  function buildNoteEditor({ onRerender, afterDelete }) {
+  function buildNoteEditor({ onRerender, afterDelete, startPreview }) {
     const frag = document.createDocumentFragment();
 
     const preview = buildAttachmentPreview(currentNote);
@@ -3388,14 +3580,26 @@
     title.value = currentNote.title;
     title.placeholder = 'Title';
 
-    const content = document.createElement('textarea');
-    content.className = 'center-content';
-    content.value = currentNote.content;
-    content.placeholder = 'Write here…';
-
     const status = document.createElement('span');
     status.className = 'save-status';
     status.textContent = '';
+
+    // Offline and this note's full row was never cached (never opened before,
+    // or created on another device since this one last synced): `content` is
+    // simply absent, not empty. Editing blind would autosave that absence
+    // over the real text once back online, so the title and text area go
+    // read-only instead of showing a blank/garbled editor — pin/status/delete
+    // below stay live since none of them touch content.
+    const contentCached = currentNote.content != null;
+    title.readOnly = !contentCached;
+
+    const content = document.createElement('textarea');
+    content.className = 'center-content' + (contentCached ? '' : ' offline-unavailable');
+    content.value = contentCached
+      ? currentNote.content
+      : 'Not available offline — open this note once online to load and edit it.';
+    content.placeholder = 'Write here…';
+    content.readOnly = !contentCached;
 
     function scheduleSave() {
       status.textContent = 'Saving…';
@@ -3419,58 +3623,63 @@
       }, 500);
     }
 
-    title.addEventListener('input', scheduleSave);
-    content.addEventListener('input', scheduleSave);
+    // Everything below wires up actual editing — skipped entirely when the
+    // text isn't cached, so there's no live listener that could autosave the
+    // placeholder over real content once back online.
+    if (contentCached) {
+      title.addEventListener('input', scheduleSave);
+      content.addEventListener('input', scheduleSave);
 
-    attachWikiAutocomplete(content, {
-      getCurrentId: () => currentId,
-      onLinked: async () => {
-        await loadNeighbors(currentId);
-        await refreshColorData();
-      },
-    });
+      attachWikiAutocomplete(content, {
+        getCurrentId: () => currentId,
+        onLinked: async () => {
+          await loadNeighbors(currentId);
+          await refreshColorData();
+        },
+      });
 
-    // Inline images: paste or drop an image into the editor → upload it (no
-    // graph node) and drop a `![](…)` at the caret. A placeholder marks the
-    // spot while the upload is in flight.
-    async function insertInlineImage(file) {
-      if (!file || !file.type.startsWith('image/')) return;
-      const tag = `![](uploading…#${Date.now().toString(36)})`;
-      const pos = content.selectionStart;
-      content.value = content.value.slice(0, pos) + tag + content.value.slice(content.selectionEnd);
-      content.dispatchEvent(new Event('input'));
-      try {
-        const fd = new FormData();
-        fd.set('inline', '1');
-        fd.set('file', file, file.name || 'pasted.png');
-        const res = await fetch(`/api/notes/${currentId}/attachments`, { method: 'POST', body: fd });
-        const data = res.ok ? await res.json() : null;
-        if (!data || !data.path) throw new Error('upload failed');
-        content.value = content.value.replace(tag, `![](${data.path})`);
-      } catch (e) {
-        content.value = content.value.replace(tag, '');
-        toast('Image upload failed.');
+      // Inline images: paste or drop an image into the editor → upload it (no
+      // graph node) and drop a `![](…)` at the caret. A placeholder marks the
+      // spot while the upload is in flight.
+      async function insertInlineImage(file) {
+        if (!file || !file.type.startsWith('image/')) return;
+        const tag = `![](uploading…#${Date.now().toString(36)})`;
+        const pos = content.selectionStart;
+        content.value = content.value.slice(0, pos) + tag + content.value.slice(content.selectionEnd);
+        content.dispatchEvent(new Event('input'));
+        try {
+          const fd = new FormData();
+          fd.set('inline', '1');
+          fd.set('file', file, file.name || 'pasted.png');
+          const res = await fetch(`/api/notes/${currentId}/attachments`, { method: 'POST', body: fd });
+          const data = res.ok ? await res.json() : null;
+          if (!data || !data.path) throw new Error('upload failed');
+          content.value = content.value.replace(tag, `![](${data.path})`);
+        } catch (e) {
+          content.value = content.value.replace(tag, '');
+          toast('Image upload failed.');
+        }
+        content.dispatchEvent(new Event('input'));
       }
-      content.dispatchEvent(new Event('input'));
-    }
 
-    content.addEventListener('paste', (e) => {
-      const item = [...(e.clipboardData?.items || [])].find(
-        (it) => it.kind === 'file' && it.type.startsWith('image/')
-      );
-      if (!item) return;
-      e.preventDefault();
-      insertInlineImage(item.getAsFile());
-    });
-    content.addEventListener('dragover', (e) => {
-      if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
-    });
-    content.addEventListener('drop', (e) => {
-      const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
-      if (!file) return;
-      e.preventDefault();
-      insertInlineImage(file);
-    });
+      content.addEventListener('paste', (e) => {
+        const item = [...(e.clipboardData?.items || [])].find(
+          (it) => it.kind === 'file' && it.type.startsWith('image/')
+        );
+        if (!item) return;
+        e.preventDefault();
+        insertInlineImage(item.getAsFile());
+      });
+      content.addEventListener('dragover', (e) => {
+        if ([...(e.dataTransfer?.types || [])].includes('Files')) e.preventDefault();
+      });
+      content.addEventListener('drop', (e) => {
+        const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
+        if (!file) return;
+        e.preventDefault();
+        insertInlineImage(file);
+      });
+    }
 
     // Markdown preview toggle. Checkboxes stay interactive in preview mode.
     const previewBtn = document.createElement('button');
@@ -3495,11 +3704,19 @@
       });
     previewBtn.addEventListener('click', () => {
       previewing = !previewing;
+      previewActive = previewing;
       if (previewing) paintPreview();
       previewDiv.hidden = !previewing;
       content.hidden = previewing;
       previewBtn.textContent = previewing ? '✏️ Edit' : '👁 Preview';
     });
+    if (startPreview) {
+      previewing = true;
+      paintPreview();
+      previewDiv.hidden = false;
+      content.hidden = true;
+      previewBtn.textContent = '✏️ Edit';
+    }
 
     frag.appendChild(title);
     frag.appendChild(previewBtn);
@@ -3571,6 +3788,7 @@
     tagBtn.className = 'tag-btn';
     tagBtn.textContent = '🏷️';
     tagBtn.title = 'Add a context tag (e.g. @phone)';
+    tagBtn.disabled = !contentCached;
 
     function insertTag(tag) {
       const pos = content.selectionStart;
@@ -3752,6 +3970,11 @@
           },
         });
       paint();
+    } else if (currentNote.content == null) {
+      // Not truly empty — this note's full row was just never cached, so
+      // there's nothing to show. Distinct from the "Write here…" invitation
+      // below, which would otherwise wrongly suggest an empty note.
+      content.textContent = 'Not available offline';
     } else {
       content.textContent = 'Write here…';
     }
@@ -3770,12 +3993,11 @@
 
     cell.addEventListener('click', (e) => {
       if (e.target.closest('a, audio, input, label')) return;
-      const focus = e.target.closest('.center-title')
-        ? 'title'
-        : e.target.closest('.center-content')
-        ? 'content'
-        : null;
-      openNoteFullscreen(focus);
+      // Top half of the card → open read-only/rendered (peek at it, click
+      // wikilinks); bottom half → open straight into the editable textarea.
+      const rect = cell.getBoundingClientRect();
+      const mode = e.clientY - rect.top < rect.height / 2 ? 'preview' : 'edit';
+      openNoteFullscreen(mode);
     });
 
     return cell;
@@ -3980,25 +4202,43 @@
       const preview = buildAttachmentPreview(neighbor, { compact: true });
       if (preview) cell.appendChild(preview);
 
-      cell.addEventListener('click', (e) => {
+      cell.addEventListener('click', async (e) => {
         // Let the attachment's own link/player take the tap (view/download/
         // play) instead of navigating the grid to this note.
         if (e.target.closest('a, audio, input, label')) return;
-        goTo(neighbor.id, navVia);
+        // Top half: just center it, same as before (the center cell is
+        // already a read-only preview — opening fullscreen too is
+        // redundant). Bottom half: center it and go straight into editing.
+        const rect = cell.getBoundingClientRect();
+        const wantsEdit = e.clientY - rect.top >= rect.height / 2;
+        await goTo(neighbor.id, navVia);
+        if (wantsEdit) await openNoteFullscreen('edit');
       });
     }
 
     return cell;
   }
 
+  // Preview is the default and persists across re-renders of the *same*
+  // open note (pin/status/delete etc. all rebuild the editor via onRerender
+  // with no mode argument) — an action button must never flip you out of
+  // whatever mode you're already in. Only an explicit mode — a fresh open,
+  // or the user's own Preview/Edit toggle — changes it.
+  let previewActive = true;
+
   // Fullscreen editor for the current center note (title/content, meta,
-  // pin/delete/done). `focus` optionally puts the caret in 'title' or 'content'.
-  function renderNoteFullscreen(focus) {
+  // pin/delete/done). mode: 'preview' opens rendered/read-only (clickable
+  // wikilinks, no keyboard); 'edit' opens straight into the textarea, cursor
+  // at the end; omitted (a rerender after pin/status/delete) reuses whatever
+  // previewActive already is, with no focus change.
+  function renderNoteFullscreen(mode) {
+    if (mode === 'preview' || mode === 'edit') previewActive = mode === 'preview';
     noteOverlayBody.innerHTML = '';
     const inner = document.createElement('div');
     inner.className = 'cell center' + (currentNote.status === 'done' ? ' dimmed' : '');
     inner.appendChild(
       buildNoteEditor({
+        startPreview: previewActive,
         onRerender: async () => {
           await render();
           renderNoteFullscreen();
@@ -4012,8 +4252,8 @@
     );
     noteOverlayBody.appendChild(inner);
 
-    if (focus === 'title' || focus === 'content') {
-      const el = inner.querySelector(focus === 'title' ? '.center-title' : '.center-content');
+    if (mode === 'edit') {
+      const el = inner.querySelector('.center-content');
       if (el) {
         el.focus();
         const end = el.value.length;
@@ -4022,11 +4262,11 @@
     }
   }
 
-  async function openNoteFullscreen(focus) {
+  async function openNoteFullscreen(mode) {
     if (!currentId) return;
     currentNote = await api.getNote(currentId);
     if (!currentNote) return;
-    renderNoteFullscreen(focus);
+    renderNoteFullscreen(mode);
     noteOverlay.classList.remove('hidden');
   }
 
@@ -4034,6 +4274,7 @@
     clearTimeout(saveTimer);
     noteOverlay.classList.add('hidden');
     noteOverlayBody.innerHTML = '';
+    previewActive = true;
   }
 
   // Manual dismiss: also redraw the grid so edits made in the overlay show through.

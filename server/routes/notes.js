@@ -150,6 +150,54 @@ router.get('/probable-root', (req, res) => {
   res.json({ note: root ? { id: root.id, title: root.title } : null });
 });
 
+// The fields the list endpoint above omits to stay light — content (arbitrary
+// length) and attachment_path (contact/app attachments carry their payload
+// here as text). The client pulls this once per online app-open to pre-cache
+// every note for offline reading, instead of only ever caching notes it has
+// individually opened. Must be declared before "/:id" for the same reason as
+// "/search" above.
+router.get('/full', (req, res) => {
+  const notes = db
+    .prepare(
+      `SELECT id, content, attachment_path, updated_at
+       FROM notes WHERE user_id = ? AND status != 'deleted'`
+    )
+    .all(req.userId);
+  res.json(notes);
+});
+
+// Every cacheable attachment (image/audio/file — contact/app carry their data
+// as text in attachment_path above, nothing to download), newest-updated
+// first, with a byte size so the client can plan an offline cache budget
+// without downloading anything first. Backfills attachment_size for rows
+// uploaded before that column existed. Must be declared before "/:id" for the
+// same reason as "/search" above.
+router.get('/attachments-manifest', (req, res) => {
+  const rows = db
+    .prepare(
+      `SELECT id, type, attachment_path, attachment_size, updated_at
+       FROM notes
+       WHERE user_id = ? AND status != 'deleted' AND type IN ('image', 'audio', 'file')
+             AND attachment_path IS NOT NULL
+       ORDER BY updated_at DESC`
+    )
+    .all(req.userId);
+
+  const backfillSize = db.prepare('UPDATE notes SET attachment_size = ? WHERE id = ?');
+  for (const r of rows) {
+    if (r.attachment_size != null) continue;
+    try {
+      const stat = fs.statSync(path.join(uploadsDir, path.basename(r.attachment_path)));
+      r.attachment_size = stat.size;
+      backfillSize.run(stat.size, r.id);
+    } catch {
+      r.attachment_size = 0;
+    }
+  }
+
+  res.json(rows);
+});
+
 router.get('/:id', (req, res) => {
   const note = db
     .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
@@ -495,6 +543,7 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
   }
 
   let attachmentPath = null;
+  let attachmentSize = null;
   let defaultTitle = 'Attachment';
 
   if (type === 'image' || type === 'audio' || type === 'file') {
@@ -509,6 +558,7 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
       }
     }
     attachmentPath = `/uploads/${req.file.filename}`;
+    attachmentSize = req.file.size;
     defaultTitle =
       type === 'image' ? 'Photo' : type === 'audio' ? 'Recording' : req.file.originalname || 'File';
   } else if (type === 'contact') {
@@ -534,8 +584,8 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
   const { lat, lon } = parseCoords(req.body);
 
   const insertNote = db.prepare(
-    `INSERT INTO notes (title, content, created_at, updated_at, type, lat, lon, created_from_note_id, attachment_path, user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO notes (title, content, created_at, updated_at, type, lat, lon, created_from_note_id, attachment_path, attachment_size, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const linkNotes = db.prepare(
     'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
@@ -543,7 +593,19 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
 
   const create = db.transaction(() => {
     const ts = now();
-    const info = insertNote.run(title, content, ts, ts, type, lat, lon, parentId, attachmentPath, req.userId);
+    const info = insertNote.run(
+      title,
+      content,
+      ts,
+      ts,
+      type,
+      lat,
+      lon,
+      parentId,
+      attachmentPath,
+      attachmentSize,
+      req.userId
+    );
     const id = info.lastInsertRowid;
     linkNotes.run(Math.min(id, parentId), Math.max(id, parentId), ts, req.userId);
     return id;

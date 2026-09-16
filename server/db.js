@@ -56,6 +56,14 @@ if (!noteColumns.some((c) => c.name === 'created_from_note_id')) {
 if (!noteColumns.some((c) => c.name === 'attachment_path')) {
   db.exec('ALTER TABLE notes ADD COLUMN attachment_path TEXT');
 }
+// Byte size of the uploaded file for image/audio/file attachments — lets the
+// client plan its offline attachment cache budget from a lightweight manifest
+// instead of downloading every file just to learn its size. NULL for rows
+// uploaded before this column existed; GET /api/notes/attachments-manifest
+// backfills it lazily (stat the file once, then the value sticks).
+if (!noteColumns.some((c) => c.name === 'attachment_size')) {
+  db.exec('ALTER TABLE notes ADD COLUMN attachment_size INTEGER');
+}
 // status: 'active' (default) | 'waiting' | 'todo' | 'done' | 'deleted'. Set
 // from the center-cell footer button, which cycles
 // active -> waiting -> todo -> done -> active: 'deleted' hides the note
@@ -138,6 +146,13 @@ for (const [name, decl] of digestCols) {
   if (!userCols.some((c) => c.name === name)) {
     db.exec(`ALTER TABLE users ADD COLUMN ${name} ${decl}`);
   }
+}
+
+// Stamped once POST /api/onboarding/begin has wiped a fresh account's seeded
+// sample graph — doubles as a one-time-use guard (see server/onboarding.js)
+// so a repeat call can't be replayed against real notes created since.
+if (!userCols.some((c) => c.name === 'onboarding_cleared_at')) {
+  db.exec('ALTER TABLE users ADD COLUMN onboarding_cleared_at TEXT');
 }
 
 // Web Push subscriptions — how the alarm scheduler reaches a user when their

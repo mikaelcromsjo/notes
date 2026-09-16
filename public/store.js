@@ -19,10 +19,16 @@
 //   neighbors keyPath 'id' — the last server { parent, neighbors, links, … }
 //                            response per centred note, so the grid keeps its
 //                            ranked arrangement + path-heat offline (added v2).
+//   assets  keyPath 'path' — downloaded attachment files (image/audio/file),
+//                            keyed by their server "/uploads/…" path, warmed
+//                            in the background up to a size budget so viewing
+//                            one offline doesn't depend on having opened it
+//                            before. Distinct from `blobs`, which holds
+//                            outbound not-yet-uploaded files (added v3).
 (() => {
   const DB_NAME = 'nico';
-  const DB_VERSION = 2;
-  const STORES = ['notes', 'links', 'outbox', 'blobs', 'meta', 'neighbors'];
+  const DB_VERSION = 3;
+  const STORES = ['notes', 'links', 'outbox', 'blobs', 'meta', 'neighbors', 'assets'];
 
   let dbPromise = null;
 
@@ -44,6 +50,7 @@
         if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'k' });
         if (!db.objectStoreNames.contains('neighbors'))
           db.createObjectStore('neighbors', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('assets')) db.createObjectStore('assets', { keyPath: 'path' });
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);

@@ -62,9 +62,8 @@ body {
   justify-content: center;
   border-radius: 50%;
   border: 1px solid var(--border);
-  background: var(--surface);
+  background: transparent;
   color: var(--muted);
-  box-shadow: var(--shadow);
   font-size: 0.75rem;
   line-height: 1;
 }
@@ -899,6 +898,19 @@ button:hover { filter: brightness(1.05); }
 
 .cell.center .center-content.readonly.placeholder {
   color: var(--muted);
+}
+
+/* Offline stand-ins: a note/attachment that exists but was never cached for
+   offline use, as opposed to one that's genuinely empty/missing. */
+.center-content.offline-unavailable {
+  color: var(--muted);
+  font-style: italic;
+}
+.center-attachment-unavailable {
+  color: var(--muted);
+  font-size: 0.85rem;
+  cursor: default;
+  text-decoration: none;
 }
 
 /* --- Rendered markdown (center cell preview + fullscreen editor preview) --- */
