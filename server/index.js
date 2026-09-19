@@ -1,5 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+
+// Load .env (if present) before anything reads process.env; real env vars win.
+try { process.loadEnvFile(path.join(__dirname, '..', '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+
 const express = require('express');
 
 const db = require('./db');

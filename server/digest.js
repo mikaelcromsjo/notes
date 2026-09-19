@@ -10,7 +10,7 @@ const { buildAgenda } = require('./agenda');
 // few graph orphans to resurface.
 
 function publicOrigin() {
-  return (process.env.PUBLIC_ORIGIN || 'https://test.ia-ai.se').replace(/\/+$/, '');
+  return (process.env.PUBLIC_ORIGIN || `http://127.0.0.1:${process.env.PORT || 8050}`).replace(/\/+$/, '');
 }
 
 function buildDigest(userId, { tz, now = new Date() } = {}) {

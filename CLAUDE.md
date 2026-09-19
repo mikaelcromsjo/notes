@@ -7,7 +7,7 @@ This checkout (`/srv/notes`, port **8050**) serves **notes.ia-ai.se**. It was fo
 ## Run
 
 - `npm start` (= `node server/index.js`). `npm install` for deps.
-- Env: `PORT` (**8050** here), `HOST` (127.0.0.1), `DB_PATH` (sqlite file, for testing on a copy), `SEED_USER_EMAIL`, `PUBLIC_ORIGIN` (widget-feed link base; else forwarded headers), `VAPID_CONTACT`.
+- Env: read from gitignored `.env` at the repo root (`process.loadEnvFile` at the top of `index.js`; real env vars win) — here `PORT=8050`, `PUBLIC_ORIGIN=https://notes.ia-ai.se`. Vars: `PORT` (**8050** here), `HOST` (127.0.0.1), `DB_PATH` (sqlite file, for testing on a copy), `SEED_USER_EMAIL`, `PUBLIC_ORIGIN` (link base for widget/digest/auth/account links; request routes fall back to forwarded headers, the schedulers to `http://127.0.0.1:PORT` — so set it or digest push/email links are unusable), `VAPID_CONTACT`.
 - **Restart after any `server/` change** — code and `db.js` migrations only load on boot. `public/` static, no restart — but `sw.js` precaches the shell (stale-while-revalidate), so a `public/` change lands on the **2nd** load; bump `CACHE_VERSION` to purge.
 - A PostToolUse hook in `.claude/settings.local.json` (gitignored, per-machine) auto-restarts the bare `node server/index.js` after any `server/**` edit, logging to `data/server.log`.
 - A bare `node server/index.js` is usually already running (no systemd). Check `ps aux | grep server/index.js` before a 2nd instance — WAL lock clash.

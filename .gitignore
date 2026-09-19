@@ -3,5 +3,8 @@ node_modules/
 # Live user data — never commit
 data/
 
+# Per-deployment env (PORT, PUBLIC_ORIGIN)
+.env
+
 # Claude Code local settings (machine-specific hook)
 .claude/settings.local.json
