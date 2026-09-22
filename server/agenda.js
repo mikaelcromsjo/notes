@@ -37,6 +37,18 @@ const todoNotesStmt = db.prepare(
 const OPEN_TASK_RE = /^[ \t]*(?:[-*+]|\d+\.)[ \t]+\[ \][ \t]*\S/gm;
 const OPEN_TASKS_LIMIT = 20;
 
+// Structurally disconnected — no links at all — so it can't be reached via the
+// grid, only by search; the same signal the insights overlay shows. A linked
+// note that just hasn't been navigated to yet isn't an orphan, it's reachable,
+// only unvisited. Most-recently-touched first: an orphan you edited yesterday
+// is more likely worth resurfacing than one from years ago.
+const orphansStmt = db.prepare(
+  `SELECT n.id, n.title FROM notes n
+   WHERE n.user_id = ? AND n.status != 'deleted'
+     AND NOT EXISTS (SELECT 1 FROM links l WHERE l.user_id = ? AND (l.note_a = n.id OR l.note_b = n.id))
+   ORDER BY n.updated_at DESC LIMIT 20`
+);
+
 function validZone(tz) {
   if (typeof tz !== 'string' || !tz) return null;
   try {
@@ -122,12 +134,15 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
     tags: [...new Set([...extractTags(n.title), ...extractTags(n.content)])],
   }));
 
+  const orphans = orphansStmt.all(userId, userId).map((n) => ({ noteId: n.id, title: n.title }));
+
   return {
     generatedAt: now.toISOString(),
     tz: zone,
     reminders: buckets,
     todos,
     openTasks: openTasks.slice(0, OPEN_TASKS_LIMIT),
+    orphans,
   };
 }
 

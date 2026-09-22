@@ -33,11 +33,13 @@
   const loginBtn = document.getElementById('login-btn');
 
   const pickerOverlay = document.getElementById('picker-overlay');
-  const pickerSearch = document.getElementById('picker-search');
-  const pickerResults = document.getElementById('picker-results');
+  const pickerHeading = document.getElementById('picker-heading');
   const pickerNewTitle = document.getElementById('picker-new-title');
   const pickerCreateBtn = document.getElementById('picker-create-btn');
   const pickerCancelBtn = document.getElementById('picker-cancel-btn');
+  const pickerCurrentAttachment = document.getElementById('picker-current-attachment');
+  const pickerCurrentAttachmentLabel = document.getElementById('picker-current-attachment-label');
+  const pickerRemoveAttachmentBtn = document.getElementById('picker-remove-attachment-btn');
   const pickerStyleRow = document.getElementById('picker-style-row');
   const pickerPhotoRow = document.getElementById('picker-photo-row');
   const pickerPhotoInput = document.getElementById('picker-photo-input');
@@ -58,7 +60,13 @@
   const pickerContactEmail = document.getElementById('picker-contact-email');
   const pickerContactPickBtn = document.getElementById('picker-contact-pick-btn');
   const pickerAppUri = document.getElementById('picker-app-uri');
-  const pickerConnectSection = document.getElementById('picker-connect-section');
+
+  // Separate modal: only links the current note to an existing one (see
+  // openLinkModal). #picker-overlay above only ever creates.
+  const linkOverlay = document.getElementById('link-overlay');
+  const linkSearch = document.getElementById('link-search');
+  const linkResults = document.getElementById('link-results');
+  const linkCancelBtn = document.getElementById('link-cancel-btn');
 
   const noteOverlay = document.getElementById('note-overlay');
   const noteOverlayBody = document.getElementById('note-overlay-body');
@@ -747,6 +755,7 @@
     await flushOutbox();
     if (!syncing) await resyncFromServer();
     if (currentUser) checkAlarms({ popup: false });
+    syncThemePrefs();
     warmCache();
   }
 
@@ -765,6 +774,7 @@
       /* offline mid-flight — next warm cache run retries */
     }
     await warmAttachmentCache();
+    await warmThemeImages();
   }
 
   // Detected once at load: how durable this origin's IndexedDB actually is.
@@ -993,6 +1003,14 @@
         await store.put('outbox', prev);
         return refreshPending();
       }
+    } else if (kind === 'note.theme') {
+      const prev = find((e) => e.kind === 'note.theme' && e.payload.id === payload.id);
+      if (prev) {
+        prev.payload.theme = payload.theme;
+        prev.payload.children = payload.children;
+        await store.put('outbox', prev);
+        return refreshPending();
+      }
     } else if (kind === 'note.pin' || kind === 'note.unpin') {
       const opp = kind === 'note.pin' ? 'note.unpin' : 'note.pin';
       const cancel = find((e) => e.kind === opp && e.payload.id === payload.id);
@@ -1184,6 +1202,13 @@
       return;
     }
 
+    if (e.kind === 'note.theme') {
+      const id = idResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'note not synced yet');
+      await cache.putNote(await putJson(`/api/notes/${id}/theme`, { theme: p.theme, children: p.children }));
+      return;
+    }
+
     if (e.kind === 'note.pin' || e.kind === 'note.unpin') {
       const id = idResolve(p.id);
       if (isTmp(id)) throw httpErr(0, 'note not synced yet');
@@ -1209,7 +1234,7 @@
     }
 
     if (e.kind === 'attachment.create') {
-      const parentId = idResolve(p.parentId);
+      const parentId = p.parentId != null ? idResolve(p.parentId) : null;
       if (isTmp(parentId)) throw httpErr(0, 'parent not synced yet');
       const fd = new FormData();
       for (const [k, v] of Object.entries(p.fields || {})) fd.set(k, v);
@@ -1218,9 +1243,10 @@
         if (!rec || !rec.blob) throw httpErr(0, 'upload data lost');
         fd.set('file', rec.blob, rec.name || 'upload');
       }
+      const url = parentId != null ? `/api/notes/${parentId}/attachments` : '/api/notes/attachments';
       let res;
       try {
-        res = await fetch(`/api/notes/${parentId}/attachments`, { method: 'POST', body: fd });
+        res = await fetch(url, { method: 'POST', body: fd });
       } catch {
         throw httpErr(0, 'offline');
       }
@@ -1538,8 +1564,12 @@
       lat: note.lat,
       lon: note.lon,
     });
-    await putLocalLink(parentId, tmpId, ts);
-    await enqueue('attachment.create', { parentId, tmpId, fields, blobKey }, [tmpId, parentId]);
+    if (parentId != null) await putLocalLink(parentId, tmpId, ts);
+    await enqueue(
+      'attachment.create',
+      { parentId, tmpId, fields, blobKey },
+      [tmpId, parentId].filter((v) => v != null)
+    );
     scheduleFlush();
     return note;
   }
@@ -1868,6 +1898,51 @@
     allNotesCache = await api.listNotes();
     if (!noteOverlay.classList.contains('hidden')) closeNoteFullscreen();
     jumpTo(created.id, 'wikilink-new');
+  }
+
+  // Small anchored dropdown for a button with more than one action — currently
+  // just the note editor's ➕. Closes on an outside click, Escape, or picking an
+  // item; only one instance is ever open.
+  let openActionMenuEl = null;
+  function closeActionMenu() {
+    if (!openActionMenuEl) return;
+    openActionMenuEl.remove();
+    openActionMenuEl = null;
+    document.removeEventListener('mousedown', onActionMenuOutside, true);
+    document.removeEventListener('keydown', onActionMenuKey, true);
+  }
+  function onActionMenuOutside(e) {
+    if (openActionMenuEl && !openActionMenuEl.contains(e.target)) closeActionMenu();
+  }
+  function onActionMenuKey(e) {
+    if (e.key === 'Escape') closeActionMenu();
+  }
+  function openActionMenu(anchor, items) {
+    closeActionMenu();
+    const menu = document.createElement('div');
+    menu.className = 'action-menu';
+    items.forEach(({ label, onClick, active }) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'action-menu-item' + (active ? ' active' : '');
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        closeActionMenu();
+        onClick();
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+    openActionMenuEl = menu;
+    // Deferred so the click that opened the menu doesn't immediately close it
+    // via the same outside-mousedown listener (capture phase fires before this
+    // handler is even attached, but the listener add is itself post-microtask
+    // relative to the click that's still bubbling).
+    setTimeout(() => document.addEventListener('mousedown', onActionMenuOutside, true), 0);
+    document.addEventListener('keydown', onActionMenuKey, true);
   }
 
   // Inline "[[" autocomplete for a <textarea>: type "[[" then at least one
@@ -2434,9 +2509,12 @@
         formData.set('lon', String(loc.lon));
       }
       const inline = formData.get('inline') === '1' || formData.get('inline') === 'true';
+      // No parentId = a standalone attachment note (header/PWA-shortcut "new
+      // note"), which has no note to link to or nest the URL under.
+      const url = parentId != null ? `/api/notes/${parentId}/attachments` : '/api/notes/attachments';
       if (navigator.onLine && !anyTmp(parentId)) {
         try {
-          const res = await fetch(`/api/notes/${parentId}/attachments`, {
+          const res = await fetch(url, {
             method: 'POST',
             body: formData,
           });
@@ -2455,6 +2533,41 @@
         throw httpErr(0, 'offline');
       }
       return queueAttachment(parentId, formData);
+    },
+    // Replace or add *this* note's own attachment (its title/content/links stay
+    // put — only type + file change). Unlike createAttachment, needs a live
+    // connection: there's no meaningful offline queue for "replace the file a
+    // note already has" (nothing to show until the upload actually lands, and
+    // a second offline edit before that would have no real file to diff against).
+    setNoteAttachment: async (id, formData) => {
+      if (!navigator.onLine || isTmp(id)) {
+        toast('Changing an attachment needs a connection.');
+        throw httpErr(0, 'offline');
+      }
+      let res;
+      try {
+        res = await fetch(`/api/notes/${id}/attachment`, { method: 'PUT', body: formData });
+      } catch {
+        throw httpErr(0, 'offline');
+      }
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw httpErr(res.status, j.error || `HTTP ${res.status}`);
+      }
+      const note = await res.json();
+      await cache.putNote(note);
+      patchListCache(id, { type: note.type });
+      return note;
+    },
+    removeNoteAttachment: async (id) => {
+      if (!navigator.onLine || isTmp(id)) {
+        toast('Removing an attachment needs a connection.');
+        throw httpErr(0, 'offline');
+      }
+      const note = await reqJson(`/api/notes/${id}/attachment`, 'DELETE');
+      await cache.putNote(note);
+      patchListCache(id, { type: note.type });
+      return note;
     },
     updateNote: async (id, data) => {
       const prev = await localNoteFor(id);
@@ -2496,6 +2609,60 @@
     },
     pinNote: (id) => togglePin(id, true),
     unpinNote: (id) => togglePin(id, false),
+    // Per-note theme: `theme` is a style object (or null to clear), `children`
+    // lets it cascade to sub notes. Cosmetic — offline it's optimistic + outbox
+    // like status, but never touches updated_at.
+    setNoteTheme: async (id, theme, children) => {
+      const clean = theme && Object.keys(theme).length ? theme : null;
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const note = await putJson(`/api/notes/${id}/theme`, { theme: clean, children: Boolean(children) });
+          await cache.putNote(note);
+          patchListCache(id, { theme: note.theme, theme_children: note.theme_children });
+          return note;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      const fields = {
+        theme: clean ? JSON.stringify(clean) : null,
+        theme_children: clean && children ? 1 : 0,
+      };
+      const prev = await localNoteFor(id);
+      const note = { ...prev, id, ...fields, _dirty: true };
+      if (store) await store.put('notes', note);
+      patchListCache(id, fields);
+      await enqueue('note.theme', { id, theme: clean, children: Boolean(children) }, [id]);
+      scheduleFlush();
+      return note;
+    },
+    // The inferred hierarchy as { childId: parentId }, for resolving a note's
+    // theme through its ancestors. Mirrored into meta so it works offline (as of
+    // the last online visit).
+    getHierarchyParents: async () => {
+      try {
+        const r = await fetch('/api/notes/hierarchy-parents');
+        if (!r.ok) throw new Error(String(r.status));
+        const j = await r.json();
+        if (store) store.setMeta('hierarchyParents', j).catch(() => {});
+        return j.parents || {};
+      } catch {
+        const hit = store ? await store.meta('hierarchyParents', null) : null;
+        return (hit && hit.parents) || {};
+      }
+    },
+    getThemePrefs: () => fetch('/api/theme').then((r) => (r.ok ? r.json() : null)),
+    saveThemePrefs: (prefs) => putJson('/api/theme', prefs),
+    // One background image → { path }; needs the network (a file can't be queued
+    // as a theme reference before it exists server-side).
+    uploadThemeImage: async (blob) => {
+      const fd = new FormData();
+      fd.append('file', blob, 'background.jpg');
+      const r = await fetch('/api/theme/image', { method: 'POST', body: fd });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || `upload failed (${r.status})`);
+      return j;
+    },
     getNeighbors: async (id) => {
       if (isTmp(id)) return cache.localNeighbors(id);
       try {
@@ -2967,6 +3134,8 @@
         return 'Note edit';
       case 'note.status':
         return `Set status “${p.status}”`;
+      case 'note.theme':
+        return 'Note theme';
       case 'note.pin':
         return 'Pin note';
       case 'note.unpin':
@@ -3171,6 +3340,818 @@
     });
   }
 
+  // "Check for updates" (Settings → Account). Two things can be stale: sw.js
+  // itself (a new worker installs → skipWaiting → 'sw-activated' → the toast
+  // above), and shell files whose bytes changed without touching sw.js — those
+  // otherwise only land on the *second* load via stale-while-revalidate. So also
+  // revalidate the cached text assets against the server and swap in any that
+  // differ. Images/fonts are skipped: they change rarely and cost the most to diff.
+  const updateBtn = document.getElementById('update-check-btn');
+  const updateStatus = document.getElementById('update-status');
+  const SHELL_DIFFABLE = /\.(js|css|html|webmanifest)$/;
+
+  function sameBytes(a, b) {
+    if (a.byteLength !== b.byteLength) return false;
+    const x = new Uint8Array(a);
+    const y = new Uint8Array(b);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
+    return true;
+  }
+
+  async function shellCacheName() {
+    const names = window.caches ? (await caches.keys()).filter((k) => k.startsWith('nico-shell-')) : [];
+    return names.sort().pop() || null;
+  }
+
+  // → 'unsupported' | 'offline' | 'updating' | 'update-ready' | 'current'
+  async function checkForUpdate() {
+    if (!('serviceWorker' in navigator) || !window.caches) return 'unsupported';
+    if (!navigator.onLine) return 'offline';
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return 'unsupported';
+    await reg.update().catch(() => {});
+    // A changed sw.js is now installing; its activation raises the reload toast.
+    if (reg.installing || reg.waiting) return 'updating';
+
+    const name = await shellCacheName();
+    if (!name) return 'current';
+    const cache = await caches.open(name);
+    let changed = false;
+    for (const req of await cache.keys()) {
+      const path = new URL(req.url).pathname;
+      if (path === '/' || !SHELL_DIFFABLE.test(path)) continue;
+      // `__update` makes sw.js skip its stale-while-revalidate and hit the network.
+      const fresh = await fetch(`${req.url}?__update=${Date.now()}`, { cache: 'no-cache' }).catch(() => null);
+      const old = await cache.match(req);
+      if (!fresh || !fresh.ok || !old) continue;
+      const [a, b] = await Promise.all([old.arrayBuffer(), fresh.clone().arrayBuffer()]);
+      if (!sameBytes(a, b)) {
+        await cache.put(req, fresh);
+        changed = true;
+      }
+    }
+    return changed ? 'update-ready' : 'current';
+  }
+
+  async function runUpdateCheck() {
+    updateBtn.disabled = true;
+    updateStatus.textContent = 'Checking for updates…';
+    let result;
+    try {
+      result = await checkForUpdate();
+    } catch {
+      updateStatus.textContent = "Couldn't check for updates. Try again in a moment.";
+      updateBtn.disabled = false;
+      return;
+    }
+    if (result === 'update-ready' || result === 'updating') {
+      updateStatus.textContent = 'A new version was found — reload to use it.';
+      if (!workerUpdatePrompted) {
+        workerUpdatePrompted = true;
+        showReloadBar('A new version is ready.');
+      }
+    } else if (result === 'offline') {
+      updateStatus.textContent = "You're offline — connect and try again.";
+    } else if (result === 'unsupported') {
+      updateStatus.textContent = "This browser can't check in the background. Reload the page to get the latest version.";
+    } else {
+      const name = await shellCacheName();
+      updateStatus.textContent = `You're up to date${name ? ` (${name.replace('nico-shell-', '')})` : ''}.`;
+    }
+    updateBtn.disabled = false;
+  }
+  updateBtn.addEventListener('click', runUpdateCheck);
+
+  // --- Themes (model + sanitizer shared with the server: public/themes.js) ---
+  // Two layers of style, same shape: the account's *app theme* (a built-in or a
+  // user-made one, synced via /api/theme) and each note's own theme
+  // (notes.theme, optionally cascading to sub notes in the inferred hierarchy).
+  // A note's effective style = app theme ← ancestors that cascade (root first) ←
+  // its own, merged field by field. The centered note's style repaints the whole
+  // screen; every card is drawn in its own note's style (inline CSS vars on the
+  // cell, only when they differ from the screen's).
+  const Themes = window.NicoThemes;
+  const themeBtn = document.getElementById('theme-btn');
+  const themeOverlay = document.getElementById('theme-overlay');
+  const themeBody = document.getElementById('theme-body');
+  const themeTabs = document.getElementById('theme-tabs');
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+
+  let themePrefs = { active: 'light', custom: [] };
+  let themePrefsDirty = false;
+  let themeSyncing = false;
+  let themeSaveTimer = null;
+  let themeParents = {}; // childId → parentId, only fetched while a note cascades
+  let themeScreenKey = '';
+  let themeScope = 'app';
+  const themeParseMemo = new Map();
+  const themeUrlMap = new Map(); // upload path → object URL, offline only
+
+  const themePrefsKey = () => `nico-theme-prefs-${currentUser ? currentUser.id : 0}`;
+
+  function loadThemePrefsLocal() {
+    try {
+      const j = JSON.parse(localStorage.getItem(themePrefsKey()) || 'null');
+      if (j && j.prefs) {
+        themePrefs = { active: j.prefs.active || 'light', custom: j.prefs.custom || [] };
+        themePrefsDirty = Boolean(j.dirty);
+      }
+    } catch {
+      /* storage blocked or corrupt — start from the default theme */
+    }
+  }
+
+  function saveThemePrefsLocal() {
+    try {
+      localStorage.setItem(themePrefsKey(), JSON.stringify({ prefs: themePrefs, dirty: themePrefsDirty }));
+    } catch {
+      /* storage blocked — the server copy still syncs */
+    }
+  }
+
+  // Local edits win until they've reached the server (dirty); otherwise adopt
+  // whatever the server has, which is how a theme chosen on another device lands.
+  async function syncThemePrefs() {
+    if (!navigator.onLine || !currentUser || themeSyncing) return;
+    themeSyncing = true;
+    let editedInFlight = false;
+    try {
+      if (themePrefsDirty) {
+        const sent = JSON.stringify(themePrefs);
+        await api.saveThemePrefs(themePrefs);
+        if (JSON.stringify(themePrefs) === sent) {
+          themePrefsDirty = false;
+          saveThemePrefsLocal();
+        } else {
+          editedInFlight = true;
+        }
+      } else {
+        const srv = await api.getThemePrefs();
+        if (srv && JSON.stringify(srv) !== JSON.stringify(themePrefs)) {
+          themePrefs = srv;
+          saveThemePrefsLocal();
+          restyleAll();
+        }
+      }
+    } catch {
+      /* offline or server error — stays dirty, retried on reconnect */
+    } finally {
+      themeSyncing = false;
+    }
+    if (editedInFlight) commitThemePrefs();
+  }
+
+  function commitThemePrefs() {
+    themePrefsDirty = true;
+    saveThemePrefsLocal();
+    clearTimeout(themeSaveTimer);
+    themeSaveTimer = setTimeout(syncThemePrefs, 600);
+  }
+
+  function activeAppStyle() {
+    const a = themePrefs.active;
+    if (Themes.PRESETS[a]) return Themes.PRESETS[a].style;
+    const custom = themePrefs.custom.find((t) => t.id === a);
+    return (custom && custom.style) || {};
+  }
+
+  function parseNoteTheme(json) {
+    if (!json) return null;
+    let s = themeParseMemo.get(json);
+    if (s === undefined) {
+      try {
+        s = Themes.sanitizeStyle(JSON.parse(json));
+      } catch {
+        s = null;
+      }
+      themeParseMemo.set(json, s);
+    }
+    return s;
+  }
+
+  const themeNoteRow = (id) =>
+    allNotesCache.find((n) => n.id === id) || (currentNote && currentNote.id === id ? currentNote : null);
+
+  async function refreshThemeContext() {
+    themeParents = allNotesCache.some((n) => n.theme && n.theme_children)
+      ? await api.getHierarchyParents()
+      : {};
+  }
+
+  // Effective style for a note. skipOwn = what it *inherits*, before its own
+  // overrides (the theme editor shows those values as the "unset" defaults).
+  function styleFor(noteId, { skipOwn = false } = {}) {
+    let style = activeAppStyle();
+    if (noteId == null) return style;
+    const chain = [];
+    const seen = new Set([noteId]);
+    for (let cur = themeParents[String(noteId)]; cur != null && !seen.has(cur); cur = themeParents[String(cur)]) {
+      seen.add(cur);
+      chain.push(cur);
+    }
+    for (const id of chain.reverse()) {
+      const n = themeNoteRow(id);
+      if (n && n.theme_children) style = Themes.mergeStyles(style, parseNoteTheme(n.theme));
+    }
+    if (skipOwn) return style;
+    const own = themeNoteRow(noteId);
+    return Themes.mergeStyles(style, parseNoteTheme(own && own.theme));
+  }
+
+  // The nearest ancestor whose theme cascades down to this note, for the modal.
+  function themeInheritSource(noteId) {
+    const seen = new Set([noteId]);
+    for (let cur = themeParents[String(noteId)]; cur != null && !seen.has(cur); cur = themeParents[String(cur)]) {
+      seen.add(cur);
+      const n = themeNoteRow(cur);
+      if (n && n.theme_children && parseNoteTheme(n.theme)) return n;
+    }
+    return null;
+  }
+
+  // Uploaded images are shown straight from the network online; offline they come
+  // out of the `assets` store as object URLs (warmThemeImages puts them there).
+  const themeUrl = (p) => (navigator.onLine ? p : themeUrlMap.get(p) || null);
+
+  function themeImagePaths() {
+    const out = new Set();
+    const add = (s) => {
+      for (const k of ['bg', 'card']) {
+        if (s && s[k] && typeof s[k].img === 'string' && s[k].img.startsWith('/uploads/')) out.add(s[k].img);
+      }
+    };
+    themePrefs.custom.forEach((t) => add(t.style));
+    allNotesCache.forEach((n) => add(parseNoteTheme(n.theme)));
+    return out;
+  }
+
+  async function prepareOfflineThemeImages() {
+    if (navigator.onLine || !store) return;
+    for (const p of themeImagePaths()) {
+      if (themeUrlMap.has(p)) continue;
+      const rec = await store.get('assets', p).catch(() => null);
+      if (rec && rec.blob) themeUrlMap.set(p, URL.createObjectURL(rec.blob));
+    }
+  }
+
+  async function warmThemeImages() {
+    if (!store || !navigator.onLine) return;
+    for (const p of themeImagePaths()) {
+      try {
+        if (await store.get('assets', p)) continue;
+        const blob = await fetch(p).then((r) => (r.ok ? r.blob() : null));
+        if (blob) await store.put('assets', { path: p, blob, themeImg: true });
+      } catch {
+        /* dropped mid-download — next warm cache run retries */
+      }
+    }
+  }
+
+  // Two scopes. The *app theme* styles the chrome (header, bars, dialogs) on
+  // <html>. The centered note's resolved style (app ← ancestors ← own) styles only
+  // the note surfaces — the grid's cards, the note editor and the page background —
+  // as inline vars on those elements, so a note theme never changes the header.
+  const themeBgEl = document.querySelector('.theme-bg');
+  const themeNoteScopes = [grid, noteOverlay, themeBgEl];
+
+  function applyScreenTheme() {
+    const appVars = Themes.cssVars(activeAppStyle(), themeUrl);
+    const noteVars = Themes.cssVars(styleFor(currentId), themeUrl);
+    const root = document.documentElement;
+    Themes.applyVars(root, appVars);
+    themeScreenKey = JSON.stringify(noteVars);
+    const sameAsApp = themeScreenKey === JSON.stringify(appVars);
+    for (const el of themeNoteScopes) {
+      if (sameAsApp) for (const k of Object.keys(noteVars)) el.style.removeProperty(k);
+      else Themes.applyVars(el, noteVars);
+    }
+    // The fixed background layer shows whenever the note area's backdrop differs
+    // from a plain app-coloured page: an image, or just a different colour.
+    root.classList.toggle('has-bg', noteVars['--bg-img'] !== 'none' || noteVars['--bg'] !== appVars['--bg']);
+    if (themeMeta) themeMeta.setAttribute('content', appVars['--surface']);
+    if (navigator.onLine) {
+      try {
+        // Boot pre-paints the app-level look only; the note scope lands at first render.
+        localStorage.setItem(
+          Themes.BOOT_KEY,
+          JSON.stringify({ vars: appVars, hasBg: appVars['--bg-img'] !== 'none' })
+        );
+      } catch {
+        /* storage blocked — boot just won't pre-paint */
+      }
+    }
+  }
+
+  // A card inherits the screen's vars unless its own note's style differs.
+  function applyCellTheme(cell, noteId) {
+    cell._themeNoteId = noteId;
+    const vars = Themes.cssVars(styleFor(noteId), themeUrl);
+    if (JSON.stringify(vars) === themeScreenKey) {
+      for (const k of Object.keys(vars)) cell.style.removeProperty(k);
+    } else {
+      Themes.applyVars(cell, vars);
+    }
+    cell.classList.toggle('has-card-img', vars['--card-img'] !== 'none');
+  }
+
+  function restyleAll() {
+    applyScreenTheme();
+    for (const cell of grid.querySelectorAll('.cell')) {
+      if (cell._themeNoteId !== undefined) applyCellTheme(cell, cell._themeNoteId);
+    }
+  }
+
+  // --- Theme modal ---
+  const tmk = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+
+  // Copy of `style` with one field set (or removed when value is undefined).
+  function withField(style, key, sub, value) {
+    const next = JSON.parse(JSON.stringify(style || {}));
+    if (sub === null) {
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+    } else {
+      next[key] = next[key] || {};
+      if (value === undefined) delete next[key][sub];
+      else next[key][sub] = value;
+      if (!Object.keys(next[key]).length) delete next[key];
+    }
+    return next;
+  }
+
+  // Backgrounds are downsized before upload: a 12 MP photo is wasted on a page
+  // background, and this keeps the offline cache small.
+  async function downscaleImage(file, maxSide) {
+    let bmp;
+    try {
+      bmp = await createImageBitmap(file);
+    } catch {
+      throw new Error("Couldn't read that image.");
+    }
+    const s = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(bmp.width * s));
+    c.height = Math.max(1, Math.round(bmp.height * s));
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    if (bmp.close) bmp.close();
+    return new Promise((res, rej) =>
+      c.toBlob((b) => (b ? res(b) : rej(new Error("Couldn't process that image."))), 'image/jpeg', 0.82)
+    );
+  }
+
+  // The shared style editor. `style` is the sparse own style being edited, `base`
+  // what it inherits from (defaults for the app theme). onChange gets each new
+  // style; continuous inputs don't redraw (that would drop a slider mid-drag),
+  // discrete ones do.
+  function buildStyleEditor(style, base, onChange) {
+    const wrap = tmk('div', 'theme-editor');
+    let cur = style || {};
+    const update = (next, redraw) => {
+      cur = next;
+      onChange(cur);
+      if (redraw) draw();
+    };
+
+    const merged = () => Themes.mergeStyles(base, cur);
+
+    function draw() {
+      wrap.textContent = '';
+
+      // Colours — grouped (Core / Tabs & status) so a 12-colour palette still
+      // reads as two short lists rather than one long one.
+      const eff = Themes.effectiveColors(merged());
+      for (const [groupLabel, keys] of Themes.COLOR_GROUPS) {
+        const colors = tmk('div', 'theme-section');
+        colors.appendChild(tmk('h3', null, groupLabel === 'Core' ? 'Colours' : groupLabel));
+        for (const k of keys) {
+          const set = cur.colors && cur.colors[k];
+          const row = tmk('div', 'theme-row' + (set ? '' : ' unset'));
+          row.appendChild(tmk('label', null, Themes.COLOR_LABELS[k]));
+          const input = tmk('input');
+          input.type = 'color';
+          input.value = set || eff[k];
+          const reset = tmk('button', 'theme-mini-btn', 'Reset');
+          reset.type = 'button';
+          reset.classList.toggle('hidden', !set);
+          input.addEventListener('input', () => {
+            row.classList.remove('unset');
+            reset.classList.remove('hidden');
+            update(withField(cur, 'colors', k, input.value), false);
+          });
+          reset.addEventListener('click', () => update(withField(cur, 'colors', k, undefined), true));
+          row.append(input, reset);
+          colors.appendChild(row);
+        }
+        wrap.appendChild(colors);
+      }
+
+      // Font
+      const font = tmk('div', 'theme-section');
+      font.appendChild(tmk('h3', null, 'Font'));
+      const frow = tmk('div', 'theme-row');
+      const sel = tmk('select');
+      sel.appendChild(new Option('Default', ''));
+      for (const [key, f] of Object.entries(Themes.FONTS)) sel.appendChild(new Option(f.label, key));
+      sel.value = cur.font || '';
+      const sample = tmk('p', 'theme-font-sample', 'The quick brown fox jumps over the lazy dog — 0123456789');
+      const paintSample = () => {
+        sample.style.fontFamily = (Themes.FONTS[merged().font] || Themes.FONTS.system).stack;
+      };
+      paintSample();
+      sel.addEventListener('change', () => {
+        update(withField(cur, 'font', null, sel.value || undefined), false);
+        paintSample();
+      });
+      frow.appendChild(sel);
+      font.append(frow, sample);
+      wrap.appendChild(font);
+
+      wrap.appendChild(buildImageSection('bg', 'Page background'));
+      wrap.appendChild(buildImageSection('card', 'Note card background'));
+
+      // Card effects: transparency (stored as opacity %, shown as transparency %
+      // since 0 = solid is the natural starting point) and glow.
+      const glow = tmk('div', 'theme-section');
+      glow.appendChild(tmk('h3', null, 'Note cards'));
+      const trow = tmk('div', 'theme-row');
+      const tr = tmk('input');
+      tr.type = 'range';
+      tr.min = '0';
+      tr.max = '100';
+      const alpha = cur.cardAlpha != null ? cur.cardAlpha : merged().cardAlpha != null ? merged().cardAlpha : 100;
+      tr.value = String(100 - alpha);
+      const tv = tmk('span', 'theme-val', `${tr.value}%`);
+      tr.addEventListener('input', () => {
+        tv.textContent = `${tr.value}%`;
+        update(withField(cur, 'cardAlpha', null, 100 - Number(tr.value)), false);
+      });
+      trow.append(tmk('label', null, 'Transparency'), tr, tv);
+      glow.appendChild(trow);
+      const frow2 = tmk('div', 'theme-row');
+      const fx = tmk('select');
+      for (const [v, label] of [
+        ['auto', 'Auto — only over busy backgrounds'],
+        ['shadow', 'Always: shadow'],
+        ['outline', 'Always: outline'],
+        ['off', 'Off'],
+      ]) {
+        fx.appendChild(new Option(label, v));
+      }
+      fx.value = cur.textFx || merged().textFx || 'auto';
+      fx.addEventListener('change', () => update(withField(cur, 'textFx', null, fx.value), false));
+      frow2.append(tmk('label', null, 'Text contrast'), fx);
+      glow.appendChild(frow2);
+      const grow = tmk('div', 'theme-row');
+      const gr = tmk('input');
+      gr.type = 'range';
+      gr.min = '0';
+      gr.max = '100';
+      gr.value = String(cur.glow != null ? cur.glow : merged().glow || 0);
+      const gv = tmk('span', 'theme-val', `${gr.value}%`);
+      gr.addEventListener('input', () => {
+        gv.textContent = `${gr.value}%`;
+        update(withField(cur, 'glow', null, Number(gr.value)), false);
+      });
+      grow.append(tmk('label', null, 'Card glow'), gr, gv);
+      glow.appendChild(grow);
+      wrap.appendChild(glow);
+    }
+
+    function buildImageSection(kind, title) {
+      const sec = tmk('div', 'theme-section');
+      sec.appendChild(tmk('h3', null, title));
+      const im = cur[kind] || {};
+      const gal = tmk('div', 'theme-imgs');
+      const thumbs = [];
+      const pick = (img) => update(withField(cur, kind, 'img', img), true);
+
+      const mkThumb = (label, img, css) => {
+        const b = tmk('button', 'theme-img' + (im.img === img ? ' active' : ''), css ? '' : label);
+        b.type = 'button';
+        b.title = label;
+        if (css) {
+          b.style.backgroundImage = css;
+          thumbs.push(b);
+        }
+        b.addEventListener('click', () => pick(img));
+        return b;
+      };
+      gal.appendChild(mkThumb('Default', undefined, null));
+      gal.appendChild(mkThumb('None', 'none', null));
+      for (const [key, p] of Object.entries(Themes.IMAGES)) {
+        gal.appendChild(mkThumb(p.label, `preset:${key}`, p.css));
+      }
+      if (im.img && im.img.startsWith('/uploads/')) {
+        const url = themeUrl(im.img);
+        gal.appendChild(mkThumb('Your image', im.img, url ? `url("${url}")` : null));
+      }
+      const up = tmk('button', 'theme-img', '＋ Upload');
+      up.type = 'button';
+      const file = tmk('input');
+      file.type = 'file';
+      file.accept = 'image/jpeg,image/png,image/webp,image/gif';
+      file.className = 'hidden';
+      const msg = tmk('p', 'theme-msg');
+      up.addEventListener('click', () => file.click());
+      file.addEventListener('change', async () => {
+        const f = file.files[0];
+        file.value = '';
+        if (!f) return;
+        msg.textContent = 'Uploading…';
+        try {
+          if (!navigator.onLine) throw new Error('Uploading an image needs a connection.');
+          const blob = await downscaleImage(f, 1600);
+          const { path } = await api.uploadThemeImage(blob);
+          if (store) store.put('assets', { path, blob, themeImg: true }).catch(() => {});
+          pick(path);
+        } catch (e) {
+          msg.textContent = e.message || 'Upload failed.';
+        }
+      });
+      gal.appendChild(up);
+      sec.append(gal, file, msg);
+
+      // Hue + dim only make sense with an image in play (own or inherited).
+      const eff = merged()[kind] || {};
+      if (eff.img && eff.img !== 'none') {
+        const hrow = tmk('div', 'theme-row');
+        const hue = tmk('input', 'theme-hue-range');
+        hue.type = 'range';
+        hue.min = '0';
+        hue.max = '359';
+        hue.value = String(im.hue != null ? im.hue : eff.hue || 0);
+        const hv = tmk('span', 'theme-val', `${hue.value}°`);
+        const paintThumbs = () => thumbs.forEach((t) => (t.style.filter = `hue-rotate(${hue.value}deg)`));
+        paintThumbs();
+        hue.addEventListener('input', () => {
+          hv.textContent = `${hue.value}°`;
+          paintThumbs();
+          update(withField(cur, kind, 'hue', Number(hue.value)), false);
+        });
+        hrow.append(tmk('label', null, 'Colour shift'), hue, hv);
+
+        const drow = tmk('div', 'theme-row');
+        const dim = tmk('input');
+        dim.type = 'range';
+        dim.min = '0';
+        dim.max = '90';
+        dim.value = String(im.dim != null ? im.dim : eff.dim || 0);
+        const dv = tmk('span', 'theme-val', `${dim.value}%`);
+        dim.addEventListener('input', () => {
+          dv.textContent = `${dim.value}%`;
+          update(withField(cur, kind, 'dim', Number(dim.value)), false);
+        });
+        drow.append(tmk('label', null, 'Fade to colour'), dim, dv);
+        sec.append(hrow, drow);
+      }
+      return sec;
+    }
+
+    draw();
+    return wrap;
+  }
+
+  function themeSwatch(label, style, active, onPick, onDelete) {
+    const b = tmk('button', 'theme-swatch' + (active ? ' active' : ''));
+    b.type = 'button';
+    const c = Themes.effectiveColors(style);
+    const vars = Themes.cssVars(style, themeUrl);
+    const prev = tmk('div', 'theme-swatch-prev');
+    prev.style.backgroundColor = c.bg;
+    if (vars['--bg-img'] !== 'none') prev.style.backgroundImage = vars['--bg-img'];
+    for (const col of [c.surface, c.text, c.accent]) {
+      const d = tmk('span', 'theme-swatch-dot');
+      d.style.background = col;
+      prev.appendChild(d);
+    }
+    b.append(prev, tmk('span', 'theme-swatch-label', label));
+    b.addEventListener('click', onPick);
+    if (onDelete) {
+      const x = tmk('span', 'theme-swatch-del', '✕');
+      x.title = 'Delete theme';
+      x.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onDelete();
+      });
+      b.appendChild(x);
+    }
+    return b;
+  }
+
+  function newThemeId() {
+    return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  }
+
+  function buildAppPanel() {
+    const frag = document.createDocumentFragment();
+
+    const gallerySec = tmk('div', 'theme-section');
+    const nameSec = tmk('div', 'theme-section');
+    const editorSec = tmk('div', 'theme-section');
+
+    const drawGallery = () => {
+      gallerySec.textContent = '';
+      gallerySec.appendChild(tmk('h3', null, 'Theme'));
+      const gal = tmk('div', 'theme-gallery');
+      const choose = (id) => {
+        themePrefs.active = id;
+        commitThemePrefs();
+        restyleAll();
+        renderThemeModal();
+      };
+      for (const [id, p] of Object.entries(Themes.PRESETS)) {
+        gal.appendChild(themeSwatch(p.label, p.style, themePrefs.active === id, () => choose(id)));
+      }
+      for (const t of themePrefs.custom) {
+        gal.appendChild(
+          themeSwatch(t.name, t.style, themePrefs.active === t.id, () => choose(t.id), () => {
+            if (!confirm(`Delete the theme “${t.name}”?`)) return;
+            themePrefs.custom = themePrefs.custom.filter((x) => x.id !== t.id);
+            if (themePrefs.active === t.id) themePrefs.active = 'light';
+            commitThemePrefs();
+            restyleAll();
+            renderThemeModal();
+          })
+        );
+      }
+      gallerySec.appendChild(gal);
+    };
+
+    const drawName = () => {
+      nameSec.textContent = '';
+      const custom = themePrefs.custom.find((t) => t.id === themePrefs.active);
+      if (custom) {
+        const row = tmk('div', 'theme-row');
+        const input = tmk('input');
+        input.type = 'text';
+        input.maxLength = 40;
+        input.value = custom.name;
+        input.addEventListener('input', () => {
+          custom.name = input.value.trim() || 'My theme';
+          commitThemePrefs();
+        });
+        input.addEventListener('change', drawGallery);
+        row.append(tmk('label', null, 'Theme name'), input);
+        nameSec.appendChild(row);
+      } else {
+        nameSec.appendChild(
+          tmk('p', 'theme-info', 'Built-in theme. Change anything below to save it as your own theme.')
+        );
+      }
+    };
+
+    const onChange = (next) => {
+      let t = themePrefs.custom.find((c) => c.id === themePrefs.active);
+      if (!t) {
+        // Editing a built-in forks it. The editor already holds the built-in's
+        // values, so the copy starts identical.
+        t = { id: newThemeId(), name: `My ${Themes.PRESETS[themePrefs.active].label}`, style: {} };
+        themePrefs.custom.push(t);
+        themePrefs.active = t.id;
+        drawName();
+      }
+      t.style = next;
+      drawGallery(); // keeps the swatch preview in step with the edit
+      commitThemePrefs();
+      restyleAll();
+    };
+
+    drawGallery();
+    drawName();
+    editorSec.appendChild(buildStyleEditor(activeAppStyle(), {}, onChange));
+    frag.append(gallerySec, nameSec, editorSec);
+    return frag;
+  }
+
+  const noteThemeTimers = new Map();
+  function saveNoteThemeSoon(id, style, children) {
+    const fields = {
+      theme: style && Object.keys(style).length ? JSON.stringify(style) : null,
+    };
+    fields.theme_children = fields.theme && children ? 1 : 0;
+    patchListCache(id, fields); // live preview reads the list cache
+    if (fields.theme_children || children) {
+      refreshThemeContext().then(restyleAll);
+    } else {
+      restyleAll();
+    }
+    clearTimeout(noteThemeTimers.get(id));
+    noteThemeTimers.set(
+      id,
+      setTimeout(() => {
+        noteThemeTimers.delete(id);
+        api.setNoteTheme(id, style, children).catch(() => toast("Couldn't save the note theme."));
+      }, 500)
+    );
+  }
+
+  function buildNotePanel() {
+    const frag = document.createDocumentFragment();
+    const id = currentId;
+    const row = id != null ? themeNoteRow(id) : null;
+    if (!row) {
+      frag.appendChild(tmk('p', 'theme-info', 'Open a note first — its theme is set here.'));
+      return frag;
+    }
+    let own = parseNoteTheme(row.theme) || {};
+    let children = Boolean(row.theme_children);
+
+    const head = tmk('div', 'theme-section');
+    head.appendChild(tmk('h3', null, `Theme for “${row.title}”`));
+    const src = themeInheritSource(id);
+    head.appendChild(
+      tmk(
+        'p',
+        'theme-info',
+        (src
+          ? `Inherits from “${src.title}” (its theme applies to sub notes), then your app theme. `
+          : 'Starts from your app theme. ') +
+          'Anything you set here overrides it for this note; anything you leave alone is inherited. It restyles this note’s cards, the editor and the page background — the header and bars keep your app theme.'
+      )
+    );
+
+    const startSec = tmk('div', 'theme-row');
+    const start = tmk('select');
+    start.appendChild(new Option('Start from a theme…', ''));
+    for (const [pid, p] of Object.entries(Themes.PRESETS)) start.appendChild(new Option(p.label, pid));
+    for (const t of themePrefs.custom) start.appendChild(new Option(t.name, t.id));
+    start.addEventListener('change', () => {
+      if (!start.value) return;
+      const p = Themes.PRESETS[start.value] || themePrefs.custom.find((t) => t.id === start.value);
+      own = JSON.parse(JSON.stringify((p && p.style) || {}));
+      saveNoteThemeSoon(id, own, children);
+      renderThemeModal();
+    });
+    startSec.append(tmk('label', null, 'Copy a theme'), start);
+    head.appendChild(startSec);
+
+    const cascade = tmk('label', 'theme-check');
+    const box = tmk('input');
+    box.type = 'checkbox';
+    box.checked = children;
+    box.addEventListener('change', () => {
+      children = box.checked;
+      saveNoteThemeSoon(id, own, children);
+    });
+    cascade.append(box, document.createTextNode('Also apply to sub notes (they can override any part)'));
+    head.appendChild(cascade);
+
+    const editorSec = tmk('div', 'theme-section');
+    editorSec.appendChild(
+      buildStyleEditor(own, styleFor(id, { skipOwn: true }), (next) => {
+        own = next;
+        saveNoteThemeSoon(id, own, children);
+      })
+    );
+
+    const clear = tmk('button', 'secondary danger', 'Clear this note’s theme');
+    clear.type = 'button';
+    clear.addEventListener('click', () => {
+      own = {};
+      children = false;
+      saveNoteThemeSoon(id, own, children);
+      renderThemeModal();
+    });
+
+    frag.append(head, editorSec, clear);
+    return frag;
+  }
+
+  function renderThemeModal() {
+    for (const b of themeTabs.querySelectorAll('.theme-tab')) {
+      b.classList.toggle('active', b.dataset.scope === themeScope);
+    }
+    themeBody.textContent = '';
+    themeBody.appendChild(themeScope === 'app' ? buildAppPanel() : buildNotePanel());
+  }
+
+  async function openThemeModal() {
+    await refreshThemeContext();
+    themeOverlay.classList.remove('hidden');
+    renderThemeModal();
+  }
+  const closeThemeModal = () => themeOverlay.classList.add('hidden');
+
+  themeBtn.addEventListener('click', openThemeModal);
+  document.getElementById('theme-close-btn').addEventListener('click', closeThemeModal);
+  themeOverlay.addEventListener('click', (e) => {
+    if (e.target === themeOverlay) closeThemeModal();
+  });
+  themeTabs.addEventListener('click', (e) => {
+    const b = e.target.closest('.theme-tab');
+    if (!b) return;
+    themeScope = b.dataset.scope;
+    renderThemeModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !themeOverlay.classList.contains('hidden')) closeThemeModal();
+  });
+
   async function init() {
     net.render();
     listenForWorkerUpdate();
@@ -3182,6 +4163,9 @@
     currentUser = sess.user;
     widgetToken = sess.widgetToken || null;
     accountBtn.title = `Signed in as ${currentUser.email}`;
+    loadThemePrefsLocal();
+    applyScreenTheme();
+    syncThemePrefs(); // background; the cached prefs already painted the first frame
     try {
       await loadIdmap();
       await loadRidmap();
@@ -3725,21 +4709,22 @@
 
     if (linkCount > LINK_LIST_THRESHOLD) frag.appendChild(buildLinksPanel());
 
-    // Center-cell status button — a 4-state cycle over notes.status:
-    //   active (no marker) → waiting (blocked on something else, a GTD
-    //   "waiting for" — link it to whoever/whatever like any other note) →
-    //   todo (an open thing to do) → done → active.
-    // 'waiting' and 'todo' both surface in the in-app agenda; only 'todo'
-    // (not 'waiting' — it isn't actionable yet) is pushed/emailed by the
-    // digest. Only 'done' dims.
-    const statusStep = { active: 'waiting', waiting: 'todo', todo: 'done', done: 'active' };
+    // Center-cell status button — notes.status is one of four states: active
+    // (no marker/"Normal") → waiting (blocked on something else, a GTD
+    // "waiting for" — link it to whoever/whatever like any other note) → todo
+    // (an open thing to do) → done. 'waiting' and 'todo' both surface in the
+    // in-app agenda; only 'todo' (not 'waiting' — it isn't actionable yet) is
+    // pushed/emailed by the digest. Only 'done' dims. A click opens a list of
+    // all four (openActionMenu, same as the ➕ button) rather than stepping
+    // through them one at a time.
+    const STATUS_ORDER = ['active', 'waiting', 'todo', 'done'];
     const statusFace = {
-      active: { icon: '○', title: 'Mark as waiting', cls: '' },
-      waiting: { icon: '⏳', title: 'Mark as to-do', cls: ' waiting' },
-      todo: { icon: '◑', title: 'Mark as done', cls: ' todo' },
-      done: { icon: '✅', title: 'Clear status', cls: ' active' },
+      active: { icon: '○', label: 'Normal', cls: '' },
+      waiting: { icon: '⏳', label: 'Waiting', cls: ' waiting' },
+      todo: { icon: '◑', label: 'To-do', cls: ' todo' },
+      done: { icon: '✅', label: 'Done', cls: ' active' },
     };
-    const curStatus = statusStep[currentNote.status] ? currentNote.status : 'active';
+    const curStatus = statusFace[currentNote.status] ? currentNote.status : 'active';
 
     const footer = document.createElement('div');
     footer.className = 'center-footer';
@@ -3756,7 +4741,7 @@
     const doneBtn = document.createElement('button');
     doneBtn.className = 'done-btn' + statusFace[curStatus].cls;
     doneBtn.textContent = statusFace[curStatus].icon;
-    doneBtn.title = statusFace[curStatus].title;
+    doneBtn.title = `Status: ${statusFace[curStatus].label} — tap to change`;
     doneBtn.setAttribute('aria-pressed', String(curStatus === 'done'));
 
     const alarmBtn = document.createElement('button');
@@ -3775,8 +4760,14 @@
     const addBtn = document.createElement('button');
     addBtn.className = 'add-link-btn';
     addBtn.textContent = '➕';
-    addBtn.title = 'Add a linked note';
-    addBtn.addEventListener('click', () => openPicker());
+    addBtn.title = 'Create, attach, or connect';
+    addBtn.addEventListener('click', () =>
+      openActionMenu(addBtn, [
+        { label: '📝 Create a note', onClick: () => openPicker() },
+        { label: '📎 Add / remove attachment', onClick: () => openPicker({ mode: 'attach' }) },
+        { label: '🔗 Connect to note', onClick: () => openLinkModal() },
+      ])
+    );
 
     // GTD context tags: no stored field — a tag is just an `@word` in the
     // note's own text (see server/agenda.js-style content scanning), so
@@ -3911,11 +4902,21 @@
       await onRerender();
     });
 
-    doneBtn.addEventListener('click', async () => {
-      currentNote = await api.setStatus(currentId, statusStep[curStatus]);
-      allNotesCache = await api.listNotes();
-      renderPinbar();
-      await onRerender();
+    doneBtn.addEventListener('click', () => {
+      openActionMenu(
+        doneBtn,
+        STATUS_ORDER.map((s) => ({
+          label: `${statusFace[s].icon} ${statusFace[s].label}`,
+          active: s === curStatus,
+          onClick: async () => {
+            if (s === curStatus) return;
+            currentNote = await api.setStatus(currentId, s);
+            allNotesCache = await api.listNotes();
+            renderPinbar();
+            await onRerender();
+          },
+        }))
+      );
     });
 
     deleteBtn.addEventListener('click', async () => {
@@ -3945,6 +4946,7 @@
     cell.style.gridRow = '2';
 
     applyCellColor(cell, currentNote);
+    applyCellTheme(cell, currentNote.id);
 
     const preview = buildAttachmentPreview(currentNote, { compact: true });
 
@@ -4139,6 +5141,7 @@
       (triggeredAlarmIds.has(neighbor.id) ? ' alarm-triggered' : '');
 
     applyCellColor(cell, neighbor);
+    applyCellTheme(cell, neighbor.id);
     attachCardDrag(cell, neighbor);
 
     const unlinkBtn = document.createElement('button');
@@ -4288,23 +5291,29 @@
     if (e.target === noteOverlay) dismissNoteFullscreen();
   });
 
-  let pendingLinkTarget = null; // currentId, fixed each time picker opens
-  // True while the picker is creating an independent note (see openPicker's
-  // `standalone`) — changes how the "or connect note" search behaves, since
-  // there's no already-existing note yet to exclude already-linked results
-  // against.
-  let pickerStandalone = false;
+  let pendingLinkTarget = null; // currentId, fixed each time the create modal opens
 
   function makeEmptyCell() {
     const cell = document.createElement('div');
     cell.className = 'cell empty';
     cell.textContent = '+';
-    cell.addEventListener('click', () => openPicker());
+    // Same two options as the note editor's ➕ (minus "add/remove attachment" —
+    // there's no note here yet to attach to): fill this slot with a new note,
+    // or connect an existing one into it.
+    cell.addEventListener('click', () =>
+      openActionMenu(cell, [
+        { label: '📝 Create a note', onClick: () => openPicker() },
+        { label: '🔗 Connect to note', onClick: () => openLinkModal() },
+      ])
+    );
     return cell;
   }
 
   async function render() {
     renderAlarmbar();
+    await prepareOfflineThemeImages();
+    await refreshThemeContext();
+    applyScreenTheme();
     const outerSlots = [0, 1, 2, 3, 5, 6, 7, 8];
     const BACK_SLOT = 1; // top-center: the probable-parent "back" cell
 
@@ -4941,6 +5950,16 @@
       agendaBody.appendChild(h);
       openTasks.forEach((t) => agendaBody.appendChild(openTaskRow(t)));
     }
+    // Structurally disconnected notes (no links at all) — easy to forget since
+    // nothing points at them and they never turn up while navigating the grid.
+    const orphans = (extra && extra.orphans) || [];
+    if (orphans.length) {
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = 'Orphaned notes';
+      agendaBody.appendChild(h);
+      orphans.forEach((o) => agendaBody.appendChild(todoRow(o)));
+    }
 
     if (!any) {
       const p = document.createElement('p');
@@ -5288,8 +6307,15 @@
   };
 
   let pickerStyle = 'text';
+  // 'create' = the picker's original job (a new, optionally linked note, or
+  // search-and-connect to an existing one). 'attach' = editing the currently
+  // open note's *own* attachment instead — see openPicker's mode option.
+  let pickerMode = 'create';
+  let pickerAttachTarget = null; // the note id 'attach' mode edits
+  let pickerHasAttachment = false; // that note already carries one, going in
   let pickerRecorder = null;
   let pickerRecordedBlob = null;
+  const pickerTextStyleBtn = pickerStyleRow.querySelector('[data-style="text"]');
 
   function applyPickerStyleVisibility() {
     pickerPhotoRow.classList.toggle('hidden', pickerStyle !== 'image');
@@ -5297,14 +6323,12 @@
     pickerAudioRow.classList.toggle('hidden', pickerStyle !== 'audio');
     pickerContactRow.classList.toggle('hidden', pickerStyle !== 'contact');
     pickerAppUri.classList.toggle('hidden', pickerStyle !== 'app');
-    // Standalone create: always offer the search, even before a target is
-    // chosen — that's how you choose one. Otherwise (a centered note's own
-    // "add linked note"/empty-cell flow) it only makes sense once there's a
-    // fixed note to connect.
-    pickerConnectSection.classList.toggle(
-      'hidden',
-      pickerStyle !== 'text' || (!pendingLinkTarget && !pickerStandalone)
-    );
+    // 'attach' mode edits an existing note's file/type, not its title or the
+    // graph — no "make it plain text" option here (that's the Remove button
+    // below), no title field, and no search-and-connect section.
+    pickerTextStyleBtn.classList.toggle('hidden', pickerMode === 'attach');
+    pickerNewTitle.classList.toggle('hidden', pickerMode === 'attach');
+    pickerCurrentAttachment.classList.toggle('hidden', !(pickerMode === 'attach' && pickerHasAttachment));
     pickerContactPickBtn.classList.toggle('hidden', !(navigator.contacts && navigator.contacts.select));
     pickerNewTitle.placeholder = PICKER_TITLE_PLACEHOLDER[pickerStyle];
   }
@@ -5318,6 +6342,60 @@
       applyPickerStyleVisibility();
     });
   });
+
+  // Builds the FormData for one of the non-text attachment styles from
+  // whatever's currently filled in the picker's fields. Shared by "create a
+  // new attachment note" (below) and "replace/set this note's own
+  // attachment" (openPicker mode 'attach') — same fields, same validation.
+  // Returns null (after a toast naming what's missing) if nothing was
+  // supplied for the chosen style.
+  function collectAttachmentFormData(style, appLabel) {
+    const formData = new FormData();
+    if (style === 'image') {
+      const file = pickerCameraInput.files[0] || pickerPhotoInput.files[0];
+      if (!file) {
+        toast('Take a photo or choose one from your gallery first.');
+        return null;
+      }
+      formData.set('type', 'image');
+      formData.set('file', file);
+    } else if (style === 'file') {
+      const file = pickerFileInput.files[0];
+      if (!file) {
+        toast('Choose a file first.');
+        return null;
+      }
+      formData.set('type', 'file');
+      formData.set('file', file);
+    } else if (style === 'audio') {
+      if (!pickerRecordedBlob) {
+        toast('Record something first.');
+        return null;
+      }
+      formData.set('type', 'audio');
+      formData.set('file', pickerRecordedBlob, 'recording.webm');
+    } else if (style === 'contact') {
+      const name = pickerContactName.value.trim();
+      if (!name) {
+        toast('Contact name is required.');
+        return null;
+      }
+      formData.set('type', 'contact');
+      formData.set('contactName', name);
+      formData.set('contactPhone', pickerContactPhone.value);
+      formData.set('contactEmail', pickerContactEmail.value);
+    } else if (style === 'app') {
+      const uri = pickerAppUri.value.trim();
+      if (!uri) {
+        toast('App link is required.');
+        return null;
+      }
+      formData.set('type', 'app');
+      formData.set('appUri', uri);
+      if (appLabel) formData.set('appLabel', appLabel);
+    }
+    return formData;
+  }
 
   // Photo: two paths to the same <input type=file>. The camera input carries
   // `capture`, the gallery one doesn't; picking from one clears the other so
@@ -5387,21 +6465,25 @@
   // centered — the header's "new note" button is a fresh, independent note,
   // not a child of whatever you happen to be looking at (unlike the footer's
   // "add a linked note" button or clicking an empty grid cell, which are
-  // both explicitly about the centered note).
-  // Attachment styles and "Create & connect" both need a note to hang off
-  // of — reflect whatever pendingLinkTarget currently is. Called again after
-  // a standalone create picks a connect target via search, not just at open.
+  // both explicitly about the centered note). Attachment styles need a note to
+  // hang off of the same way "Create & connect" does — reflect pendingLinkTarget.
   function syncPickerConnectUI() {
-    pickerStyleRow.classList.toggle('hidden', !pendingLinkTarget);
-    pickerCreateBtn.textContent = pendingLinkTarget ? 'Create & connect' : 'Create';
+    pickerCreateBtn.textContent =
+      pickerMode === 'attach' ? 'Save attachment' : pendingLinkTarget ? 'Create & connect' : 'Create';
   }
 
-  function openPicker({ standalone = false } = {}) {
+  const ATTACHABLE_TYPES = new Set(['image', 'audio', 'file', 'contact', 'app']);
+
+  // Creates a new note (any style, optionally linked to whatever note it was
+  // opened from) — mode 'attach' instead repurposes this same overlay to
+  // replace or set *the currently open note's own* attachment (see the ➕ menu
+  // in the note editor). Connecting to an *existing* note is a separate modal
+  // now (openLinkModal) — this one only ever creates.
+  function openPicker({ standalone = false, mode = 'create' } = {}) {
+    pickerMode = mode;
     pendingLinkTarget = standalone ? null : currentId;
-    pickerStandalone = standalone;
-    pickerSearch.value = '';
+    pickerAttachTarget = mode === 'attach' ? currentId : null;
     pickerNewTitle.value = '';
-    pickerResults.innerHTML = '';
     pickerPhotoInput.value = '';
     pickerCameraInput.value = '';
     pickerPhotoStatus.textContent = '';
@@ -5415,125 +6497,158 @@
     pickerRecordStatus.textContent = '';
     pickerRecordBtn.textContent = '🎤 Start recording';
 
-    pickerStyle = 'text';
+    pickerHasAttachment = mode === 'attach' && ATTACHABLE_TYPES.has(currentNote && currentNote.type);
+    // Start on whatever this note already is, so "change attachment" opens
+    // straight onto e.g. its photo, not defaulting back to the first style.
+    pickerStyle = pickerHasAttachment ? currentNote.type : mode === 'attach' ? 'image' : 'text';
     pickerStyleRow
       .querySelectorAll('.picker-style-btn')
-      .forEach((b) => b.classList.toggle('active', b.dataset.style === 'text'));
+      .forEach((b) => b.classList.toggle('active', b.dataset.style === pickerStyle));
+
+    pickerHeading.textContent = mode === 'attach' ? 'Change attachment' : 'Create a note';
+    pickerCurrentAttachmentLabel.textContent = pickerHasAttachment
+      ? `Current: ${TYPE_ICON[currentNote.type] || ''} ${currentNote.title}`.trim()
+      : '';
+    // Pre-fill contact/app fields from what's already there, so "change" starts
+    // from the existing value instead of a blank form.
+    if (pickerHasAttachment && currentNote.type === 'contact') {
+      try {
+        const c = JSON.parse(currentNote.attachment_path || '{}');
+        pickerContactName.value = c.name || '';
+        pickerContactPhone.value = c.phone || '';
+        pickerContactEmail.value = c.email || '';
+      } catch {
+        /* stored payload isn't parseable JSON — start from blank fields */
+      }
+    } else if (pickerHasAttachment && currentNote.type === 'app') {
+      pickerAppUri.value = currentNote.attachment_path || '';
+    }
+
     syncPickerConnectUI();
     applyPickerStyleVisibility();
 
     pickerOverlay.classList.remove('hidden');
-    pickerNewTitle.focus();
-    pickerNewTitle.select();
+    if (mode !== 'attach') {
+      // In 'attach' mode there's no title field; leave focus on the
+      // already-selected style row instead.
+      pickerNewTitle.focus();
+      pickerNewTitle.select();
+    }
   }
 
   function closePicker() {
     pickerOverlay.classList.add('hidden');
     pendingLinkTarget = null;
-    pickerStandalone = false;
+    pickerMode = 'create';
+    pickerAttachTarget = null;
     if (pickerRecorder) pickerRecorder.stop();
   }
+
+  pickerRemoveAttachmentBtn.addEventListener('click', async () => {
+    if (!pickerAttachTarget) return;
+    if (
+      !(await confirmDialog('Remove this attachment? The note becomes a plain text note.', {
+        confirmLabel: 'Remove',
+      }))
+    ) {
+      return;
+    }
+    pickerRemoveAttachmentBtn.disabled = true;
+    try {
+      const note = await api.removeNoteAttachment(pickerAttachTarget);
+      if (note.id === currentId) currentNote = note;
+      closePicker();
+      toast('Attachment removed.');
+      await afterAttach();
+    } catch (e) {
+      if (e.httpStatus) toast(e.message || "Couldn't remove the attachment.");
+    } finally {
+      pickerRemoveAttachmentBtn.disabled = false;
+    }
+  });
 
   pickerCancelBtn.addEventListener('click', closePicker);
   pickerOverlay.addEventListener('click', (e) => {
     if (e.target === pickerOverlay) closePicker();
   });
 
-  pickerSearch.addEventListener('input', () => {
-    const q = pickerSearch.value.trim().toLowerCase();
-    // Standalone: the note being created doesn't exist yet, so nothing is
-    // "already linked" to it — every note is a fair connect target. (Fixes
-    // e.g. searching for a note that happens to already be linked to
-    // whatever's centered — that exclusion only makes sense for the other,
-    // non-standalone case below, connecting the centered note itself.)
-    let matches;
-    if (pickerStandalone) {
-      matches = allNotesCache;
-    } else {
-      const linkedIds = new Set(neighbors.map((n) => n.id));
-      matches = allNotesCache.filter((n) => n.id !== currentId && !linkedIds.has(n.id));
-    }
+  // --- Link modal: connects the currently open/centered note to an existing
+  // one. Separate from the create modal above (openPicker) on purpose — that
+  // one always makes something new; this one never does. ---
+  let linkTarget = null;
+
+  function openLinkModal() {
+    linkTarget = currentId;
+    linkSearch.value = '';
+    linkResults.innerHTML = '';
+    linkOverlay.classList.remove('hidden');
+    linkSearch.focus();
+  }
+  function closeLinkModal() {
+    linkOverlay.classList.add('hidden');
+  }
+  linkCancelBtn.addEventListener('click', closeLinkModal);
+  linkOverlay.addEventListener('click', (e) => {
+    if (e.target === linkOverlay) closeLinkModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !linkOverlay.classList.contains('hidden')) closeLinkModal();
+  });
+
+  linkSearch.addEventListener('input', () => {
+    const q = linkSearch.value.trim().toLowerCase();
+    const linkedIds = new Set(neighbors.map((n) => n.id));
+    let matches = allNotesCache.filter((n) => n.id !== linkTarget && !linkedIds.has(n.id));
     if (q) matches = matches.filter((n) => n.title.toLowerCase().includes(q));
     matches = matches.slice(0, 8);
 
-    pickerResults.innerHTML = '';
+    linkResults.innerHTML = '';
     matches.forEach((n) => {
       const div = document.createElement('div');
       div.className = 'result';
       div.textContent = n.title;
       div.addEventListener('click', async () => {
-        if (pickerStandalone) {
-          // No note to link yet — just choose this as the connect target;
-          // "Create & connect" (or picking an attachment style) does the rest.
-          pendingLinkTarget = n.id;
-          pickerSearch.value = n.title;
-          pickerResults.innerHTML = '';
-          syncPickerConnectUI();
-          applyPickerStyleVisibility();
-          return;
-        }
-        await api.link(pendingLinkTarget, n.id);
+        await api.link(linkTarget, n.id);
         await loadNeighbors(currentId);
         await refreshColorData();
-        closePicker();
+        closeLinkModal();
         await render();
         if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
       });
-      pickerResults.appendChild(div);
+      linkResults.appendChild(div);
     });
   });
 
   let pickerCreating = false;
   pickerCreateBtn.addEventListener('click', async () => {
     if (pickerCreating) return;
-    const title = pickerNewTitle.value.trim();
 
-    const formData = new FormData();
+    if (pickerMode === 'attach') {
+      const formData = collectAttachmentFormData(pickerStyle);
+      if (!formData) return;
+      pickerCreating = true;
+      pickerCreateBtn.disabled = true;
+      try {
+        const note = await api.setNoteAttachment(pickerAttachTarget, formData);
+        if (note.id === currentId) currentNote = note;
+        closePicker();
+        toast('Attachment saved.');
+        await afterAttach();
+      } catch (e) {
+        if (e.httpStatus) toast(e.message || "Couldn't save the attachment.");
+      } finally {
+        pickerCreating = false;
+        pickerCreateBtn.disabled = false;
+      }
+      return;
+    }
+
+    const title = pickerNewTitle.value.trim();
     if (pickerStyle === 'text') {
       if (!title) return;
-    } else if (pickerStyle === 'image') {
-      const file = pickerCameraInput.files[0] || pickerPhotoInput.files[0];
-      if (!file) {
-        toast('Take a photo or choose one from your gallery first.');
-        return;
-      }
-      formData.set('type', 'image');
-      formData.set('file', file);
-    } else if (pickerStyle === 'file') {
-      const file = pickerFileInput.files[0];
-      if (!file) {
-        toast('Choose a file first.');
-        return;
-      }
-      formData.set('type', 'file');
-      formData.set('file', file);
-    } else if (pickerStyle === 'audio') {
-      if (!pickerRecordedBlob) {
-        toast('Record something first.');
-        return;
-      }
-      formData.set('type', 'audio');
-      formData.set('file', pickerRecordedBlob, 'recording.webm');
-    } else if (pickerStyle === 'contact') {
-      const name = pickerContactName.value.trim();
-      if (!name) {
-        toast('Contact name is required.');
-        return;
-      }
-      formData.set('type', 'contact');
-      formData.set('contactName', name);
-      formData.set('contactPhone', pickerContactPhone.value);
-      formData.set('contactEmail', pickerContactEmail.value);
-    } else if (pickerStyle === 'app') {
-      const uri = pickerAppUri.value.trim();
-      if (!uri) {
-        toast('App link is required.');
-        return;
-      }
-      formData.set('type', 'app');
-      formData.set('appUri', uri);
-      formData.set('appLabel', title);
     }
+    const formData = pickerStyle === 'text' ? null : collectAttachmentFormData(pickerStyle, title);
+    if (pickerStyle !== 'text' && !formData) return;
 
     pickerCreating = true;
     pickerCreateBtn.disabled = true;
@@ -6377,6 +7492,11 @@
   accountSwitchBtn.addEventListener('click', async () => {
     if (!(await confirmDialog('Sign out and sign in as someone else?', { confirmLabel: 'Sign out' }))) return;
     await api.logout();
+    try {
+      localStorage.removeItem(Themes.BOOT_KEY); // don't pre-paint this account's theme for the next sign-in
+    } catch {
+      /* storage blocked */
+    }
     location.reload();
   });
 

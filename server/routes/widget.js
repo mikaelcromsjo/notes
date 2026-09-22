@@ -46,6 +46,7 @@ router.get('/', (req, res) => {
         later: withUrl(a.reminders.later),
       },
       open_tasks: withUrl(a.openTasks),
+      orphans: withUrl(a.orphans),
     });
   }
 

@@ -14,8 +14,12 @@
   <link rel="apple-touch-icon" href="/icon-192.png" />
   <link rel="stylesheet" href="vendor/leaflet.min.css" />
   <link rel="stylesheet" href="style.css" />
+  <!-- Paint the last-used theme's colours before first render (no light flash). -->
+  <script src="themes.js"></script>
+  <script>NicoThemes.boot();</script>
 </head>
 <body>
+  <div class="theme-bg" aria-hidden="true"></div>
   <button id="header-toggle-btn" class="header-toggle-btn" title="Hide header" aria-label="Hide header" aria-pressed="false">▲</button>
 
   <header class="topbar">
@@ -33,6 +37,7 @@
       </div>
       <button id="depth-cycle-btn" class="icon-btn" title="Nested grid depth" aria-label="Cycle nested grid depth">🔲</button>
       <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🎨</button>
+      <button id="theme-btn" class="icon-btn" title="Themes — colours, fonts, backgrounds" aria-label="Open theme settings">🖌️</button>
       <button id="map-btn" class="icon-btn" title="Map of notes" aria-label="Open map of notes">🗺️</button>
       <button id="agenda-btn" class="icon-btn" title="Agenda — what's due" aria-label="Open agenda">🔔<span id="agenda-badge" class="agenda-badge hidden"></span></button>
       <button id="insights-btn" class="icon-btn" title="Insights" aria-label="Open insights">📊</button>
@@ -61,7 +66,12 @@
 
   <div id="picker-overlay" class="overlay hidden">
     <div class="picker">
-      <h2>Create a note</h2>
+      <h2 id="picker-heading">Create a note</h2>
+
+      <div id="picker-current-attachment" class="hidden picker-field-row">
+        <span id="picker-current-attachment-label" class="picker-hint"></span>
+        <button type="button" id="picker-remove-attachment-btn" class="secondary danger">Remove attachment</button>
+      </div>
 
       <div class="picker-style-row" id="picker-style-row">
         <button type="button" class="picker-style-btn active" data-style="text">📝 Text</button>
@@ -102,15 +112,23 @@
 
       <input type="text" id="picker-app-uri" class="hidden" placeholder="App link (intent://… or https://…)" />
 
-      <div id="picker-connect-section">
-        <div class="picker-divider">or connect note</div>
-        <input type="text" id="picker-search" placeholder="Search existing notes…" autocomplete="off" />
-        <div id="picker-results" class="picker-results"></div>
-      </div>
-
       <div class="picker-actions">
-        <button id="picker-create-btn">Create &amp; connect</button>
+        <button id="picker-create-btn">Create</button>
         <button id="picker-cancel-btn" class="secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Separate from #picker-overlay above: that one creates a new note (any
+       style, optionally attached to whatever note it was opened from); this one
+       only links the currently open/centered note to an existing one. -->
+  <div id="link-overlay" class="overlay hidden">
+    <div class="picker">
+      <h2>Connect to note</h2>
+      <input type="text" id="link-search" placeholder="Search existing notes…" autocomplete="off" />
+      <div id="link-results" class="picker-results"></div>
+      <div class="picker-actions">
+        <button id="link-cancel-btn" class="secondary">Cancel</button>
       </div>
     </div>
   </div>
@@ -219,6 +237,20 @@
     </div>
   </div>
 
+  <div id="theme-overlay" class="overlay hidden">
+    <div class="settings-modal theme-modal" role="dialog" aria-modal="true" aria-label="Themes">
+      <div class="settings-head">
+        <h2>Themes</h2>
+        <button id="theme-close-btn" class="settings-close" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div class="theme-tabs" id="theme-tabs">
+        <button type="button" class="theme-tab active" data-scope="app">App</button>
+        <button type="button" class="theme-tab" data-scope="note">This note</button>
+      </div>
+      <div class="theme-body" id="theme-body"></div>
+    </div>
+  </div>
+
   <div id="account-overlay" class="overlay hidden">
     <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
       <div class="settings-head">
@@ -248,6 +280,12 @@
             <div id="session-list" class="session-list"></div>
             <div class="settings-btn-row">
               <button id="session-revoke-others-btn" class="secondary">Sign out all other devices</button>
+            </div>
+
+            <label class="settings-label settings-btn-row-spaced">App version</label>
+            <p class="settings-desc" id="update-status">The app updates itself in the background; check now to pick up a new version straight away.</p>
+            <div class="settings-btn-row">
+              <button id="update-check-btn" class="secondary">Check for updates</button>
             </div>
 
             <label class="settings-label settings-btn-row-spaced">Danger zone</label>

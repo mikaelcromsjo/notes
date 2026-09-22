@@ -6,6 +6,8 @@ const history = require('../history');
 const { uploadsDir, diskUpload } = require('../upload-config');
 const { buildHierarchy, subtreeIds, probableRoot } = require('../hierarchy');
 const { extractTags } = require('../tags');
+const themes = require('../../public/themes.js');
+const { ownsUpload, sweepImages } = require('./theme');
 
 const router = express.Router();
 
@@ -36,7 +38,7 @@ const decaySum = `SUM(pow(0.5, (julianday('now') - julianday(created_at)) / ${HA
 router.get('/', (req, res) => {
   const notes = db
     .prepare(
-      `SELECT id, title, updated_at, pinned, type, status, lat, lon
+      `SELECT id, title, updated_at, pinned, type, status, lat, lon, theme, theme_children
        FROM notes WHERE user_id = ? AND status != 'deleted'
        ORDER BY updated_at DESC`
     )
@@ -166,6 +168,17 @@ router.get('/full', (req, res) => {
   res.json(notes);
 });
 
+// The inferred hierarchy as a flat { childId: parentId } map (roots omitted).
+// The client walks it to resolve a note's theme through its ancestors — the
+// local rebuild can't see created_from_note_id, so it would pick different
+// parents than the server does. Must be declared before "/:id" like "/full".
+router.get('/hierarchy-parents', (req, res) => {
+  const { parentOf } = buildHierarchy(req.userId);
+  const parents = {};
+  for (const [id, p] of parentOf) if (p != null) parents[id] = p;
+  res.json({ parents });
+});
+
 // Every cacheable attachment (image/audio/file — contact/app carry their data
 // as text in attachment_path above, nothing to download), newest-updated
 // first, with a byte size so the client can plan an offline cache budget
@@ -292,6 +305,25 @@ router.delete('/:id/pin', (req, res) => {
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
   history.record(req.userId, 'unpin', { noteId: note.id }, `Unpinned "${note.title}"`);
   res.json(note);
+});
+
+// Per-note theme: { theme: <style>|null, children: bool }. Cosmetic, so it does
+// not touch updated_at (no conflict base shift, no "latest" bar reshuffle) and
+// is not in the undo history.
+router.put('/:id/theme', (req, res) => {
+  const note = db
+    .prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.userId);
+  if (!note) return res.status(404).json({ error: 'not found' });
+
+  const style = themes.sanitizeStyle(req.body.theme, { uploadOk: ownsUpload(req.userId) });
+  db.prepare('UPDATE notes SET theme = ?, theme_children = ? WHERE id = ?').run(
+    style ? JSON.stringify(style) : null,
+    style && req.body.children ? 1 : 0,
+    note.id
+  );
+  sweepImages(req.userId);
+  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id));
 });
 
 const NOTE_STATUSES = new Set(['active', 'waiting', 'todo', 'done', 'deleted']);
@@ -512,30 +544,11 @@ router.get('/:id/subtree-ids', (req, res) => {
 
 const ATTACHMENT_TYPES = new Set(['image', 'audio', 'file', 'contact', 'app']);
 
-// Create a new note of a given attachment type, linked to :id (the note it was
-// captured from). One note per attachment — image/audio/file upload a file;
-// contact and app store their data directly on the note.
-router.post('/:id/attachments', upload.single('file'), (req, res) => {
-  const parentId = Number(req.params.id);
-  const parent = db
-    .prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?')
-    .get(parentId, req.userId);
-  if (!parent) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(404).json({ error: 'parent note not found' });
-  }
-
-  // Inline image: store the file through the same MIME allowlist + size cap as a
-  // normal attachment, but create no attachment note and no link — the caller
-  // drops a `![](<path>)` into the markdown source instead. No history entry.
-  if (req.body.inline === '1' || req.body.inline === 'true') {
-    if (!req.file || req.file.mimetype.split('/')[0] !== 'image') {
-      if (req.file) fs.unlink(req.file.path, () => {});
-      return res.status(400).json({ error: 'a supported image file is required' });
-    }
-    return res.status(201).json({ path: `/uploads/${req.file.filename}` });
-  }
-
+// Shared by both create routes below: validate + insert a new attachment note.
+// `parent` is the parent row (already looked up and ownership-checked) or null
+// for a standalone attachment with no link at all — the header/PWA-shortcut
+// "new note" flow, which has no "current note" to hang off of.
+function createAttachmentNote(req, res, parent) {
   const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = req.body;
   if (!ATTACHMENT_TYPES.has(type)) {
     if (req.file) fs.unlink(req.file.path, () => {});
@@ -601,13 +614,13 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
       type,
       lat,
       lon,
-      parentId,
+      parent ? parent.id : null,
       attachmentPath,
       attachmentSize,
       req.userId
     );
     const id = info.lastInsertRowid;
-    linkNotes.run(Math.min(id, parentId), Math.max(id, parentId), ts, req.userId);
+    if (parent) linkNotes.run(Math.min(id, parent.id), Math.max(id, parent.id), ts, req.userId);
     return id;
   });
 
@@ -620,6 +633,146 @@ router.post('/:id/attachments', upload.single('file'), (req, res) => {
     `Added ${type} "${note.title}"`
   );
   res.status(201).json(note);
+}
+
+// Create a new note of a given attachment type, linked to :id (the note it was
+// captured from). One note per attachment — image/audio/file upload a file;
+// contact and app store their data directly on the note.
+router.post('/:id/attachments', upload.single('file'), (req, res) => {
+  const parentId = Number(req.params.id);
+  const parent = db
+    .prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?')
+    .get(parentId, req.userId);
+  if (!parent) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(404).json({ error: 'parent note not found' });
+  }
+
+  // Inline image: store the file through the same MIME allowlist + size cap as a
+  // normal attachment, but create no attachment note and no link — the caller
+  // drops a `![](<path>)` into the markdown source instead. No history entry.
+  // Only reachable here (the editor always has a note open to paste/drop into).
+  if (req.body.inline === '1' || req.body.inline === 'true') {
+    if (!req.file || req.file.mimetype.split('/')[0] !== 'image') {
+      if (req.file) fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: 'a supported image file is required' });
+    }
+    return res.status(201).json({ path: `/uploads/${req.file.filename}` });
+  }
+
+  createAttachmentNote(req, res, parent);
+});
+
+// Same as above but with no parent/link at all — a standalone attachment note,
+// for "create a note" flows that don't have a current note to hang off of (the
+// header's + New note button, the PWA/widget "new note" shortcut).
+router.post('/attachments', upload.single('file'), (req, res) => {
+  createAttachmentNote(req, res, null);
+});
+
+// Replace *this* note's own attachment — distinct from POST /:id/attachments
+// above, which creates a brand-new linked attachment note. No link row, no new
+// note: just this note's type/attachment_path/attachment_size, so a text note
+// can become e.g. an image note and vice versa. Undoable (history action
+// 'attach'), which is why the file being replaced is deliberately NOT deleted
+// here — an undo has to be able to point back at it, and there's no "is this
+// history entry still reachable" check cheap enough to run at swap time (the
+// history table itself is never pruned either, for the same reason: keeping
+// undo reliable is worth more here than reclaiming the disk). A hard note
+// delete (DELETE /:id) still deletes its attachment file immediately — that
+// path is genuinely irreversible already, nothing points back at it.
+router.put('/:id/attachment', upload.single('file'), (req, res) => {
+  const note = db
+    .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.userId);
+  if (!note) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(404).json({ error: 'not found' });
+  }
+
+  const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = req.body;
+  if (!ATTACHMENT_TYPES.has(type)) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: `type must be one of: ${[...ATTACHMENT_TYPES].join(', ')}` });
+  }
+
+  let attachmentPath = null;
+  let attachmentSize = null;
+
+  if (type === 'image' || type === 'audio' || type === 'file') {
+    if (!req.file) return res.status(400).json({ error: 'a supported file is required' });
+    if (type !== 'file') {
+      const kind = req.file.mimetype.split('/')[0];
+      if (kind !== type) {
+        fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ error: `file type does not match "${type}"` });
+      }
+    }
+    attachmentPath = `/uploads/${req.file.filename}`;
+    attachmentSize = req.file.size;
+  } else if (type === 'contact') {
+    if (!contactName || !contactName.trim()) {
+      return res.status(400).json({ error: 'contactName is required for contact attachments' });
+    }
+    attachmentPath = JSON.stringify({
+      name: contactName.trim(),
+      phone: contactPhone || '',
+      email: contactEmail || '',
+    });
+  } else if (type === 'app') {
+    if (!appUri || !appUri.trim()) {
+      return res.status(400).json({ error: 'appUri is required for app attachments' });
+    }
+    attachmentPath = appUri.trim();
+  }
+
+  const titleOverride =
+    (req.body.title && req.body.title.trim()) || (type === 'app' && appLabel && appLabel.trim());
+  const newTitle = titleOverride || note.title;
+  db.prepare(
+    'UPDATE notes SET type = ?, title = ?, attachment_path = ?, attachment_size = ?, updated_at = ? WHERE id = ?'
+  ).run(type, newTitle, attachmentPath, attachmentSize, now(), note.id);
+
+  const updated = db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id);
+  history.record(
+    req.userId,
+    'attach',
+    {
+      noteId: note.id,
+      before: { type: note.type, attachment_path: note.attachment_path, attachment_size: note.attachment_size },
+      after: { type, attachment_path: attachmentPath, attachment_size: attachmentSize },
+    },
+    `${note.type === 'text' ? 'Attached' : 'Changed'} ${type} on "${newTitle}"`
+  );
+  res.json(updated);
+});
+
+// Remove this note's attachment, reverting it to a plain text note. The
+// content field (any text typed alongside the attachment) is left as-is. Same
+// undo-ability and file-retention reasoning as PUT above.
+router.delete('/:id/attachment', (req, res) => {
+  const note = db
+    .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
+    .get(req.params.id, req.userId);
+  if (!note) return res.status(404).json({ error: 'not found' });
+  if (note.type === 'text') return res.status(409).json({ error: 'note has no attachment' });
+
+  db.prepare(
+    "UPDATE notes SET type = 'text', attachment_path = NULL, attachment_size = NULL, updated_at = ? WHERE id = ?"
+  ).run(now(), note.id);
+
+  history.record(
+    req.userId,
+    'attach',
+    {
+      noteId: note.id,
+      before: { type: note.type, attachment_path: note.attachment_path, attachment_size: note.attachment_size },
+      after: { type: 'text', attachment_path: null, attachment_size: null },
+    },
+    `Removed attachment from "${note.title}"`
+  );
+
+  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id));
 });
 
 module.exports = router;

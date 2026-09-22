@@ -13,7 +13,7 @@
 //
 // Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
 // a byte change to this file is itself what makes the browser re-run install.
-const CACHE_VERSION = 'v20';
+const CACHE_VERSION = 'v22';
 const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [
@@ -21,7 +21,13 @@ const SHELL_ASSETS = [
   '/index.html',
   '/app.js',
   '/store.js',
+  '/themes.js',
   '/style.css',
+  '/vendor/fonts/inter.woff2',
+  '/vendor/fonts/nunito.woff2',
+  '/vendor/fonts/lora.woff2',
+  '/vendor/fonts/jetbrains-mono.woff2',
+  '/vendor/fonts/orbitron.woff2',
   '/manifest.webmanifest',
   '/vendor/leaflet.min.js',
   '/vendor/leaflet.min.css',
@@ -80,6 +86,9 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
   if (BYPASS.some((re) => re.test(url.pathname))) return;
+  // The app's "Check for updates" asks for the live copy of a shell file: straight
+  // to the network, and never stored under this odd URL.
+  if (url.searchParams.has('__update')) return;
 
   if (request.mode === 'navigate') {
     event.respondWith(

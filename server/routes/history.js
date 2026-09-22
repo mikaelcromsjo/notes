@@ -108,6 +108,15 @@ function applyUndo(action, p, uid) {
     return { noteId: n.id };
   }
 
+  if (action === 'attach') {
+    const n = ownNote(p.noteId, uid);
+    if (!n) throw new Error('that note no longer exists');
+    db.prepare(
+      'UPDATE notes SET type = ?, attachment_path = ?, attachment_size = ?, updated_at = ? WHERE id = ?'
+    ).run(p.before.type, p.before.attachment_path, p.before.attachment_size, nowIso(), n.id);
+    return { noteId: n.id };
+  }
+
   throw new Error('unknown action');
 }
 
@@ -174,6 +183,15 @@ function applyRedo(action, p, uid) {
       nowIso(),
       n.id
     );
+    return { noteId: n.id };
+  }
+
+  if (action === 'attach') {
+    const n = ownNote(p.noteId, uid);
+    if (!n) throw new Error('that note no longer exists');
+    db.prepare(
+      'UPDATE notes SET type = ?, attachment_path = ?, attachment_size = ?, updated_at = ? WHERE id = ?'
+    ).run(p.after.type, p.after.attachment_path, p.after.attachment_size, nowIso(), n.id);
     return { noteId: n.id };
   }
 
@@ -246,6 +264,11 @@ function isStale(action, p, uid) {
       if (!n) return true;
       return n.title === p.before.title && n.content === p.before.content;
     }
+    if (action === 'attach') {
+      const n = ownNote(p.noteId, uid);
+      if (!n) return true;
+      return n.type !== p.after.type || n.attachment_path !== p.after.attachment_path;
+    }
   } catch {
     return true;
   }
@@ -289,6 +312,11 @@ function isRedoStale(action, p, uid) {
       const n = ownNote(p.noteId, uid);
       if (!n) return true;
       return n.title === p.after.title && n.content === p.after.content;
+    }
+    if (action === 'attach') {
+      const n = ownNote(p.noteId, uid);
+      if (!n) return true;
+      return n.type !== p.before.type || n.attachment_path !== p.before.attachment_path;
     }
   } catch {
     return true;

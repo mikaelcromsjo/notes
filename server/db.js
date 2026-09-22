@@ -155,6 +155,29 @@ if (!userCols.some((c) => c.name === 'onboarding_cleared_at')) {
   db.exec('ALTER TABLE users ADD COLUMN onboarding_cleared_at TEXT');
 }
 
+// Themes (see public/themes.js). users.theme_prefs = JSON { active, custom[] }
+// for the account-wide app theme; notes.theme = JSON style for one note, and
+// theme_children = 1 lets it cascade to that note's inferred sub notes.
+// theme_images tracks the account's uploaded background images so they can be
+// ownership-checked when a theme references one and swept once nothing does.
+if (!userCols.some((c) => c.name === 'theme_prefs')) {
+  db.exec('ALTER TABLE users ADD COLUMN theme_prefs TEXT');
+}
+const themeNoteCols = db.prepare('PRAGMA table_info(notes)').all();
+if (!themeNoteCols.some((c) => c.name === 'theme')) {
+  db.exec('ALTER TABLE notes ADD COLUMN theme TEXT');
+}
+if (!themeNoteCols.some((c) => c.name === 'theme_children')) {
+  db.exec('ALTER TABLE notes ADD COLUMN theme_children INTEGER NOT NULL DEFAULT 0');
+}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS theme_images (
+    path TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+`);
+
 // Web Push subscriptions — how the alarm scheduler reaches a user when their
 // PWA is backgrounded/closed. One row per browser push endpoint.
 db.exec(`

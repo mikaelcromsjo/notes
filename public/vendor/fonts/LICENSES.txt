@@ -1,0 +1,10 @@
+Vendored fonts (latin subset, variable weight), from the Fontsource packages
+(@fontsource-variable/*). All are licensed under the SIL Open Font License 1.1
+(https://openfontlicense.org): free to use, embed and redistribute with the app;
+the fonts may not be sold on their own.
+
+  inter.woff2           Inter          © The Inter Project Authors
+  lora.woff2            Lora           © The Lora Project Authors
+  jetbrains-mono.woff2  JetBrains Mono © The JetBrains Mono Project Authors
+  nunito.woff2          Nunito         © The Nunito Project Authors
+  orbitron.woff2        Orbitron       © The Orbitron Project Authors

@@ -1,4 +1,13 @@
+/* Vendored theme fonts (see vendor/fonts/LICENSES.txt); chosen per theme/note via
+   --font-body. Variable-weight latin subsets, precached by the service worker. */
+@font-face { font-family: "Nico Inter"; src: url("vendor/fonts/inter.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+@font-face { font-family: "Nico Nunito"; src: url("vendor/fonts/nunito.woff2") format("woff2"); font-weight: 200 1000; font-display: swap; }
+@font-face { font-family: "Nico Lora"; src: url("vendor/fonts/lora.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }
+@font-face { font-family: "Nico JetBrains Mono"; src: url("vendor/fonts/jetbrains-mono.woff2") format("woff2"); font-weight: 100 800; font-display: swap; }
+@font-face { font-family: "Nico Orbitron"; src: url("vendor/fonts/orbitron.woff2") format("woff2"); font-weight: 400 900; font-display: swap; }
+
 :root {
+  color-scheme: var(--color-scheme, light);
   --bg: #f4f5f7;
   --surface: #ffffff;
   --border: #e2e4e9;
@@ -7,6 +16,7 @@
   --accent: #4f6df5;
   --accent-contrast: #ffffff;
   --danger: #e0575b;
+  --danger-contrast: #ffffff;
   --pin: #5f6aff;
   --pin-contrast: #ffffff;
   --todo: #0d9488;
@@ -36,7 +46,7 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-body, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif);
   /* stop iOS Safari inflating text when the phone turns to landscape */
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
@@ -450,7 +460,7 @@ button:hover { filter: brightness(1.05); }
 .tab.alarm-triggered.active {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--danger-contrast);
 }
 
 .cell.alarm-triggered {
@@ -630,6 +640,8 @@ button:hover { filter: brightness(1.05); }
   border-radius: var(--radius);
   border: 1px solid var(--border);
   background: var(--surface);
+  /* --card-alpha (a note/app theme setting, 0-1) makes the card see-through. */
+  background: color-mix(in srgb, var(--surface) calc(var(--card-alpha, 1) * 100%), transparent);
   box-shadow: var(--shadow);
   padding: 1rem;
   display: flex;
@@ -1183,7 +1195,7 @@ button:hover { filter: brightness(1.05); }
 .picker-actions button.danger {
   background: var(--danger);
   border-color: var(--danger);
-  color: #fff;
+  color: var(--danger-contrast);
 }
 
 /* --- Toasts (in-app replacement for alert()) --- */
@@ -1992,7 +2004,7 @@ button:hover { filter: brightness(1.05); }
   box-sizing: border-box;
   border-radius: 0.5rem;
   background: var(--danger);
-  color: #fff;
+  color: var(--danger-contrast);
   font-size: 0.62rem;
   font-weight: 700;
   line-height: 1rem;
@@ -2138,3 +2150,279 @@ button:hover { filter: brightness(1.05); }
 :root:fullscreen .cell.center .center-title { font-size: 1.05rem; }
 :root:fullscreen .cell.center .center-content { font-size: 0.85rem; }
 :root:fullscreen .cell.neighbor .neighbor-title { font-size: 0.9rem; }
+
+/* ---------- Themes ---------- */
+
+/* Page background image: a fixed layer behind everything, driven entirely by the
+   --bg-* vars app.js sets on <html>. Hue rotation is a filter on the image layer
+   only, so text and controls keep their colours. */
+.theme-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+  display: none;
+}
+html.has-bg .theme-bg { display: block; }
+html.has-bg body { background: transparent; }
+.theme-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg-img) center / cover no-repeat;
+  filter: hue-rotate(var(--bg-hue, 0deg));
+}
+.theme-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--bg);
+  opacity: var(--bg-dim, 0);
+}
+
+/* Card background image on a note's cell. The image (hue-filtered) and a
+   --surface veil (dimming, for legibility) sit under the cell's content. */
+.cell.has-card-img { position: relative; isolation: isolate; }
+.cell.has-card-img::before,
+.cell.has-card-img::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+.cell.has-card-img::before {
+  background: var(--card-img) center / cover no-repeat;
+  filter: hue-rotate(var(--card-hue, 0deg));
+  opacity: var(--card-alpha, 1);
+}
+.cell.has-card-img::after {
+  background: var(--surface);
+  opacity: calc(var(--card-dim, 0) * var(--card-alpha, 1));
+}
+
+/* Theme modal */
+.theme-modal { max-width: 720px; }
+.theme-tabs {
+  display: flex;
+  gap: 0.4rem;
+  padding: 0.6rem 1.25rem 0;
+}
+.theme-tab {
+  flex: 1;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.theme-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.theme-body {
+  padding: 1rem 1.25rem 1.4rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+.theme-section h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+.theme-info {
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.4;
+  margin: 0;
+}
+.theme-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 0.5rem;
+}
+.theme-swatch {
+  position: relative;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  overflow: hidden;
+  text-align: center;
+}
+.theme-swatch.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.theme-swatch-prev {
+  height: 3.2rem;
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 0 6px;
+}
+.theme-swatch-dot { width: 0.7rem; height: 0.7rem; border-radius: 50%; border: 1px solid rgba(128, 128, 128, 0.5); }
+.theme-swatch-label { display: block; padding: 0.3rem 0.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.theme-swatch-del {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 1.3rem;
+  height: 1.3rem;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.theme-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.3rem 0;
+  flex-wrap: wrap;
+}
+.theme-row > label { flex: 0 0 8.5rem; font-size: 0.9rem; }
+.theme-row input[type="color"] {
+  width: 2.6rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.theme-row.unset input[type="color"] { opacity: 0.45; }
+.theme-row select,
+.theme-row input[type="text"] {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  min-width: 0;
+}
+.theme-row input[type="range"] { flex: 1 1 8rem; min-width: 6rem; accent-color: var(--accent); }
+.theme-row input.theme-hue-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 0.6rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+.theme-row input.theme-hue-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #444;
+}
+.theme-row input.theme-hue-range::-moz-range-thumb {
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid #444;
+}
+.theme-val { min-width: 2.6rem; text-align: right; font-size: 0.8rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.theme-mini-btn {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.theme-mini-btn.danger { color: var(--danger); }
+.theme-font-sample { font-size: 1rem; margin: 0.2rem 0 0; color: var(--muted); }
+.theme-imgs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 0.4rem;
+  margin: 0.2rem 0 0.4rem;
+}
+.theme-img {
+  height: 3rem;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--surface);
+  background-size: cover;
+  background-position: center;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+.theme-img.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.theme-check { display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
+.theme-msg { font-size: 0.82rem; color: var(--danger); margin: 0.2rem 0 0; min-height: 1em; }
+.theme-off { opacity: 0.5; pointer-events: none; }
+
+/* A cell can carry its own note's theme vars inline, so it re-reads colour and
+   font itself instead of inheriting the screen theme's already-resolved values. */
+.cell { color: var(--text); font-family: var(--font-body); }
+/* Light backdrop for the theme modal so changes are visible behind it live. */
+#theme-overlay { background: rgba(20, 20, 30, 0.12); align-items: flex-end; }
+@media (min-width: 720px) { #theme-overlay { align-items: center; justify-content: flex-end; padding-right: 1.5rem; } }
+.theme-editor { display: flex; flex-direction: column; gap: 1.1rem; }
+
+/* Note theme scope: only the grid, the note editor and the page background carry a
+   note's vars (see applyScreenTheme) — the header/bars/dialogs stay on the app theme.
+   Those containers must re-read colour and font themselves. */
+#grid, #note-overlay { color-scheme: var(--color-scheme, light); }
+#note-overlay .note-fullscreen { color: var(--text); font-family: var(--font-body); }
+
+/* Legibility halo for card text (see textShadow() in themes.js). Inherited by the
+   text inside; controls keep their own plain look. */
+.cell { text-shadow: var(--text-shadow, none); }
+.cell button, .cell input, .cell textarea, .cell select { text-shadow: none; }
+
+/* Small anchored dropdown for a button with several actions (see
+   openActionMenu in app.js — currently the note editor's ➕). */
+.action-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  padding: 0.25rem;
+}
+.action-menu-item {
+  display: block;
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.88rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.action-menu-item:hover { background: var(--bg); filter: none; }
+.action-menu-item.active { background: var(--accent); color: var(--accent-contrast); }
+.action-menu-item.active:hover { background: var(--accent); filter: brightness(1.08); }

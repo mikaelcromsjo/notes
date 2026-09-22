@@ -2,12 +2,15 @@ const db = require('./db');
 const { buildAgenda } = require('./agenda');
 
 // The digest is the user's agenda on a schedule: what's overdue, due today, and
-// due this week, plus notes flagged to-do and notes carrying open `- [ ]` tasks.
-// It reuses buildAgenda so the in-app view, the scheduled push, and the email
-// all show the same thing. `later` reminders are left out — a digest is about
-// what needs attention now. The standalone "view online" page (buildDigestPage /
-// digestPageDoc) adds context the notification can't fit: every reminder, and a
-// few graph orphans to resurface.
+// due this week, plus notes flagged to-do, notes carrying open `- [ ]` tasks,
+// and a few structurally orphaned notes to resurface. It reuses buildAgenda so
+// the in-app view, the scheduled push, and the email all show the same thing.
+// `later` reminders are left out — a digest is about what needs attention now.
+// Orphans don't count toward `isEmpty` (they're a bonus while a digest is
+// already going out, not on their own worth sending one — see the scheduler,
+// which skips a tick when isEmpty). The standalone "view online" page
+// (buildDigestPage / digestPageDoc) adds context the notification can't fit:
+// every reminder, and the same orphans list in full.
 
 function publicOrigin() {
   return (process.env.PUBLIC_ORIGIN || `http://127.0.0.1:${process.env.PORT || 8050}`).replace(/\/+$/, '');
@@ -23,6 +26,9 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
     week: week.length,
     todos: todos.length,
     openTasks: a.openTasks.length,
+    // Not part of isEmpty below — orphans are a bonus while a digest is
+    // already going out, not on their own worth triggering one.
+    orphans: a.orphans.length,
   };
   return {
     generatedAt: a.generatedAt,
@@ -32,6 +38,7 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
     week,
     todos,
     openTasks: a.openTasks,
+    orphans: a.orphans,
     counts,
     isEmpty:
       counts.overdue + counts.today + counts.week + counts.todos + counts.openTasks === 0,
@@ -49,16 +56,6 @@ const allRemindersStmt = db.prepare(
    ORDER BY r.time ASC, n.title ASC`
 );
 
-// Structurally disconnected — no links at all — the same "orphans" signal the
-// insights overlay shows (server/routes/stats.js). A linked-but-unvisited note
-// isn't an orphan; it's reachable via the grid, just not visited yet.
-const orphansStmt = db.prepare(
-  `SELECT n.id, n.title FROM notes n
-   WHERE n.user_id = ? AND n.status != 'deleted'
-     AND NOT EXISTS (SELECT 1 FROM links l WHERE l.user_id = ? AND (l.note_a = n.id OR l.note_b = n.id))
-   ORDER BY n.updated_at DESC LIMIT 8`
-);
-
 function reminderRhythm(r) {
   if (r.days) return `${r.days.split(',').map((d) => DOW[Number(d)] || '?').join(' ')} ${r.time || ''}`.trim();
   if (r.date) return `${r.date} ${r.time || ''}`.trim();
@@ -74,8 +71,7 @@ function buildDigestPage(userId, { tz, now = new Date() } = {}) {
     rhythm: reminderRhythm(r),
     snoozed: !!(r.snooze_until && Date.parse(r.snooze_until) > now.getTime()),
   }));
-  const orphans = orphansStmt.all(userId, userId).map((o) => ({ noteId: o.id, title: o.title }));
-  return { ...d, allReminders, orphans };
+  return { ...d, allReminders };
 }
 
 // --- Text helpers --------------------------------------------------------
@@ -120,6 +116,9 @@ function digestText(d, cadence, { viewUrl } = {}) {
     'Open tasks',
     d.openTasks.map((t) => `${t.title} (${t.open} open)  ${origin}/#${t.noteId}`)
   );
+  // A handful, not the whole list — this goes out on a schedule and the set of
+  // orphans barely changes day to day; the view-online page has the rest.
+  out += section('Orphaned notes', d.orphans.slice(0, 5).map((o) => `${o.title}  ${origin}/#${o.noteId}`));
   if (viewUrl) out += `See everything — every reminder, orphaned notes, insights:\n  ${viewUrl}\n\n`;
   out += `${origin}/  ·  Change or turn off this digest in the app.`;
   return out.trim();
@@ -150,6 +149,7 @@ function digestHtml(d, cadence, { viewUrl } = {}) {
     (cadence === 'weekly' ? htmlList('This week', d.week.map((r) => link(r, whenLabel(r)))) : '') +
     htmlList('To-do', d.todos.map((t) => link({ noteId: t.noteId, title: t.title }, ''))) +
     htmlList('Open tasks', d.openTasks.map((t) => link({ noteId: t.noteId, title: t.title }, `${t.open} open`))) +
+    htmlList('Orphaned notes', d.orphans.slice(0, 5).map((o) => link({ noteId: o.noteId, title: o.title }, ''))) +
     (viewUrl
       ? `<p style="margin:16px 0 0;font:14px system-ui"><a href="${esc(viewUrl)}" style="color:#2563eb">See everything →</a> <span style="color:#888">every reminder, orphaned notes, insights</span></p>`
       : '') +
@@ -172,6 +172,9 @@ function digestPush(d, cadence, { url } = {}) {
   if (d.counts.todos) lines.push(`${d.counts.todos} to-do`);
   if (d.counts.openTasks) {
     lines.push(`${d.counts.openTasks} note${d.counts.openTasks === 1 ? '' : 's'} with open tasks`);
+  }
+  if (d.orphans.length) {
+    lines.push(`${d.orphans.length} orphaned note${d.orphans.length === 1 ? '' : 's'}`);
   }
   return {
     type: 'digest',
