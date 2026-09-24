@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.os.Build;
 import android.widget.RemoteViews;
 
@@ -29,10 +30,11 @@ import java.nio.charset.StandardCharsets;
  * shares the exact ranking/parent logic in server/neighbors.js with the
  * app's own GET /api/notes/:id/neighbors, not a separately-tuned
  * approximation of it). Tapping a neighbour (or the parent) re-centers the
- * widget on it in place; tapping the centre opens that note for real
- * editing. Colours come live from the account's actual app theme
- * (WidgetTheme) — see that class for what can and can't carry over into a
- * RemoteViews widget.
+ * widget on it in place; tapping the centre opens that note in whatever
+ * handles notes.ia-ai.se (the installed PWA, or a browser) — this app has no
+ * WebView of its own to open it in. Colours come live from the account's
+ * actual app theme (WidgetTheme) — see that class for what can and can't
+ * carry over into a RemoteViews widget.
  */
 public class GridWidgetProvider extends AppWidgetProvider {
 
@@ -49,7 +51,7 @@ public class GridWidgetProvider extends AppWidgetProvider {
     // A dropped connection (wifi handoff, DNS hiccup) shouldn't sit as
     // "Couldn't reach server" until the system's own 30-min update rolls
     // around (grid_widget_info.xml) — back off and try again a couple of
-    // times first, same idea as the 401 resync-and-retry-once below.
+    // times first.
     private static final int MAX_NETWORK_RETRIES = 2;
     private static final int[] RETRY_DELAYS_MS = {3000, 8000};
     private static final int[] CELL_IDS = {
@@ -75,7 +77,7 @@ public class GridWidgetProvider extends AppWidgetProvider {
 
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager, int[] appWidgetIds) {
-        for (int id : appWidgetIds) updateOne(context, appWidgetManager, id, false);
+        for (int id : appWidgetIds) updateOne(context, appWidgetManager, id);
     }
 
     @Override
@@ -94,10 +96,10 @@ public class GridWidgetProvider extends AppWidgetProvider {
         String noteId = intent.getStringExtra(EXTRA_NOTE_ID);
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putString(centerKey(widgetId), noteId).apply();
-        updateOne(context, AppWidgetManager.getInstance(context), widgetId, false);
+        updateOne(context, AppWidgetManager.getInstance(context), widgetId);
     }
 
-    private void updateOne(Context context, AppWidgetManager appWidgetManager, int widgetId, boolean isRetry) {
+    private void updateOne(Context context, AppWidgetManager appWidgetManager, int widgetId) {
         WidgetTheme theme = WidgetTheme.load(context); // last-known (or default) — real theme lands after fetch
         RemoteViews views = new RemoteViews(context.getPackageName(), theme.gridLayout());
         theme.applyToGridRoot(views);
@@ -109,29 +111,31 @@ public class GridWidgetProvider extends AppWidgetProvider {
 
         if (token.isEmpty()) {
             theme.applyToCell(views, R.id.cell_4, true);
-            views.setTextViewText(R.id.cell_4, "Tap to sign in");
-            Intent openIntent = new Intent(context, MainActivity.class);
-            openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            views.setTextViewText(R.id.cell_4, "Tap to set up");
             views.setOnClickPendingIntent(R.id.cell_4,
-                    PendingIntent.getActivity(context, widgetId * 100 + 4, openIntent, flags));
+                    PendingIntent.getActivity(context, widgetId * 100 + 4, settingsIntent(context), flags));
             appWidgetManager.updateAppWidget(widgetId, views);
             return;
         }
 
-        if (!isRetry) {
-            theme.applyToCell(views, R.id.cell_4, true);
-            views.setTextViewText(R.id.cell_4, "Loading…");
-            appWidgetManager.updateAppWidget(widgetId, views); // show current state immediately
-        }
+        theme.applyToCell(views, R.id.cell_4, true);
+        views.setTextViewText(R.id.cell_4, "Loading…");
+        appWidgetManager.updateAppWidget(widgetId, views); // show current state immediately
 
         String centerOverride = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(centerKey(widgetId), null);
-        new Thread(() -> fetchAndApply(context, appWidgetManager, widgetId, token, centerOverride, flags, isRetry, 0))
+        new Thread(() -> fetchAndApply(context, appWidgetManager, widgetId, token, centerOverride, flags, 0))
                 .start();
     }
 
+    private static Intent settingsIntent(Context context) {
+        Intent intent = new Intent(context, SettingsActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        return intent;
+    }
+
     private void fetchAndApply(Context context, AppWidgetManager appWidgetManager, int widgetId,
-                                String token, String centerOverride, int flags, boolean isRetry, int attempt) {
+                                String token, String centerOverride, int flags, int attempt) {
         String baseUrl = context.getString(R.string.base_url);
         // Fallback theme/layout for an error path reached before the real
         // theme (inside the response body) is parsed.
@@ -151,20 +155,13 @@ public class GridWidgetProvider extends AppWidgetProvider {
 
             int status = conn.getResponseCode();
 
-            // Stale/reset token — resync off the login cookie and retry once,
-            // same recovery as the agenda widget.
-            if (status == 401 && !isRetry) {
-                boolean resynced = WidgetTokenSync.syncFromSessionBlocking(context);
-                if (resynced) {
-                    updateOne(context, appWidgetManager, widgetId, true);
-                    return;
-                }
+            // Stale/reset/never-set token — nothing to resync from (no WebView,
+            // no login here), so just point at Settings to paste a fresh one.
+            if (status == 401) {
                 fallbackTheme.applyToCell(views, R.id.cell_4, true);
-                views.setTextViewText(R.id.cell_4, "Sign in required");
-                Intent openIntent = new Intent(context, MainActivity.class);
-                openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                views.setTextViewText(R.id.cell_4, "Tap to reconnect");
                 views.setOnClickPendingIntent(R.id.cell_4,
-                        PendingIntent.getActivity(context, widgetId * 100 + 4, openIntent, flags));
+                        PendingIntent.getActivity(context, widgetId * 100 + 4, settingsIntent(context), flags));
                 appWidgetManager.updateAppWidget(widgetId, views);
                 return;
             }
@@ -202,9 +199,7 @@ public class GridWidgetProvider extends AppWidgetProvider {
 
             theme.applyToCell(views, R.id.cell_4, true);
             views.setTextViewText(R.id.cell_4, center.optString("title", "(untitled)"));
-            Intent openCenter = new Intent(context, MainActivity.class);
-            openCenter.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            openCenter.putExtra("EXTRA_URL", center.optString("url", baseUrl + "/"));
+            Intent openCenter = new Intent(Intent.ACTION_VIEW, Uri.parse(center.optString("url", baseUrl + "/")));
             views.setOnClickPendingIntent(R.id.cell_4,
                     PendingIntent.getActivity(context, widgetId * 100 + 4, openCenter, flags));
 
@@ -251,7 +246,7 @@ public class GridWidgetProvider extends AppWidgetProvider {
                 } catch (InterruptedException ignored) {
                     return;
                 }
-                fetchAndApply(context, appWidgetManager, widgetId, token, centerOverride, flags, isRetry, attempt + 1);
+                fetchAndApply(context, appWidgetManager, widgetId, token, centerOverride, flags, attempt + 1);
                 return;
             }
             fallbackTheme.applyToCell(views, R.id.cell_4, true);

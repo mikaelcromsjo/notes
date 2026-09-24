@@ -4,7 +4,7 @@ Personal notes app: notes are a link graph, rendered as a 3x3 grid around one ce
 
 This checkout (`/srv/notes`, port **8050**) serves **notes.ia-ai.se**. It was forked from `/srv/nico-server` (port 8040, **test.ia-ai.se**) on 2026-09-15 — same codebase, independent data from that point on (no sync between the two). Keep both running; `test.ia-ai.se` stays as-is.
 
-`notes-android/` is a sub-project in this same git repo: a native Android WebView wrapper (`se.iaai.notes`) plus two home-screen widgets and native reminder-polling, all built against whichever `base_url` (currently notes.ia-ai.se) is baked into it — see `notes-android/CLAUDE.md`. It has its own Gradle build, unrelated to `npm`/`server/`.
+`notes-android/` is a sub-project in this same git repo: `se.iaai.notes`, two native home-screen widgets (a live 3x3 grid, an agenda summary) for whichever `base_url` (currently notes.ia-ai.se) is baked into it. Widgets-only, deliberately — the app itself is installed via "Add to Home Screen" on the PWA, not this APK; see `notes-android/CLAUDE.md` for why. Its own Gradle build, unrelated to `npm`/`server/`.
 
 ## Run
 

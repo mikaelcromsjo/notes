@@ -8,29 +8,29 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="The widget token normally syncs itself the first time you log in on the main screen — nothing to do here. Use Sync or paste a token manually only if that didn't happen."
+        android:text="This app is just two home-screen widgets — it has no login of its own. Open the real app below, sign in, then in Account → Integrate copy the “Home-screen widget feed” URL and paste it here."
         android:textSize="14sp"
         android:paddingBottom="16dp" />
 
     <Button
-        android:id="@+id/sync_button"
+        android:id="@+id/open_app_button"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="Sync now" />
+        android:text="Open the app" />
 
     <TextView
         android:id="@+id/sync_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:layout_marginBottom="16dp"
+        android:layout_marginTop="16dp"
+        android:layout_marginBottom="8dp"
         android:textSize="13sp" />
 
     <EditText
         android:id="@+id/token_input"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="widget token"
+        android:hint="widget feed URL or token"
         android:inputType="textNoSuggestions"
         android:maxLines="3" />
 
