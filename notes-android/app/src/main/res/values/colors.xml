@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Matches manifest.webmanifest's theme_color, so the adaptive icon's
-         background matches the PWA's own theme. -->
-    <color name="ic_launcher_background">#4f6df5</color>
+    <!-- Greyscale (luminance-equivalent grey of the PWA's #4f6df5 theme_color)
+         so this companion app's icon reads as clearly distinct from the real
+         app's — see notes-android/CLAUDE.md. The foreground PNGs are fully
+         opaque already, so this rarely shows through in practice, but keep it
+         matching for launchers/tools that do inspect it separately. -->
+    <color name="ic_launcher_background">#747474</color>
     <color name="accent">#4f6df5</color>
 
     <!-- Widget palette (light) — overridden in values-night for dark launchers.

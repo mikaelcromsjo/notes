@@ -100,9 +100,6 @@ public class GridWidgetProvider extends AppWidgetProvider {
     }
 
     private void updateOne(Context context, AppWidgetManager appWidgetManager, int widgetId) {
-        WidgetTheme theme = WidgetTheme.load(context); // last-known (or default) — real theme lands after fetch
-        RemoteViews views = new RemoteViews(context.getPackageName(), theme.gridLayout());
-        theme.applyToGridRoot(views);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
 
@@ -110,6 +107,9 @@ public class GridWidgetProvider extends AppWidgetProvider {
         String token = prefs.getString(SettingsActivity.KEY_TOKEN, "");
 
         if (token.isEmpty()) {
+            WidgetTheme theme = WidgetTheme.load(context);
+            RemoteViews views = new RemoteViews(context.getPackageName(), theme.gridLayout());
+            theme.applyToGridRoot(views);
             theme.applyToCell(views, R.id.cell_4, true);
             views.setTextViewText(R.id.cell_4, "Tap to set up");
             views.setOnClickPendingIntent(R.id.cell_4,
@@ -118,10 +118,13 @@ public class GridWidgetProvider extends AppWidgetProvider {
             return;
         }
 
-        theme.applyToCell(views, R.id.cell_4, true);
-        views.setTextViewText(R.id.cell_4, "Loading…");
-        appWidgetManager.updateAppWidget(widgetId, views); // show current state immediately
-
+        // No interim "Loading…" push here: a RemoteViews replaces the whole
+        // widget with only what it explicitly sets, so pushing one that only
+        // touched cell_4 was blanking every other cell back to the layout's
+        // default rather than just labelling the centre — a periodic refresh
+        // looked like the grid emptying out for a moment. Leave whatever's
+        // already on screen (the last successful fetch) alone until
+        // fetchAndApply below actually has something new to show.
         String centerOverride = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .getString(centerKey(widgetId), null);
         new Thread(() -> fetchAndApply(context, appWidgetManager, widgetId, token, centerOverride, flags, 0))
