@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Audio notes' recorder (getUserMedia({audio:true}) in app.js), granted
+         via WebChromeClient.onPermissionRequest in MainActivity, which also
+         drives the runtime permission prompt. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Note location-tagging + location-reminder geofencing (navigator.
+         geolocation in app.js), granted via onGeolocationPermissionsShowPrompt. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- DownloadManager writing to the public Downloads dir needs this on
+         API <29 (scoped storage from 29+ doesn't); ignored above that. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Native reminder polling (ReminderPollReceiver): showing the
+         notification itself (API 33+) and re-arming after a reboot. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@android:style/Theme.DeviceDefault.Light">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Long-press the launcher icon -> "Widget settings" — the only way
+                 to reach it now that MainActivity has no action bar / menu of its
+                 own; rarely needed since the token normally syncs itself. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+
+            <!-- Android App Links: with public/.well-known/assetlinks.json verifying
+                 this app owns notes.ia-ai.se, the OS hands a tap on any link to that
+                 domain (the magic-link email, a shared note link, ...) straight to
+                 this activity's own WebView/cookie jar instead of a browser or an
+                 old "Add to Home Screen" PWA install claiming the same domain. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="notes.ia-ai.se" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings_title" />
+
+        <receiver
+            android:name=".AgendaWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_agenda_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/agenda_widget_info" />
+        </receiver>
+
+        <receiver
+            android:name=".GridWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_grid_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/grid_widget_info" />
+        </receiver>
+
+        <!-- Self-contained native "push" — see ReminderPollReceiver's own
+             doc comment for why this exists instead of relying on the PWA's
+             Web Push (server/webpush.js) to wake a closed WebView. -->
+        <receiver android:name=".ReminderPollReceiver" android:exported="false" />
+
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>

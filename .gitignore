@@ -6,5 +6,8 @@ data/
 # Per-deployment env (PORT, PUBLIC_ORIGIN)
 .env
 
+# Built Android APK — binary build artifact, not source; built from notes-android/
+public/downloads/
+
 # Claude Code local settings (machine-specific hook)
 .claude/settings.local.json

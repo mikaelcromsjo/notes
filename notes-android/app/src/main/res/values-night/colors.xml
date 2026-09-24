@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Same accent everywhere; only the surface/text pairing flips for dark. -->
+    <color name="widget_background">#1E1E1E</color>
+    <color name="widget_text_primary">#F2F2F2</color>
+    <color name="widget_text_secondary">#B8B8B8</color>
+    <color name="widget_cell_background">#2C2C2E</color>
+    <color name="widget_cell_text">#DDDDDD</color>
+    <color name="widget_cell_center_background">#2A3968</color>
+    <color name="widget_cell_center_text">#B9C8FF</color>
+</resources>

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="GridCell">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_margin">2dp</item>
+        <item name="android:background">@color/widget_cell_background</item>
+        <item name="android:textColor">@color/widget_cell_text</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:padding">4dp</item>
+        <item name="android:maxLines">3</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <style name="GridCellCenter" parent="GridCell">
+        <item name="android:background">@color/widget_cell_center_background</item>
+        <item name="android:textColor">@color/widget_cell_center_text</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
+    <!-- Colours above are all overridden dynamically at runtime from the
+         fetched theme (GridWidgetProvider/AgendaWidgetProvider, WidgetTheme) —
+         they're just the before-first-fetch fallback. Font family is the one
+         thing classic RemoteViews *can't* set dynamically per-view, so instead
+         there are whole alternate layout files (widget_grid.xml/_mono/_serif,
+         same for widget_agenda) picked by which style each one's cells use;
+         the theme's actual font key (themes.js's FONTS) only maps onto
+         Android's three built-in type families, not the real vendored
+         webfonts — see WidgetTheme.layoutFor(). -->
+    <style name="GridCellMono" parent="GridCell">
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <style name="GridCellCenterMono" parent="GridCellCenter">
+        <item name="android:fontFamily">monospace</item>
+    </style>
+
+    <style name="GridCellSerif" parent="GridCell">
+        <item name="android:fontFamily">serif</item>
+    </style>
+
+    <style name="GridCellCenterSerif" parent="GridCellCenter">
+        <item name="android:fontFamily">serif</item>
+    </style>
+</resources>

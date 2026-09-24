@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches manifest.webmanifest's theme_color, so the adaptive icon's
+         background matches the PWA's own theme. -->
+    <color name="ic_launcher_background">#4f6df5</color>
+    <color name="accent">#4f6df5</color>
+
+    <!-- Widget palette (light) — overridden in values-night for dark launchers.
+         RemoteViews resolve resources the same way any layout does, so a plain
+         values-night set is enough; no AndroidX/dynamic-color dependency. -->
+    <color name="widget_background">#FFFFFF</color>
+    <color name="widget_text_primary">#1A1A1A</color>
+    <color name="widget_text_secondary">#555555</color>
+    <color name="widget_cell_background">#F0F0F0</color>
+    <color name="widget_cell_text">#333333</color>
+    <color name="widget_cell_center_background">#DCE4FF</color>
+    <color name="widget_cell_center_text">#1A2B6B</color>
+</resources>

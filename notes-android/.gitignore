@@ -1,0 +1,13 @@
+# Machine-local SDK path — regenerate with the Android SDK's sdkmanager,
+# or let Android Studio write it on first open.
+local.properties
+
+# Build outputs / Gradle caches — not source.
+build/
+.gradle/
+*.apk
+*.aab
+
+# Editor state.
+.idea/
+*.iml
