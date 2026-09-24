@@ -13,7 +13,7 @@
 //
 // Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
 // a byte change to this file is itself what makes the browser re-run install.
-const CACHE_VERSION = 'v22';
+const CACHE_VERSION = 'v26';
 const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [
@@ -77,7 +77,9 @@ self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'skipWaiting') self.skipWaiting();
 });
 
-const BYPASS = [/^\/api\//, /^\/uploads\//, /^\/share\b/, /^\/digest\b/];
+// /downloads/ (the Android APK) is a binary build artifact that changes out
+// from under this same URL on a rebuild — straight to network, like /uploads.
+const BYPASS = [/^\/api\//, /^\/uploads\//, /^\/share\b/, /^\/digest\b/, /^\/downloads\//];
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;

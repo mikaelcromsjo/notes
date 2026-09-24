@@ -4166,6 +4166,15 @@
     loadThemePrefsLocal();
     applyScreenTheme();
     syncThemePrefs(); // background; the cached prefs already painted the first frame
+    // A cold load landing on `#123` (a widget tap, the agenda, a shared or
+    // magic-link URL — anything that opens a fresh tab/instance rather than
+    // reusing an already-running one) only ever fires 'hashchange' on a
+    // *later* change, never for the hash already present at load — so without
+    // the check below, a fresh instance always showed whatever tab the server
+    // last had active instead of the note that was actually tapped. Captured
+    // here, before refreshFromTabs below has a chance to overwrite it first
+    // (it ends by calling setHash() for whatever tab it restores).
+    const deepLinkHashId = hashNoteId();
     try {
       await loadIdmap();
       await loadRidmap();
@@ -4175,6 +4184,7 @@
       await syncLinks();
       const tabsList = await api.listTabs();
       await refreshFromTabs(tabsList);
+      if (deepLinkHashId && deepLinkHashId !== currentId) await goTo(deepLinkHashId, 'hash');
       await checkAlarms();
       warmCache(); // background; never blocks first render
     } catch (err) {
@@ -6240,22 +6250,36 @@
   let searchSeq = 0;
   let searchDebounce = null;
 
+  // Shared two-line result row (icon + title, then a content snippet or the
+  // inferred parent's title as a fallback subtitle) — used by both the
+  // header's "jump to note" search and the "Connect to note" modal below, so
+  // the two searches look and read the same.
+  function buildResultRow(n) {
+    const div = document.createElement('div');
+    div.className = 'result';
+    const icon = TYPE_ICON[n.type] ? `${TYPE_ICON[n.type]} ` : '';
+    const title = document.createElement('div');
+    title.className = 'result-title';
+    title.textContent = icon + (n.title || 'Untitled');
+    div.appendChild(title);
+    if (n.snippet) {
+      const snip = document.createElement('div');
+      snip.className = 'result-snippet';
+      snip.textContent = n.snippet;
+      div.appendChild(snip);
+    } else if (n.parentTitle) {
+      const snip = document.createElement('div');
+      snip.className = 'result-snippet result-parent';
+      snip.textContent = `in ${n.parentTitle}`;
+      div.appendChild(snip);
+    }
+    return div;
+  }
+
   function renderSearchResults(list) {
     searchResults.innerHTML = '';
     list.forEach((n) => {
-      const div = document.createElement('div');
-      div.className = 'result';
-      const icon = TYPE_ICON[n.type] ? `${TYPE_ICON[n.type]} ` : '';
-      const title = document.createElement('div');
-      title.className = 'result-title';
-      title.textContent = icon + (n.title || 'Untitled');
-      div.appendChild(title);
-      if (n.snippet) {
-        const snip = document.createElement('div');
-        snip.className = 'result-snippet';
-        snip.textContent = n.snippet;
-        div.appendChild(snip);
-      }
+      const div = buildResultRow(n);
       div.addEventListener('click', () => {
         searchInput.value = '';
         searchResults.classList.add('hidden');
@@ -6595,18 +6619,16 @@
     if (e.key === 'Escape' && !linkOverlay.classList.contains('hidden')) closeLinkModal();
   });
 
-  linkSearch.addEventListener('input', () => {
-    const q = linkSearch.value.trim().toLowerCase();
+  let linkSearchSeq = 0;
+  let linkSearchDebounce = null;
+
+  function renderLinkResults(list) {
     const linkedIds = new Set(neighbors.map((n) => n.id));
-    let matches = allNotesCache.filter((n) => n.id !== linkTarget && !linkedIds.has(n.id));
-    if (q) matches = matches.filter((n) => n.title.toLowerCase().includes(q));
-    matches = matches.slice(0, 8);
+    const matches = list.filter((n) => n.id !== linkTarget && !linkedIds.has(n.id)).slice(0, 8);
 
     linkResults.innerHTML = '';
     matches.forEach((n) => {
-      const div = document.createElement('div');
-      div.className = 'result';
-      div.textContent = n.title;
+      const div = buildResultRow(n);
       div.addEventListener('click', async () => {
         await api.link(linkTarget, n.id);
         await loadNeighbors(currentId);
@@ -6617,6 +6639,27 @@
       });
       linkResults.appendChild(div);
     });
+  }
+
+  linkSearch.addEventListener('input', () => {
+    const q = linkSearch.value.trim();
+    // Instant first paint from the local title cache…
+    const ql = q.toLowerCase();
+    renderLinkResults(
+      q ? allNotesCache.filter((n) => (n.title || '').toLowerCase().includes(ql)) : allNotesCache
+    );
+    if (!q) {
+      clearTimeout(linkSearchDebounce);
+      return;
+    }
+    // …then replace with ranked full-text results (with snippets) from the
+    // server, same as the header search.
+    const seq = ++linkSearchSeq;
+    clearTimeout(linkSearchDebounce);
+    linkSearchDebounce = setTimeout(async () => {
+      const rows = await api.searchNotes(q);
+      if (seq === linkSearchSeq && linkSearch.value.trim() === q) renderLinkResults(rows);
+    }, 180);
   });
 
   let pickerCreating = false;
@@ -6684,8 +6727,17 @@
     }
   });
 
+  // Shared by the cold-boot check in init() and the listener below — a plain
+  // numeric id, same as every `#${id}` link this app hands out itself (widget
+  // taps, the agenda/digest, a shared/magic-link deep link); never a `tmp:`
+  // offline id, so no need to consult idmap here.
+  function hashNoteId() {
+    const n = Number(location.hash.replace('#', ''));
+    return n || null;
+  }
+
   window.addEventListener('hashchange', () => {
-    const hashId = Number(location.hash.replace('#', ''));
+    const hashId = hashNoteId();
     if (hashId && hashId !== currentId) goTo(hashId, 'hash');
   });
 

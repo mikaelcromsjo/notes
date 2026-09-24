@@ -149,12 +149,14 @@ body.header-hidden .pinbar { display: none; }
 
 .search-results .result:hover { background: var(--bg); }
 
-.search-results .result-title {
+.search-results .result-title,
+.picker-results .result-title {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.search-results .result-snippet {
+.search-results .result-snippet,
+.picker-results .result-snippet {
   font-size: 0.8rem;
   color: var(--muted);
   white-space: nowrap;
@@ -162,6 +164,8 @@ body.header-hidden .pinbar { display: none; }
   text-overflow: ellipsis;
   margin-top: 0.1rem;
 }
+.search-results .result-parent,
+.picker-results .result-parent { font-style: italic; }
 
 .wiki-menu {
   position: fixed;
@@ -198,7 +202,7 @@ body.header-hidden .pinbar { display: none; }
 
 .hidden { display: none !important; }
 
-button {
+button, a.secondary {
   font-family: inherit;
   font-size: 0.85rem;
   padding: 0.5rem 0.9rem;
@@ -210,10 +214,12 @@ button {
   white-space: nowrap;
 }
 
-button.secondary {
+button.secondary, a.secondary {
   background: transparent;
   color: var(--text);
   border-color: var(--border);
+  display: inline-block;
+  text-decoration: none;
 }
 
 button.secondary.danger {
