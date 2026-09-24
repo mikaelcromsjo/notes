@@ -58,4 +58,12 @@
         android:layout_marginTop="16dp"
         android:text="Save" />
 
+    <TextView
+        android:id="@+id/version_label"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:textSize="11sp"
+        android:alpha="0.6" />
+
 </LinearLayout>

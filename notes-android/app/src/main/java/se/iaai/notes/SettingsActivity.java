@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
@@ -66,6 +67,7 @@ public class SettingsActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATIONS_REQUEST);
         }
         showUpdateBannerIfPending();
+        showInstalledVersion();
 
         EditText tokenInput = findViewById(R.id.token_input);
         TextView status = findViewById(R.id.sync_status);
@@ -111,6 +113,20 @@ public class SettingsActivity extends Activity {
             Toast.makeText(this, "Downloading update…", Toast.LENGTH_SHORT).show();
             button.setEnabled(false);
         });
+    }
+
+    // A number to compare against the web app's account overlay, which shows
+    // the *latest published* build's version next to its own "Check for
+    // updates" button (it has no way to see what's actually installed here —
+    // that's native/OS-sandboxed state) — this is the other half of that.
+    private void showInstalledVersion() {
+        TextView label = findViewById(R.id.version_label);
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            label.setText("Notes Widgets v" + info.versionName);
+        } catch (PackageManager.NameNotFoundException e) {
+            label.setText("Notes Widgets");
+        }
     }
 
     // Accepts either the full "Home-screen widget feed" URL the web app's

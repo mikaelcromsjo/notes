@@ -3393,6 +3393,24 @@
     return changed ? 'update-ready' : 'current';
   }
 
+  // The Android widget app polls its own update manifest in the background
+  // (UpdateChecker in notes-android), but that only actually runs once a
+  // widget's been placed on a home screen (its refresh cycle is what drives
+  // the check) and only on a build new enough to carry that code at all — an
+  // install from before UpdateChecker existed has no way to ever notice.
+  // Piggybacking the same version manifest onto this button covers both
+  // gaps: it needs nothing installed or running natively, just this page.
+  async function latestWidgetAppVersion() {
+    try {
+      const res = await fetch(`/downloads/notes-version.json?_=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) return null;
+      const v = await res.json();
+      return v && v.versionName ? v.versionName : null;
+    } catch {
+      return null; // offline, or nothing published yet — skip silently, it's a bonus line
+    }
+  }
+
   async function runUpdateCheck() {
     updateBtn.disabled = true;
     updateStatus.textContent = 'Checking for updates…';
@@ -3404,20 +3422,29 @@
       updateBtn.disabled = false;
       return;
     }
+    let statusText;
     if (result === 'update-ready' || result === 'updating') {
-      updateStatus.textContent = 'A new version was found — reload to use it.';
+      statusText = 'A new version was found — reload to use it.';
       if (!workerUpdatePrompted) {
         workerUpdatePrompted = true;
         showReloadBar('A new version is ready.');
       }
     } else if (result === 'offline') {
-      updateStatus.textContent = "You're offline — connect and try again.";
+      statusText = "You're offline — connect and try again.";
     } else if (result === 'unsupported') {
-      updateStatus.textContent = "This browser can't check in the background. Reload the page to get the latest version.";
+      statusText = "This browser can't check in the background. Reload the page to get the latest version.";
     } else {
       const name = await shellCacheName();
-      updateStatus.textContent = `You're up to date${name ? ` (${name.replace('nico-shell-', '')})` : ''}.`;
+      statusText = `You're up to date${name ? ` (${name.replace('nico-shell-', '')})` : ''}.`;
     }
+    // This page has no way to see what's actually installed on a phone —
+    // that's native/OS-sandboxed state — so this is just naming the latest
+    // published build, not claiming yours is behind it.
+    if (result !== 'offline') {
+      const widgetVersion = await latestWidgetAppVersion();
+      if (widgetVersion) statusText += ` Latest Android widget app: v${widgetVersion}.`;
+    }
+    updateStatus.textContent = statusText;
     updateBtn.disabled = false;
   }
   updateBtn.addEventListener('click', runUpdateCheck);
