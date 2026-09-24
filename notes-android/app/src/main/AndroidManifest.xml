@@ -27,7 +27,10 @@
 
         <!-- The only screen: paste the widget feed URL (copied from the web
              app's Account -> Integrate section) to connect the widgets below.
-             Nothing here ever signs in or shows note content itself. -->
+             Nothing here ever signs in or shows note content itself. A plain
+             launcher tap only actually shows it when there's something to do
+             (first run, a broken token, a pending update) — see its own doc
+             comment; otherwise it bounces straight to the real app instead. -->
         <activity
             android:name=".SettingsActivity"
             android:exported="true"
@@ -36,6 +39,9 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
 
         <receiver

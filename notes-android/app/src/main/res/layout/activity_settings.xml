@@ -25,7 +25,7 @@
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="This app is just two home-screen widgets — it has no login of its own. Open the real app below, sign in, then in Account → Integrate copy the “Home-screen widget feed” URL and paste it here."
+        android:text="This app is just two home-screen widgets — it has no login of its own. Open the real app below, sign in, then in Account → Integrate copy the “Home-screen widget feed” URL and paste it here. Once connected, tapping this app's icon opens the real app directly — long-press the icon for these settings again."
         android:textSize="14sp"
         android:paddingBottom="16dp" />
 

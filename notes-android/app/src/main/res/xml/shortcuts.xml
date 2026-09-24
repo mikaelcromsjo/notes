@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the launcher icon -> "Widget settings". Needed now that a
+     plain tap on the icon (SettingsActivity.onCreate, ACTION_MAIN) bounces
+     straight past this screen to the real app once a token's configured —
+     this is the way back in to reconnect, or to review a pending update. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="widget_settings"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/app_name"
+        android:shortcutLongLabel="@string/app_name">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="se.iaai.notes"
+            android:targetClass="se.iaai.notes.SettingsActivity" />
+    </shortcut>
+</shortcuts>

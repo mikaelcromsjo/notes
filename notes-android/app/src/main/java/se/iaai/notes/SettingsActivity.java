@@ -15,13 +15,19 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * The app's only screen. This app has no login of its own and never shows
- * note content — it just holds the token the two home-screen widgets
- * (GridWidgetProvider/AgendaWidgetProvider) poll GET /api/widget with. Get
- * the actual app via "Add to Home Screen" on the web app; get this token from
- * that web app's own Account -> Integrate section ("Home-screen widget feed",
- * a URL of the form {base_url}/api/widget?token=... — copy button included)
- * and paste it (or just the bare token) below.
+ * The app's only screen — but not what a plain launcher-icon tap shows once
+ * it's actually configured: onCreate bounces straight past it to the real
+ * app (ACTION_VIEW on base_url) in that case, since there's nothing to do
+ * here. This UI only actually renders on first run, via the long-press
+ * "Widget settings" shortcut, via a widget's own "Tap to set up/reconnect"
+ * cell, via the update notification, or when there's an update to surface.
+ * This app has no login of its own and never shows note content — it just
+ * holds the token the two home-screen widgets (GridWidgetProvider/
+ * AgendaWidgetProvider) poll GET /api/widget with. Get the actual app via
+ * "Add to Home Screen" on the web app; get this token from that web app's own
+ * Account -> Integrate section ("Home-screen widget feed", a URL of the form
+ * {base_url}/api/widget?token=... — copy button included) and paste it (or
+ * just the bare token) below.
  */
 public class SettingsActivity extends Activity {
 
@@ -32,6 +38,24 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        boolean hasToken = !prefs.getString(KEY_TOKEN, "").isEmpty();
+        UpdateChecker.maybeCheck(this); // cheap, rate-limited internally — fine to kick off even on the fast path below
+
+        // A plain tap on the launcher icon — as opposed to the long-press
+        // "Widget settings" shortcut, a widget's own "Tap to set up/reconnect"
+        // cell, or the update notification, none of which carry ACTION_MAIN —
+        // skips straight to the real app once it's actually configured and
+        // nothing here needs attention. There's nothing to *do* on this screen
+        // in that case.
+        boolean isLauncherTap = Intent.ACTION_MAIN.equals(getIntent().getAction());
+        if (isLauncherTap && hasToken && UpdateChecker.pendingUpdate(this) == null) {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.base_url) + "/")));
+            finish();
+            return;
+        }
+
         setContentView(R.layout.activity_settings);
 
         // So UpdateChecker's "update available" nudge can actually show —
@@ -41,10 +65,8 @@ public class SettingsActivity extends Activity {
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATIONS_REQUEST);
         }
-        UpdateChecker.maybeCheck(this);
         showUpdateBannerIfPending();
 
-        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         EditText tokenInput = findViewById(R.id.token_input);
         TextView status = findViewById(R.id.sync_status);
         String existing = prefs.getString(KEY_TOKEN, "");
