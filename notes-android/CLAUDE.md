@@ -73,14 +73,20 @@ WebView, no note content ever rendered here.
   the two `RemoteViews` widgets — flat colours carry over exactly, fonts
   collapse to Android's three built-in families, no gradients/images.
 - `UpdateChecker` — not on the Play Store, so no store auto-updates it either;
-  this is that mechanism instead. `maybeCheck()` (rate-limited to ~daily,
-  piggybacked on both widgets' `onUpdate` *and* on `SettingsActivity.onCreate`,
-  so it doesn't need a wake-up of its own) compares the installed
-  `versionCode` against `{base_url}/downloads/notes-version.json`; a newer one
-  posts a one-time notification and shows a banner + "Download and install"
-  button in `SettingsActivity`, which downloads via `DownloadManager` (no
-  storage permission needed — its default destination is its own managed
-  area) and hands the result straight to the system package installer.
+  this is that mechanism instead. `maybeCheck()` (rate-limited to
+  `CHECK_INTERVAL_MS`, currently 6h, piggybacked on both widgets' `onUpdate`
+  *and* on `SettingsActivity.onCreate`, so it doesn't need a wake-up of its
+  own) compares the installed `versionCode` against
+  `{base_url}/downloads/notes-version.json`; a newer one posts a one-time
+  notification and shows a banner + "Download and install" button in
+  `SettingsActivity`, which downloads via `DownloadManager` (no storage
+  permission needed — its default destination is its own managed area) and
+  hands the result straight to the system package installer.
+  `SettingsActivity`'s "Check for updates now" button calls
+  `checkNowForce()` instead, skipping that gate entirely — useful right
+  after actually shipping a release, since otherwise a device that already
+  checked recently won't look again until the gate clears, no matter how
+  many versions have shipped in the meantime.
   Checking/downloading/notifying are all fully automatic; the final install
   is not and cannot be — Android requires one explicit tap on the installer's
   own confirmation to install an APK from outside the Play Store, regardless

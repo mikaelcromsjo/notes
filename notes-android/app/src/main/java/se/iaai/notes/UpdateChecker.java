@@ -15,6 +15,8 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 
 import org.json.JSONObject;
 
@@ -42,9 +44,12 @@ class UpdateChecker {
     private static final String KEY_PENDING_NAME = "update_pending_name";
     private static final String KEY_NOTIFIED_CODE = "update_notified_code";
     // Callers (a widget's onUpdate, SettingsActivity.onCreate) can call
-    // maybeCheck() freely — this gate is what keeps it to roughly daily
-    // regardless of how often the OS refreshes the widgets (every 30 min).
-    private static final long CHECK_INTERVAL_MS = 20L * 60 * 60 * 1000;
+    // maybeCheck() freely — this gate is what keeps actual network checks
+    // this infrequent regardless of how often the OS refreshes the widgets
+    // (every 30 min). SettingsActivity's "Check for updates now" button
+    // bypasses this entirely via checkNowForce(), for whenever a release is
+    // known to be waiting and 6 hours is too long to sit on it.
+    private static final long CHECK_INTERVAL_MS = 6L * 60 * 60 * 1000;
     private static final String CHANNEL_ID = "updates";
 
     static class PendingUpdate {
@@ -72,6 +77,23 @@ class UpdateChecker {
         if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0) < CHECK_INTERVAL_MS) return;
         Context appContext = context.getApplicationContext();
         new Thread(() -> checkNow(appContext)).start();
+    }
+
+    interface CheckCallback {
+        void onResult(PendingUpdate found); // null = none found (up to date, or the check itself failed)
+    }
+
+    // Ignores CHECK_INTERVAL_MS entirely — a person tapping "Check for
+    // updates now" has already decided this is worth a network round trip,
+    // same reasoning as the web app's own "Check for updates" button.
+    // `callback` runs on the main thread so it can touch views directly.
+    static void checkNowForce(Context context, CheckCallback callback) {
+        Context appContext = context.getApplicationContext();
+        new Thread(() -> {
+            checkNow(appContext);
+            PendingUpdate found = pendingUpdate(appContext);
+            if (callback != null) new Handler(Looper.getMainLooper()).post(() -> callback.onResult(found));
+        }).start();
     }
 
     private static void checkNow(Context context) {

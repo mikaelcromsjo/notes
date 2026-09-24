@@ -68,6 +68,7 @@ public class SettingsActivity extends Activity {
         }
         showUpdateBannerIfPending();
         showInstalledVersion();
+        wireCheckUpdateButton();
 
         EditText tokenInput = findViewById(R.id.token_input);
         TextView status = findViewById(R.id.sync_status);
@@ -127,6 +128,30 @@ public class SettingsActivity extends Activity {
         } catch (PackageManager.NameNotFoundException e) {
             label.setText("Notes Widgets");
         }
+    }
+
+    // maybeCheck() (kicked off in onCreate, and off both widgets' onUpdate)
+    // only actually hits the network at most every few hours — fine for
+    // ambient checking, too slow for "I know a release just shipped, tell me
+    // now". checkNowForce() skips that gate entirely.
+    private void wireCheckUpdateButton() {
+        Button button = findViewById(R.id.check_update_button);
+        TextView status = findViewById(R.id.check_update_status);
+        button.setOnClickListener(v -> {
+            button.setEnabled(false);
+            status.setText("Checking…");
+            UpdateChecker.checkNowForce(this, found -> {
+                button.setEnabled(true);
+                if (found != null) {
+                    status.setText(found.versionName.isEmpty()
+                            ? "Update found."
+                            : "Update found: v" + found.versionName);
+                    showUpdateBannerIfPending(); // reveal the banner + install button now
+                } else {
+                    status.setText("You're up to date.");
+                }
+            });
+        });
     }
 
     // Accepts either the full "Home-screen widget feed" URL the web app's
