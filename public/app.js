@@ -4214,6 +4214,15 @@
   // Deep links into a fresh load:
   //   /?d=agenda | /?d=insights  — from a digest notification / its web page
   //   /?compose=1                — the manifest "New note" shortcut / widget ＋
+  //   /?preview=1#<id>           — open straight into the fullscreen preview of
+  //                                whatever note the URL centers on (the
+  //                                #<id> itself is handled separately, by
+  //                                init()'s own cold-boot hash check, which
+  //                                runs first and always centers the grid on
+  //                                it regardless of this flag) — the Android
+  //                                widget's centre-cell tap uses this so
+  //                                landing on the grid re-centered isn't
+  //                                mistaken for nothing having happened.
   //   a `nico_share` cookie      — text handed over by POST /share while logged
   //                                out (see server/routes/share.js)
   // Consume whatever we act on so a reload is clean.
@@ -4224,15 +4233,17 @@
     const wantsCompose = params.get('compose') === '1';
     const isFresh = params.get('fresh') === '1';
     const wantsBegin = params.get('ob') === 'begin';
+    const wantsPreview = params.get('preview') === '1';
     const shared = consumePendingShare();
 
-    if (!handledD && !wantsCompose && !isFresh && !wantsBegin && !shared) return;
+    if (!handledD && !wantsCompose && !isFresh && !wantsBegin && !wantsPreview && !shared) return;
 
     const url = new URL(location.href);
     if (handledD) url.searchParams.delete('d');
     if (wantsCompose) url.searchParams.delete('compose');
     if (isFresh) url.searchParams.delete('fresh');
     if (wantsBegin) url.searchParams.delete('ob');
+    if (wantsPreview) url.searchParams.delete('preview');
     history.replaceState(null, '', url.pathname + url.search + url.hash);
 
     if (d === 'agenda') openAgenda();
@@ -4240,7 +4251,7 @@
 
     if (shared) createSharedNote(shared);
     else if (wantsCompose) openPicker({ standalone: true });
-    else if (isFresh) openNoteFullscreen('preview');
+    else if (isFresh || wantsPreview) openNoteFullscreen('preview');
     else if (wantsBegin) {
       // A link clicked inside a note's own content (Skip-the-intro or the
       // tour's closing state) — see server/onboarding.js. Reload rather than

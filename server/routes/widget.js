@@ -140,7 +140,13 @@ router.get('/', (req, res) => {
       type: center.type,
       snippet,
       updated_at: center.updated_at,
-      url: `${origin}/#${center.id}`,
+      // ?preview=1 (app.js's handleDeepLink) opens straight into the
+      // fullscreen read-only preview — a plain #<id> alone just re-centers
+      // the grid on it, which for the *centre* cell is a no-op-looking
+      // "nothing happened" (it's already the note the widget was showing).
+      // The neighbour/parent links below stay plain #<id> — the grid widget
+      // never actually opens those via URL, it re-centers itself locally.
+      url: `${origin}/?preview=1#${center.id}`,
     },
     parent: result.parent ? withUrl(result.parent) : null,
     neighbors: result.neighbors.map(withUrl),
