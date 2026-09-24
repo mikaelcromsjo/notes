@@ -56,7 +56,11 @@ router.get('/', (req, res) => {
   // ?mode=agenda → the "what's due" feed instead of the graph neighbourhood.
   if (req.query.mode === 'agenda') {
     const a = buildAgenda(user.id, { tz: req.query.tz });
-    const withUrl = (items) => items.map((it) => ({ ...it, url: `${origin}/#${it.noteId}` }));
+    // ?preview=1 (app.js's handleDeepLink) opens straight into the fullscreen
+    // read-only preview — same reasoning as the grid widget's centre-cell
+    // link, just applied to every item here since the agenda widget only
+    // ever *opens* a note by URL, never re-centers on one locally.
+    const withUrl = (items) => items.map((it) => ({ ...it, url: `${origin}/?preview=1#${it.noteId}` }));
     return res.json({
       generated_at: a.generatedAt,
       mode: 'agenda',

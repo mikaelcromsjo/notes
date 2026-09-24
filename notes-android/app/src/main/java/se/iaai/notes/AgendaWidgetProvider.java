@@ -19,6 +19,8 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.TimeZone;
 
 /**
@@ -84,6 +86,7 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
             views.setTextViewText(R.id.widget_summary, "Tap to set up");
             views.setTextViewText(R.id.widget_line1, "");
             views.setTextViewText(R.id.widget_line2, "");
+            views.setTextViewText(R.id.widget_line3, "");
             PendingIntent openPending = PendingIntent.getActivity(context, widgetId, settingsIntent(context), flags);
             views.setOnClickPendingIntent(R.id.widget_summary, openPending);
             appWidgetManager.updateAppWidget(widgetId, views);
@@ -118,6 +121,7 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
                 views.setTextViewText(R.id.widget_summary, "Tap to reconnect");
                 views.setTextViewText(R.id.widget_line1, "");
                 views.setTextViewText(R.id.widget_line2, "");
+                views.setTextViewText(R.id.widget_line3, "");
                 PendingIntent openPending = PendingIntent.getActivity(context, 1000 + widgetId, settingsIntent(context), pendingFlags);
                 views.setOnClickPendingIntent(R.id.widget_summary, openPending);
                 appWidgetManager.updateAppWidget(widgetId, views);
@@ -128,6 +132,7 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
                 views.setTextViewText(R.id.widget_summary, "Error (" + status + ")");
                 views.setTextViewText(R.id.widget_line1, "");
                 views.setTextViewText(R.id.widget_line2, "");
+                views.setTextViewText(R.id.widget_line3, "");
                 appWidgetManager.updateAppWidget(widgetId, views);
                 return;
             }
@@ -148,34 +153,60 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
             JSONObject reminders = root.getJSONObject("reminders");
             JSONArray overdue = reminders.getJSONArray("overdue");
             JSONArray today = reminders.getJSONArray("today");
+            // Both new to this feed's Android client — server/agenda.js has
+            // sent them all along (same fields the in-app 🔔 overlay's "Open
+            // tasks"/"Orphaned notes" sections use), this just wasn't reading
+            // them yet.
+            JSONArray openTasks = root.optJSONArray("open_tasks");
+            JSONArray orphans = root.optJSONArray("orphans");
+            int openTasksCount = openTasks != null ? openTasks.length() : 0;
 
-            views.setTextViewText(R.id.widget_summary,
-                    overdue.length() + " overdue · " + today.length() + " today");
+            String summary = overdue.length() + " overdue · " + today.length() + " today";
+            if (openTasksCount > 0) summary += " · " + openTasksCount + " to-do";
+            views.setTextViewText(R.id.widget_summary, summary);
+            // The summary always opens the full in-app agenda, not any one
+            // item — there's nothing there to disambiguate as "the" note.
+            views.setOnClickPendingIntent(R.id.widget_summary, PendingIntent.getActivity(
+                    context, widgetId * 10, new Intent(Intent.ACTION_VIEW, Uri.parse(baseUrl + "/?d=agenda")),
+                    pendingFlags));
 
-            // Show up to two upcoming items, overdue first.
-            JSONArray combined = new JSONArray();
-            for (int i = 0; i < overdue.length(); i++) combined.put(overdue.get(i));
-            for (int i = 0; i < today.length(); i++) combined.put(today.get(i));
+            // Up to three lines, most time-sensitive first: overdue, then
+            // today's reminders, then open to-dos. Orphans are last and
+            // capped to one — same as server/agenda.js's own framing of them
+            // as a low-priority "by the way", not something due — so they
+            // only actually show if reminders+to-dos didn't already fill all
+            // three lines. Each line is its own item with its own label and
+            // its own tap target (not all three sharing whatever the single
+            // top item was, as before).
+            List<String> labels = new ArrayList<>();
+            List<String> urls = new ArrayList<>();
+            addItems(labels, urls, overdue, "Overdue", 3);
+            addItems(labels, urls, today, "Today", 3);
+            addItems(labels, urls, openTasks, "To-do", 3);
+            if (labels.size() < 3 && orphans != null && orphans.length() > 0) {
+                addItems(labels, urls, orphans, "Orphan", labels.size() + 1);
+            }
 
-            String line1 = combined.length() > 0 ? itemLabel(combined.getJSONObject(0)) : "Nothing due";
-            String line2 = combined.length() > 1 ? itemLabel(combined.getJSONObject(1)) : "";
-            views.setTextViewText(R.id.widget_line1, line1);
-            views.setTextViewText(R.id.widget_line2, line2);
-
-            String tapUrl = combined.length() > 0
-                    ? combined.getJSONObject(0).optString("url", baseUrl + "/")
-                    : baseUrl + "/?d=agenda";
-            PendingIntent openPending = PendingIntent.getActivity(
-                    context, 1000 + widgetId, new Intent(Intent.ACTION_VIEW, Uri.parse(tapUrl)), pendingFlags);
-            views.setOnClickPendingIntent(R.id.widget_summary, openPending);
-            views.setOnClickPendingIntent(R.id.widget_line1, openPending);
-            views.setOnClickPendingIntent(R.id.widget_line2, openPending);
+            int[] lineIds = {R.id.widget_line1, R.id.widget_line2, R.id.widget_line3};
+            for (int i = 0; i < lineIds.length; i++) {
+                if (i >= labels.size()) {
+                    views.setTextViewText(lineIds[i], i == 0 ? "Nothing due" : "");
+                    continue;
+                }
+                views.setTextViewText(lineIds[i], labels.get(i));
+                String url = urls.get(i);
+                if (url == null) continue;
+                views.setOnClickPendingIntent(lineIds[i], PendingIntent.getActivity(
+                        context, widgetId * 10 + i + 1, new Intent(Intent.ACTION_VIEW, Uri.parse(url)),
+                        pendingFlags));
+            }
 
         } catch (Exception e) {
             if (attempt < MAX_NETWORK_RETRIES) {
                 views.setTextViewText(R.id.widget_summary, "Couldn't reach server — retrying…");
                 views.setTextViewText(R.id.widget_line1, "");
                 views.setTextViewText(R.id.widget_line2, "");
+                views.setTextViewText(R.id.widget_line3, "");
                 appWidgetManager.updateAppWidget(widgetId, views);
                 try {
                     Thread.sleep(RETRY_DELAYS_MS[attempt]);
@@ -188,13 +219,23 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
             views.setTextViewText(R.id.widget_summary, "Couldn't reach server");
             views.setTextViewText(R.id.widget_line1, "");
             views.setTextViewText(R.id.widget_line2, "");
+            views.setTextViewText(R.id.widget_line3, "");
         }
 
         appWidgetManager.updateAppWidget(widgetId, views);
     }
 
-    private String itemLabel(JSONObject item) {
-        String title = item.optString("title", "Untitled");
-        return "• " + title;
+    // Appends up to `max` (total across every category, not just this call --
+    // callers pass the running budget) items from `src` as "Category: title"
+    // labels with their url alongside, so each line can carry both its own
+    // text and its own tap target instead of every line sharing one.
+    private static void addItems(List<String> labels, List<String> urls, JSONArray src, String category, int max) {
+        if (src == null) return;
+        for (int i = 0; i < src.length() && labels.size() < max; i++) {
+            JSONObject obj = src.optJSONObject(i);
+            if (obj == null) continue;
+            labels.add(category + ": " + obj.optString("title", "Untitled"));
+            urls.add(obj.optString("url", null));
+        }
     }
 }
