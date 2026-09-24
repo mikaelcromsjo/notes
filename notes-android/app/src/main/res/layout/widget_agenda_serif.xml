@@ -5,8 +5,7 @@
     android:layout_height="match_parent"
     android:orientation="vertical"
     android:background="@color/widget_background"
-    android:padding="12dp"
-    android:gravity="center_vertical">
+    android:padding="12dp">
 
     <TextView
         android:id="@+id/widget_summary"
@@ -18,35 +17,27 @@
         android:textStyle="bold"
         android:textColor="@color/widget_text_primary" />
 
-    <TextView
-        android:id="@+id/widget_line1"
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:fontFamily="serif"
-        android:layout_marginTop="6dp"
-        android:textSize="12sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:textColor="@color/widget_text_secondary" />
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="4dp">
 
-    <TextView
-        android:id="@+id/widget_line2"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:fontFamily="serif"
-        android:textSize="12sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:textColor="@color/widget_text_secondary" />
+        <ListView
+            android:id="@+id/agenda_list"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="@null"
+            android:dividerHeight="0dp"
+            android:scrollbars="none" />
 
-    <TextView
-        android:id="@+id/widget_line3"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:fontFamily="serif"
-        android:textSize="12sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:textColor="@color/widget_text_secondary" />
+        <TextView
+            android:id="@+id/agenda_empty"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:fontFamily="serif"
+            android:textSize="12sp" />
+
+    </FrameLayout>
 
 </LinearLayout>

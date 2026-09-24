@@ -12,6 +12,7 @@ import android.os.Build;
 import android.widget.RemoteViews;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -25,10 +26,12 @@ import java.util.TimeZone;
 
 /**
  * Polls this account's read-only /api/widget?mode=agenda feed (token-authed,
- * server/routes/widget.js) and shows overdue/today reminder counts plus the
- * next couple of items, themed to match the app (WidgetTheme). No header/
- * refresh button — the system's own periodic update (30 min) keeps it
- * current. Tapping the body opens the next due item in whatever handles
+ * server/routes/widget.js) and shows every overdue/today reminder, open
+ * to-do, and orphaned note as its own row in a real scrolling list
+ * (AgendaWidgetService/AgendaRemoteViewsFactory) — themed to match the app
+ * (WidgetTheme). No header/refresh button — the system's own periodic update
+ * (30 min) keeps it current. Tapping a row opens that note, tapping the
+ * summary opens the full in-app agenda; both in whatever handles
  * notes.ia-ai.se (the installed PWA, or a browser) — this app has no WebView
  * of its own to open it in.
  */
@@ -40,6 +43,7 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
     // times first.
     private static final int MAX_NETWORK_RETRIES = 2;
     private static final int[] RETRY_DELAYS_MS = {3000, 8000};
+    private static final String KEY_ITEMS = "agenda_items_json";
 
     // Kicks every existing widget instance to refresh now — used by the
     // system's own update cycle and SettingsActivity right after saving a
@@ -71,6 +75,38 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
         return intent;
     }
 
+    // Wires up the list on every single RemoteViews this provider ever
+    // builds (success, retry, error, not-set-up) rather than only on success:
+    // a collection view's binding to its RemoteViewsService needs restating
+    // on every full updateAppWidget call to keep working reliably, but the
+    // *data* it shows is whatever loadCachedItems() last had persisted by a
+    // genuine success below — so an error/retry state leaves the previous
+    // good list on screen (same "don't blank it" reasoning as the grid
+    // widget's own dropped "Loading…" push) rather than clearing it.
+    private static void bindAgendaList(Context context, RemoteViews views, int widgetId, int flags) {
+        views.setEmptyView(R.id.agenda_list, R.id.agenda_empty);
+        views.setTextViewText(R.id.agenda_empty, "Nothing due");
+        Intent serviceIntent = new Intent(context, AgendaWidgetService.class);
+        serviceIntent.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId);
+        // Collection widgets require a distinct Intent (by data Uri) per
+        // widget instance, or the host may share/confuse their adapters —
+        // the underlying data is account-wide either way (loadCachedItems
+        // ignores widgetId), this is just to satisfy that requirement.
+        serviceIntent.setData(Uri.parse("widget://agenda/" + widgetId));
+        views.setRemoteAdapter(R.id.agenda_list, serviceIntent);
+        // One shared template for every row's tap — a collection view can't
+        // give each row its own full PendingIntent, only a template plus
+        // each row's own "fill in the blanks" Intent (AgendaRemoteViewsFactory).
+        views.setPendingIntentTemplate(R.id.agenda_list, PendingIntent.getActivity(
+                context, widgetId * 10 + 1, new Intent(Intent.ACTION_VIEW), flags));
+    }
+
+    private static void finish(Context context, AppWidgetManager appWidgetManager, RemoteViews views, int widgetId, int flags) {
+        bindAgendaList(context, views, widgetId, flags);
+        appWidgetManager.updateAppWidget(widgetId, views);
+        appWidgetManager.notifyAppWidgetViewDataChanged(widgetId, R.id.agenda_list);
+    }
+
     private void updateOne(Context context, AppWidgetManager appWidgetManager, int widgetId) {
         WidgetTheme theme = WidgetTheme.load(context); // last-known (or default) — real theme lands after fetch
         RemoteViews views = new RemoteViews(context.getPackageName(), theme.agendaLayout());
@@ -84,16 +120,13 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
 
         if (token.isEmpty()) {
             views.setTextViewText(R.id.widget_summary, "Tap to set up");
-            views.setTextViewText(R.id.widget_line1, "");
-            views.setTextViewText(R.id.widget_line2, "");
-            views.setTextViewText(R.id.widget_line3, "");
             PendingIntent openPending = PendingIntent.getActivity(context, widgetId, settingsIntent(context), flags);
             views.setOnClickPendingIntent(R.id.widget_summary, openPending);
-            appWidgetManager.updateAppWidget(widgetId, views);
+            finish(context, appWidgetManager, views, widgetId, flags);
             return;
         }
 
-        appWidgetManager.updateAppWidget(widgetId, views); // show current state immediately
+        finish(context, appWidgetManager, views, widgetId, flags); // show current state immediately
         new Thread(() -> fetchAndApply(context, appWidgetManager, widgetId, token, flags, 0)).start();
     }
 
@@ -119,21 +152,15 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
             // no login here), so just point at Settings to paste a fresh one.
             if (status == 401) {
                 views.setTextViewText(R.id.widget_summary, "Tap to reconnect");
-                views.setTextViewText(R.id.widget_line1, "");
-                views.setTextViewText(R.id.widget_line2, "");
-                views.setTextViewText(R.id.widget_line3, "");
                 PendingIntent openPending = PendingIntent.getActivity(context, 1000 + widgetId, settingsIntent(context), pendingFlags);
                 views.setOnClickPendingIntent(R.id.widget_summary, openPending);
-                appWidgetManager.updateAppWidget(widgetId, views);
+                finish(context, appWidgetManager, views, widgetId, pendingFlags);
                 return;
             }
 
             if (status != 200) {
                 views.setTextViewText(R.id.widget_summary, "Error (" + status + ")");
-                views.setTextViewText(R.id.widget_line1, "");
-                views.setTextViewText(R.id.widget_line2, "");
-                views.setTextViewText(R.id.widget_line3, "");
-                appWidgetManager.updateAppWidget(widgetId, views);
+                finish(context, appWidgetManager, views, widgetId, pendingFlags);
                 return;
             }
 
@@ -170,44 +197,22 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
                     context, widgetId * 10, new Intent(Intent.ACTION_VIEW, Uri.parse(baseUrl + "/?d=agenda")),
                     pendingFlags));
 
-            // Up to three lines, most time-sensitive first: overdue, then
-            // today's reminders, then open to-dos. Orphans are last and
-            // capped to one — same as server/agenda.js's own framing of them
-            // as a low-priority "by the way", not something due — so they
-            // only actually show if reminders+to-dos didn't already fill all
-            // three lines. Each line is its own item with its own label and
-            // its own tap target (not all three sharing whatever the single
-            // top item was, as before).
-            List<String> labels = new ArrayList<>();
-            List<String> urls = new ArrayList<>();
-            addItems(labels, urls, overdue, "Overdue", 3);
-            addItems(labels, urls, today, "Today", 3);
-            addItems(labels, urls, openTasks, "To-do", 3);
-            if (labels.size() < 3 && orphans != null && orphans.length() > 0) {
-                addItems(labels, urls, orphans, "Orphan", labels.size() + 1);
-            }
-
-            int[] lineIds = {R.id.widget_line1, R.id.widget_line2, R.id.widget_line3};
-            for (int i = 0; i < lineIds.length; i++) {
-                if (i >= labels.size()) {
-                    views.setTextViewText(lineIds[i], i == 0 ? "Nothing due" : "");
-                    continue;
-                }
-                views.setTextViewText(lineIds[i], labels.get(i));
-                String url = urls.get(i);
-                if (url == null) continue;
-                views.setOnClickPendingIntent(lineIds[i], PendingIntent.getActivity(
-                        context, widgetId * 10 + i + 1, new Intent(Intent.ACTION_VIEW, Uri.parse(url)),
-                        pendingFlags));
-            }
+            // Every item, in priority order — overdue, then today's
+            // reminders, then open to-dos, then orphans last (already capped
+            // server-side at 20, server/agenda.js, same as everywhere else
+            // orphans show up) — no further capping here: the list scrolls,
+            // it doesn't need to fit a fixed handful of lines any more.
+            JSONArray allItems = new JSONArray();
+            addCategory(allItems, overdue, "Overdue");
+            addCategory(allItems, today, "Today");
+            addCategory(allItems, openTasks, "To-do");
+            addCategory(allItems, orphans, "Orphan");
+            saveItems(context, allItems);
 
         } catch (Exception e) {
             if (attempt < MAX_NETWORK_RETRIES) {
                 views.setTextViewText(R.id.widget_summary, "Couldn't reach server — retrying…");
-                views.setTextViewText(R.id.widget_line1, "");
-                views.setTextViewText(R.id.widget_line2, "");
-                views.setTextViewText(R.id.widget_line3, "");
-                appWidgetManager.updateAppWidget(widgetId, views);
+                finish(context, appWidgetManager, views, widgetId, pendingFlags);
                 try {
                     Thread.sleep(RETRY_DELAYS_MS[attempt]);
                 } catch (InterruptedException ignored) {
@@ -217,25 +222,54 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
                 return;
             }
             views.setTextViewText(R.id.widget_summary, "Couldn't reach server");
-            views.setTextViewText(R.id.widget_line1, "");
-            views.setTextViewText(R.id.widget_line2, "");
-            views.setTextViewText(R.id.widget_line3, "");
+            finish(context, appWidgetManager, views, widgetId, pendingFlags);
+            return;
         }
 
-        appWidgetManager.updateAppWidget(widgetId, views);
+        finish(context, appWidgetManager, views, widgetId, pendingFlags);
     }
 
-    // Appends up to `max` (total across every category, not just this call --
-    // callers pass the running budget) items from `src` as "Category: title"
-    // labels with their url alongside, so each line can carry both its own
-    // text and its own tap target instead of every line sharing one.
-    private static void addItems(List<String> labels, List<String> urls, JSONArray src, String category, int max) {
+    // Flattens a category's items into {label, url} rows appended to `dest` —
+    // "Category: title" so a row reads unambiguously regardless of which list
+    // it came from (previously a bare "• title" left to-dos/orphans/reminders
+    // indistinguishable from each other).
+    private static void addCategory(JSONArray dest, JSONArray src, String category) {
         if (src == null) return;
-        for (int i = 0; i < src.length() && labels.size() < max; i++) {
+        for (int i = 0; i < src.length(); i++) {
             JSONObject obj = src.optJSONObject(i);
             if (obj == null) continue;
-            labels.add(category + ": " + obj.optString("title", "Untitled"));
-            urls.add(obj.optString("url", null));
+            try {
+                JSONObject row = new JSONObject();
+                row.put("label", category + ": " + obj.optString("title", "Untitled"));
+                row.put("url", obj.optString("url", ""));
+                dest.put(row);
+            } catch (JSONException ignored) {
+                // Can't actually happen (name/value are never null) — keep going.
+            }
         }
+    }
+
+    private static void saveItems(Context context, JSONArray items) {
+        context.getSharedPreferences(SettingsActivity.PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY_ITEMS, items.toString()).apply();
+    }
+
+    // Read by AgendaRemoteViewsFactory.onDataSetChanged() — never does its
+    // own network fetch, just reflects whatever fetchAndApply last saved.
+    static List<JSONObject> loadCachedItems(Context context) {
+        String raw = context.getSharedPreferences(SettingsActivity.PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_ITEMS, "[]");
+        List<JSONObject> list = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.optJSONObject(i);
+                if (obj != null) list.add(obj);
+            }
+        } catch (JSONException ignored) {
+            // Corrupt/missing cache — an empty list just shows "Nothing due"
+            // until the next successful fetch overwrites it.
+        }
+        return list;
     }
 }

@@ -125,6 +125,15 @@ class WidgetTheme {
         return R.layout.widget_agenda;
     }
 
+    // One row of the agenda's scrollable list (AgendaRemoteViewsFactory) —
+    // same font mapping as agendaLayout(), just for the per-item layout
+    // instead of the widget's own root.
+    int agendaRowLayout() {
+        if ("mono".equals(font)) return R.layout.widget_agenda_row_mono;
+        if ("lora".equals(font)) return R.layout.widget_agenda_row_serif;
+        return R.layout.widget_agenda_row;
+    }
+
     void applyToGridRoot(RemoteViews views) {
         views.setInt(R.id.widget_root, "setBackgroundColor", bg);
     }
@@ -142,7 +151,9 @@ class WidgetTheme {
     void applyToAgenda(RemoteViews views) {
         views.setInt(R.id.widget_root, "setBackgroundColor", bg);
         views.setTextColor(R.id.widget_summary, text);
-        views.setTextColor(R.id.widget_line1, muted);
-        views.setTextColor(R.id.widget_line2, muted);
+        views.setTextColor(R.id.agenda_empty, muted);
+        // Each row's own text colour is set individually in
+        // AgendaRemoteViewsFactory.getViewAt(), which runs in a separate pass
+        // (the list's rows aren't part of this RemoteViews tree at all).
     }
 }

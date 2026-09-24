@@ -68,5 +68,14 @@
                 android:resource="@xml/grid_widget_info" />
         </receiver>
 
+        <!-- Backs the agenda widget's scrollable list of every overdue/
+             today/to-do/orphan item — AgendaWidgetProvider.bindAgendaList,
+             AgendaRemoteViewsFactory. BIND_REMOTEVIEWS is required for any
+             service a widget's collection view points at. -->
+        <service
+            android:name=".AgendaWidgetService"
+            android:exported="false"
+            android:permission="android.permission.BIND_REMOTEVIEWS" />
+
     </application>
 </manifest>

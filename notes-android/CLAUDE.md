@@ -42,10 +42,26 @@ WebView, no note content ever rendered here.
   browser — this app has nothing of its own to show it in); tapping a
   neighbour just re-centers the widget locally (stored per-widget-id in
   `SharedPreferences`), no navigation.
-- `AgendaWidgetProvider` — overdue/today reminder counts + next couple of
-  items (`?mode=agenda&tz=`), tap opens the next due item the same way.
-  Refresh cadence for both: the system's own 30-min `updatePeriodMillis`
-  (`app/src/main/res/xml/*_widget_info.xml`) — no in-widget refresh button.
+- `AgendaWidgetProvider` — overdue/today reminder counts as a header, plus
+  *every* overdue/today/open-to-do/orphaned-note item as its own row
+  (`?mode=agenda&tz=`) in a real scrolling list, not a fixed handful of
+  lines — a `ListView` backed by `AgendaWidgetService`/
+  `AgendaRemoteViewsFactory` (the standard Android "collection widget"
+  mechanism: `RemoteViewsService` + `RemoteViewsFactory`, registered in the
+  manifest with `BIND_REMOTEVIEWS`). `fetchAndApply` persists the flattened,
+  labelled ("Overdue: …"/"Today: …"/"To-do: …"/"Orphan: …") item list to
+  `SharedPreferences` (`AgendaWidgetProvider.loadCachedItems`) and calls
+  `notifyAppWidgetViewDataChanged` — the factory never fetches over the
+  network itself, just reflects whatever was last saved there. Each row gets
+  its own tap target via `setOnClickFillInIntent` against one shared
+  `setPendingIntentTemplate` on the list (a collection view can't give every
+  row its own full `PendingIntent`); the summary header always opens the
+  full in-app agenda instead, since a count has nothing singular to open.
+  Orphans are already capped at 20 server-side (`server/agenda.js`, same as
+  everywhere else they appear) — no further capping on the client.
+  Refresh cadence for both widgets: the system's own 30-min
+  `updatePeriodMillis` (`app/src/main/res/xml/*_widget_info.xml`) — no
+  in-widget refresh button.
 - Both widgets: on a network exception, retry with backoff
   (`MAX_NETWORK_RETRIES`/`RETRY_DELAYS_MS`, 2 tries at 3s/8s) before giving up
   and showing "Couldn't reach server" — a transient wifi/DNS blip otherwise sat
@@ -111,8 +127,16 @@ WebView, no note content ever rendered here.
   exclusion beyond the default `android:allowBackup`.
 - `RemoteViews` can't run arbitrary code — any change to what a widget shows
   needs a matching layout variant per font family (`widget_grid.xml` /
-  `_mono.xml` / `_serif.xml`, same for agenda) picked by `WidgetTheme.gridLayout()`
-  / `agendaLayout()`.
+  `_mono.xml` / `_serif.xml`, same for agenda *and* its list row,
+  `widget_agenda_row*.xml`) picked by `WidgetTheme.gridLayout()` /
+  `agendaLayout()` / `agendaRowLayout()`.
+- Same limit, different shape, for the agenda list: a collection view
+  (`ListView` + `RemoteViewsFactory`) can't give each row its own
+  `PendingIntent` — only one shared template on the list
+  (`setPendingIntentTemplate`) plus each row's own "fill in the blanks"
+  Intent (`setOnClickFillInIntent`). Fine for "open this URL" (the template
+  has no data, each row fills in its own), but rules out a row needing a
+  genuinely different *action*, not just different data.
 - The grid widget's re-center-on-tap only updates that one widget instance's own
   stored center — it never touches the server's `tabs` table, so it can't drift
   the web app's own active note (see `server/routes/widget.js`'s `?center=` param).
