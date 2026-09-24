@@ -65,6 +65,20 @@ WebView, no note content ever rendered here.
   change `base_url` in `strings.xml` — it's baked in at build time. A token
   minted by one server won't authenticate against the other either, so
   Settings needs a fresh paste after switching.
+- **This machine already has a toolchain**: JDK 17 at `/home/devuser/android-tools/jdk17`,
+  Android SDK at `/home/devuser/android-tools/sdk`, Gradle cached in `~/.gradle`.
+  `local.properties` (gitignored) needs `sdk.dir=/home/devuser/android-tools/sdk`.
+  To rebuild and redeploy the download link:
+  ```
+  JAVA_HOME=/home/devuser/android-tools/jdk17 PATH="$JAVA_HOME/bin:$PATH" ./gradlew assembleDebug
+  cp app/build/outputs/apk/debug/app-debug.apk /srv/notes/public/downloads/notes.apk
+  ```
+  No `release` signing config exists — `assembleDebug`'s output, signed with
+  `~/.android/debug.keystore`, *is* what's shipped at `/downloads/notes.apk`
+  (fine for direct-APK, non-Play-Store distribution). That debug key's
+  fingerprint is what the old `assetlinks.json` used to pin, back when this
+  app still claimed App Links. `public/downloads/` is gitignored — nothing to
+  commit after a rebuild, just redeploy the file.
 
 ## Gotchas
 
