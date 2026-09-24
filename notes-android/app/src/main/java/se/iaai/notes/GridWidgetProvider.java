@@ -78,6 +78,9 @@ public class GridWidgetProvider extends AppWidgetProvider {
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager, int[] appWidgetIds) {
         for (int id : appWidgetIds) updateOne(context, appWidgetManager, id);
+        // Piggybacks on the OS's own 30-min widget refresh cycle (rate-limited
+        // internally to ~daily) rather than a separate wake-up of our own.
+        UpdateChecker.maybeCheck(context);
     }
 
     @Override

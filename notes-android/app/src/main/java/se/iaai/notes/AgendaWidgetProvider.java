@@ -58,6 +58,9 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
         for (int id : appWidgetIds) {
             updateOne(context, appWidgetManager, id);
         }
+        // Piggybacks on the OS's own 30-min widget refresh cycle (rate-limited
+        // internally to ~daily) rather than a separate wake-up of our own.
+        UpdateChecker.maybeCheck(context);
     }
 
     private static Intent settingsIntent(Context context) {

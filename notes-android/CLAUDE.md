@@ -56,6 +56,21 @@ WebView, no note content ever rendered here.
   `theme.colors`/`theme.font`, i.e. `public/themes.js`'s `effectiveColors`) onto
   the two `RemoteViews` widgets — flat colours carry over exactly, fonts
   collapse to Android's three built-in families, no gradients/images.
+- `UpdateChecker` — not on the Play Store, so no store auto-updates it either;
+  this is that mechanism instead. `maybeCheck()` (rate-limited to ~daily,
+  piggybacked on both widgets' `onUpdate` *and* on `SettingsActivity.onCreate`,
+  so it doesn't need a wake-up of its own) compares the installed
+  `versionCode` against `{base_url}/downloads/notes-version.json`; a newer one
+  posts a one-time notification and shows a banner + "Download and install"
+  button in `SettingsActivity`, which downloads via `DownloadManager` (no
+  storage permission needed — its default destination is its own managed
+  area) and hands the result straight to the system package installer.
+  Checking/downloading/notifying are all fully automatic; the final install
+  is not and cannot be — Android requires one explicit tap on the installer's
+  own confirmation to install an APK from outside the Play Store, regardless
+  of what permissions the app holds. **A device on the old (pre-`UpdateChecker`)
+  build has to be reinstalled manually once** — it has no code to notice this
+  feature exists until then.
 
 ## Build / run
 
@@ -79,6 +94,15 @@ WebView, no note content ever rendered here.
   fingerprint is what the old `assetlinks.json` used to pin, back when this
   app still claimed App Links. `public/downloads/` is gitignored — nothing to
   commit after a rebuild, just redeploy the file.
+- **Bump `versionCode`/`versionName` in `app/build.gradle` on every release
+  meant for existing installs to auto-update to** (see `UpdateChecker` above),
+  and regenerate `public/downloads/notes-version.json` to match — it's
+  gitignored the same as `notes.apk`, so this is a manual step every time:
+  ```
+  echo '{"versionCode": <N>, "versionName": "<X.Y>"}' > /srv/notes/public/downloads/notes-version.json
+  ```
+  Forgetting this doesn't break anything — installed devices just won't see
+  the new release until it's published.
 
 ## Gotchas
 

@@ -1,13 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Just the widgets' own polling (GridWidgetProvider/AgendaWidgetProvider,
+    <!-- The widgets' own polling (GridWidgetProvider/AgendaWidgetProvider,
          each GET /api/widget?token=...) — no WebView, no native login, no
          mic/camera/geolocation/download bridging: that's all Chrome's job for
          the real app, installed via "Add to Home Screen" on notes.ia-ai.se.
          See CLAUDE.md for why this app is widgets-only. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Not on the Play Store, so there's no store to auto-update it —
+         UpdateChecker is that mechanism instead. REQUEST_INSTALL_PACKAGES lets
+         this app hand the downloaded APK to the system installer (the user
+         still has to tap through that installer's own confirmation — Android
+         never lets a sideloaded app install silently, no matter what
+         permissions it holds); POST_NOTIFICATIONS (API 33+) is just for the
+         "update available" nudge, in case Settings isn't reopened on its own. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
