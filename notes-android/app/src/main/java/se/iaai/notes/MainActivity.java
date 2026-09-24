@@ -5,6 +5,7 @@ import android.annotation.SuppressLint;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -13,6 +14,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.MediaStore;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.GeolocationPermissions;
@@ -49,6 +51,7 @@ public class MainActivity extends Activity {
     private static final int RECORD_AUDIO_REQUEST = 51427;
     private static final int LOCATION_REQUEST = 51428;
     private static final int NOTIFICATIONS_REQUEST = 51429;
+    private static final int CAMERA_CAPTURE_REQUEST = 51430;
 
     private WebView webView;
     // A plain WebView answers neither "pick a file" (<input type=file>, used
@@ -58,6 +61,10 @@ public class MainActivity extends Activity {
     // (onShowFileChooser, onPermissionRequest, the download listener below)
     // wires up. Without them the tap just does nothing, silently.
     private ValueCallback<Uri[]> filePathCallback;
+    // Where the just-launched camera app was told to write the photo
+    // (startCameraCapture) — needed in onActivityResult since ACTION_IMAGE_CAPTURE
+    // hands the result back via this Uri, not through the intent's own data.
+    private Uri pendingCameraUri;
     private PermissionRequest pendingPermissionRequest;
     private GeolocationPermissions.Callback pendingGeoCallback;
     private String pendingGeoOrigin;
@@ -144,13 +151,21 @@ public class MainActivity extends Activity {
 
         webView.setWebChromeClient(new WebChromeClient() {
             // <input type=file> (gallery photo, camera-capture photo, and the
-            // plain "attach a file" picker all use this — the camera one just
-            // carries FileChooserParams.isCaptureEnabled()). createIntent()
-            // builds a stock chooser/camera intent from the accept types and
-            // capture flag; the result comes back in onActivityResult below.
+            // plain "attach a file" picker all use this — the camera one
+            // (public/index.html's #picker-camera-input) carries
+            // accept="image/*" capture="environment"). params.createIntent()
+            // only ever builds a generic ACTION_GET_CONTENT chooser — it does
+            // *not* itself act on isCaptureEnabled(), despite the name — so
+            // without the branch below "Take a photo" and "Choose from
+            // gallery" opened the exact same picker, camera buried (if
+            // present at all) inside a chooser rather than launched directly.
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 MainActivity.this.filePathCallback = callback;
+                if (params.isCaptureEnabled() && acceptsImages(params.getAcceptTypes())
+                        && startCameraCapture()) {
+                    return true;
+                }
                 try {
                     startActivityForResult(params.createIntent(), FILE_CHOOSER_REQUEST);
                 } catch (ActivityNotFoundException e) {
@@ -229,6 +244,26 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+
+        if (requestCode == CAMERA_CAPTURE_REQUEST) {
+            // ACTION_IMAGE_CAPTURE hands the photo back via pendingCameraUri
+            // (set as EXTRA_OUTPUT in startCameraCapture), not through `data`.
+            Uri[] results = null;
+            if (resultCode == RESULT_OK && pendingCameraUri != null) {
+                results = new Uri[]{pendingCameraUri};
+            } else if (pendingCameraUri != null) {
+                // Cancelled/failed — drop the empty MediaStore row we
+                // pre-inserted rather than leaving a blank gallery entry.
+                getContentResolver().delete(pendingCameraUri, null, null);
+            }
+            pendingCameraUri = null;
+            if (filePathCallback != null) {
+                filePathCallback.onReceiveValue(results);
+                filePathCallback = null;
+            }
+            return;
+        }
+
         if (requestCode != FILE_CHOOSER_REQUEST || filePathCallback == null) return;
 
         Uri[] results = null;
@@ -249,6 +284,46 @@ public class MainActivity extends Activity {
         }
         filePathCallback.onReceiveValue(results);
         filePathCallback = null;
+    }
+
+    private static boolean acceptsImages(String[] acceptTypes) {
+        if (acceptTypes == null) return false;
+        for (String type : acceptTypes) {
+            if (type != null && type.startsWith("image/")) return true;
+        }
+        return false;
+    }
+
+    // Launches the system camera app directly via ACTION_IMAGE_CAPTURE,
+    // writing straight to a MediaStore-issued content:// Uri (no FileProvider/
+    // AndroidX needed — MediaStore itself is a content provider the camera app
+    // can already write to). The photo lands in the device's normal Pictures/
+    // Notes gallery folder as a side effect, same as any other camera shot.
+    // Returns false (nothing started) if there's no camera app or the insert
+    // fails, so the caller can fall back to the generic chooser.
+    private boolean startCameraCapture() {
+        Intent captureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        if (captureIntent.resolveActivity(getPackageManager()) == null) return false;
+
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, "note_" + System.currentTimeMillis() + ".jpg");
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Notes");
+        }
+        Uri target = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        if (target == null) return false;
+
+        captureIntent.putExtra(MediaStore.EXTRA_OUTPUT, target);
+        captureIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        try {
+            startActivityForResult(captureIntent, CAMERA_CAPTURE_REQUEST);
+        } catch (ActivityNotFoundException e) {
+            getContentResolver().delete(target, null, null);
+            return false;
+        }
+        pendingCameraUri = target;
+        return true;
     }
 
     private Uri saveCapturedThumbnail(Bitmap bitmap) {
