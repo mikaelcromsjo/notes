@@ -34,7 +34,10 @@ import java.nio.charset.StandardCharsets;
  * handles notes.ia-ai.se (the installed PWA, or a browser) — this app has no
  * WebView of its own to open it in. Colours come live from the account's
  * actual app theme (WidgetTheme) — see that class for what can and can't
- * carry over into a RemoteViews widget.
+ * carry over into a RemoteViews widget. The last outer cell doubles as an
+ * "update available" tile (opening SettingsActivity) whenever UpdateChecker
+ * has found one — this is the only place that's visible without already
+ * having Settings open.
  */
 public class GridWidgetProvider extends AppWidgetProvider {
 
@@ -214,8 +217,26 @@ public class GridWidgetProvider extends AppWidgetProvider {
             int neighborCount = neighbors != null ? neighbors.length() : 0;
             int neighborIndex = 0;
 
+            // The last outer slot is reserved for an "update available" tile
+            // whenever UpdateChecker (checked in the background off this same
+            // widget's onUpdate, see below) has found one — this is the only
+            // place a pending update is visible without already having
+            // Settings open, so it's worth a note-grid cell rather than
+            // staying silent until the next notification or Settings visit.
+            UpdateChecker.PendingUpdate pendingUpdate = UpdateChecker.pendingUpdate(context);
+            int updateSlot = pendingUpdate != null ? OUTER_SLOTS[OUTER_SLOTS.length - 1] : -1;
+
             for (int slot : OUTER_SLOTS) {
                 int cellId = CELL_IDS[slot];
+
+                if (slot == updateSlot) {
+                    theme.applyToCell(views, cellId, true);
+                    views.setTextViewText(cellId, "⬆ Update available");
+                    views.setOnClickPendingIntent(cellId,
+                            PendingIntent.getActivity(context, widgetId * 100 + slot, settingsIntent(context), flags));
+                    continue;
+                }
+
                 JSONObject note = null;
                 if (slot == BACK_SLOT && parent != null) {
                     note = parent;
