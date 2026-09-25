@@ -9,8 +9,8 @@ const { extractTags } = require('./tags');
 // most of the user's reminders, else UTC.
 
 const remindersStmt = db.prepare(
-  `SELECT r.id, r.note_id, r.kind, r.time, r.days, r.date, r.radius_m, r.tz,
-          r.snooze_until, r.next_at, n.title
+  `SELECT r.id, r.note_id, r.kind, r.time, r.days, r.date, r.radius_m,
+          r.window_start, r.window_end, r.tz, r.snooze_until, r.next_at, n.title
    FROM reminders r JOIN notes n ON n.id = r.note_id
    WHERE r.user_id = ? AND n.status != 'deleted'`
 );
@@ -89,6 +89,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   const today = dayIndexInZone(now, zone);
 
   const buckets = { overdue: [], today: [], week: [], later: [] };
+  const nudges = []; // kind='anytime' — see below, kept out of the buckets above
   for (const r of rows) {
     const snoozed = r.snooze_until && Date.parse(r.snooze_until) > nowMs;
     const dueIso = snoozed ? r.snooze_until : r.next_at;
@@ -102,9 +103,23 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
       kind: r.kind || 'time',
       time: r.time,
       radiusM: r.radius_m,
+      windowStart: r.window_start,
+      windowEnd: r.window_end,
       dueAt: dueIso,
       snoozed: !!snoozed,
     };
+
+    // kind='anytime' has no committed clock time (a day pattern + window,
+    // see db.js) — bucketing it as "Overdue"/"Today" the same as a real
+    // clock-time reminder would misrepresent something deliberately left
+    // untimed. It gets its own list instead, due ones first (mirrors
+    // public/app.js's openAgenda 'Nudges' section) — every consumer
+    // (digest.js, routes/widget.js) decides for itself whether/how to show it.
+    if (item.kind === 'anytime') {
+      nudges.push({ ...item, due: !snoozed && dueMs <= nowMs });
+      continue;
+    }
+
     if (!snoozed && dueMs <= nowMs) {
       buckets.overdue.push(item);
       continue;
@@ -117,6 +132,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   for (const k of Object.keys(buckets)) {
     buckets[k].sort((a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt));
   }
+  nudges.sort((a, b) => Number(b.due) - Number(a.due) || Date.parse(a.dueAt) - Date.parse(b.dueAt));
 
   const openTasks = [];
   for (const n of taskNotesStmt.all(userId)) {
@@ -140,6 +156,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
     generatedAt: now.toISOString(),
     tz: zone,
     reminders: buckets,
+    nudges,
     todos,
     openTasks: openTasks.slice(0, OPEN_TASKS_LIMIT),
     orphans,

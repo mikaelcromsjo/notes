@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The nudge widget's crossfade-in, paired with nudge_fade_out.xml on the
+     ViewFlipper's android:inAnimation/outAnimation (widget_nudge*.xml) —
+     ViewFlipper is one of the few views classic RemoteViews lets you
+     setDisplayedChild() on and have the host actually run these XML
+     Animations, so this is the real crossfade the nudge widget rotates
+     through, not a fake/approximated one. -->
+<alpha xmlns:android="http://schemas.android.com/apk/res/android"
+    android:fromAlpha="0.0"
+    android:toAlpha="1.0"
+    android:duration="450" />

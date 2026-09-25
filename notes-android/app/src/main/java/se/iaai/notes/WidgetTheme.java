@@ -134,6 +134,12 @@ class WidgetTheme {
         return R.layout.widget_agenda_row;
     }
 
+    int nudgeLayout() {
+        if ("mono".equals(font)) return R.layout.widget_nudge_mono;
+        if ("lora".equals(font)) return R.layout.widget_nudge_serif;
+        return R.layout.widget_nudge;
+    }
+
     void applyToGridRoot(RemoteViews views) {
         views.setInt(R.id.widget_root, "setBackgroundColor", bg);
     }
@@ -145,6 +151,24 @@ class WidgetTheme {
         } else {
             views.setInt(cellId, "setBackgroundColor", surface);
             views.setTextColor(cellId, text);
+        }
+    }
+
+    // NudgeWidgetProvider's single rotating tile. `active` mirrors
+    // GridWidgetProvider's centre-cell treatment (accent background, its own
+    // contrast colour) for "here's a due nudge" vs. the quieter surface/muted
+    // pairing for the informational states (not set up, nothing due, error).
+    void applyToNudgeRoot(RemoteViews views) {
+        views.setInt(R.id.widget_root, "setBackgroundColor", bg);
+    }
+
+    void applyToNudgeTile(RemoteViews views, int textViewId, boolean active) {
+        if (active) {
+            views.setInt(textViewId, "setBackgroundColor", accent);
+            views.setTextColor(textViewId, accentContrast);
+        } else {
+            views.setInt(textViewId, "setBackgroundColor", surface);
+            views.setTextColor(textViewId, muted);
         }
     }
 

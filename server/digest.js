@@ -20,15 +20,22 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
   const a = buildAgenda(userId, { tz, now });
   const { overdue, today, week } = a.reminders;
   const todos = a.todos || [];
+  const nudges = a.nudges || [];
   const counts = {
     overdue: overdue.length,
     today: today.length,
     week: week.length,
     todos: todos.length,
     openTasks: a.openTasks.length,
-    // Not part of isEmpty below — orphans are a bonus while a digest is
-    // already going out, not on their own worth triggering one.
+    // Not part of isEmpty below — orphans (and, same reasoning, nudges) are a
+    // bonus while a digest is already going out, not on their own worth
+    // triggering one. Nudges (kind='anytime') never push on their own either
+    // (alarm-scheduler.js) — keeping them out of isEmpty and the compact
+    // push/email body (digestPush/digestText/digestHtml below only read
+    // overdue/today/week) matches that same "never the reason it fires,
+    // never a bare alert" contract, not just a coincidence of this count.
     orphans: a.orphans.length,
+    nudges: nudges.length,
   };
   return {
     generatedAt: a.generatedAt,
@@ -39,6 +46,7 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
     todos,
     openTasks: a.openTasks,
     orphans: a.orphans,
+    nudges,
     counts,
     isEmpty:
       counts.overdue + counts.today + counts.week + counts.todos + counts.openTasks === 0,
@@ -49,10 +57,13 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+// kind='anytime' ("nudge") reminders are excluded here — they have no
+// rhythm to report (reminderRhythm below would just show blank/bare days) and
+// already get their own page section, sourced from buildDigest's `nudges`.
 const allRemindersStmt = db.prepare(
   `SELECT r.id, r.note_id, r.time, r.days, r.date, r.snooze_until, r.next_at, n.title
    FROM reminders r JOIN notes n ON n.id = r.note_id
-   WHERE r.user_id = ? AND n.status != 'deleted'
+   WHERE r.user_id = ? AND n.status != 'deleted' AND r.kind != 'anytime'
    ORDER BY r.time ASC, n.title ASC`
 );
 
@@ -80,6 +91,13 @@ function whenLabel(item) {
   const dt = new Date(item.dueAt);
   if (Number.isNaN(dt.getTime())) return '';
   return `${dt.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })} ${item.time || ''}`.trim();
+}
+
+// kind='anytime' has no clock instant worth formatting as a date/time — just
+// the window it's allowed to land in, plus whether it's currently due.
+function nudgeLabel(item) {
+  const range = `${item.windowStart || ''}–${item.windowEnd || ''}`;
+  return item.due ? `due · sometime ${range}` : `sometime ${range}`;
 }
 
 function summaryLine(d, cadence) {
@@ -217,6 +235,11 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
       'All reminders',
       (page.allReminders || []).map((r) => L(r, r.snoozed ? `${r.rhythm} · snoozed` : r.rhythm))
     ) +
+    // "Nudges" — kind='anytime' reminders, kept separate from the sections
+    // above for the same reason the in-app agenda splits them out (see
+    // public/app.js's openAgenda): no committed clock time to be "Overdue"/
+    // "Today"/rhythm-labelled about.
+    pageSection('Nudges', (page.nudges || []).map((r) => L(r, nudgeLabel(r)))) +
     pageSection(
       'Orphans',
       (page.orphans || []).map((o) => L({ noteId: o.noteId, title: o.title }, ''))

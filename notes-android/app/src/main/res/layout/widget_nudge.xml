@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A single rotating tile: NudgeWidgetProvider picks one due kind='anytime'
+     reminder (server/routes/widget.js's ?mode=nudge) per 30-min refresh and
+     crossfades it in via the ViewFlipper below (setDisplayedChild + the
+     nudge_fade_in/out Animations) — see NudgeWidgetProvider for the actual
+     round-robin/flip bookkeeping. Two children, not one: a ViewFlipper
+     crossfades *between* its children, so alternating which one holds the
+     freshly-set text is what makes the transition visible at all. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/widget_background"
+    android:padding="4dp">
+
+    <ViewFlipper
+        android:id="@+id/nudge_flipper"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:inAnimation="@anim/nudge_fade_in"
+        android:outAnimation="@anim/nudge_fade_out">
+
+        <TextView
+            android:id="@+id/nudge_text_0"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:padding="8dp"
+            android:maxLines="4"
+            android:ellipsize="end"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/nudge_text_1"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:padding="8dp"
+            android:maxLines="4"
+            android:ellipsize="end"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+    </ViewFlipper>
+
+</FrameLayout>

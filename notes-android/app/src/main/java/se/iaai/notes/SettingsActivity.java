@@ -90,6 +90,7 @@ public class SettingsActivity extends Activity {
             tokenInput.setText(token); // reflect the extracted bare token back, not the pasted URL
             GridWidgetProvider.requestUpdateAll(this);
             AgendaWidgetProvider.requestUpdateAll(this);
+            NudgeWidgetProvider.requestUpdateAll(this);
             status.setText("Connected — widgets updating.");
             Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show();
         });

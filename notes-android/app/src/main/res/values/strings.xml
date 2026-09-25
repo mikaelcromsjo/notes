@@ -4,4 +4,5 @@
     <string name="base_url">https://notes.ia-ai.se</string>
     <string name="widget_agenda_label">Notes: Agenda</string>
     <string name="widget_grid_label">Notes: Grid</string>
+    <string name="widget_nudge_label">Notes: Nudge</string>
 </resources>

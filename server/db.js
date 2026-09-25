@@ -356,6 +356,22 @@ if (!reminderColumns.some((c) => c.name === 'radius_m')) {
   db.exec('ALTER TABLE reminders ADD COLUMN radius_m INTEGER');
 }
 
+// kind='anytime': a soft, untimed "nudge" — a day pattern (days/date, same as
+// kind='time') but no clock minute the user committed to; time is stored as ''
+// like kind='location'. window_start/window_end (HH:MM) bound the day-part the
+// client is allowed to pick a fire minute from — the actual minute is chosen
+// client-side per occurrence (server/db.js has no notion of it, same "server
+// never computes fire times" split as everything else here) so it lands
+// somewhere different each day rather than calcifying into a fixed time.
+// Surfaced only in-app (toast/agenda/tint) — server/alarm-scheduler.js
+// deliberately never pushes for this kind, so it never rings as a hard alarm.
+if (!reminderColumns.some((c) => c.name === 'window_start')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN window_start TEXT');
+}
+if (!reminderColumns.some((c) => c.name === 'window_end')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN window_end TEXT');
+}
+
 // One-time backfill of every armed notes.alarm_* row into reminders. Shares the
 // user_version counter with the FTS rebuild above (1 = FTS built); to force
 // either again bump past 2 and adjust the matching guard.

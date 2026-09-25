@@ -24,6 +24,8 @@ function serialize(r) {
     lat: r.lat,
     lon: r.lon,
     radiusM: r.radius_m,
+    windowStart: r.window_start,
+    windowEnd: r.window_end,
     tz: r.tz,
     ackAt: r.ack_at,
     nextAt: r.next_at,
@@ -32,17 +34,18 @@ function serialize(r) {
 }
 
 const COLS = `r.id, r.note_id, r.kind, r.time, r.days, r.date, r.lat, r.lon, r.radius_m,
-              r.tz, r.ack_at, r.next_at, r.snooze_until, n.title`;
+              r.window_start, r.window_end, r.tz, r.ack_at, r.next_at, r.snooze_until, n.title`;
 
 const selectOne = db.prepare(
   `SELECT ${COLS} FROM reminders r JOIN notes n ON n.id = r.note_id
    WHERE r.id = ? AND r.user_id = ?`
 );
 
-// Validate the shared reminder body. Returns { time, days, date } or { error }.
-function parseSchedule(body) {
-  const { time, days, date } = body || {};
-  if (!time || !/^\d{2}:\d{2}$/.test(time)) return { error: 'time must be HH:MM' };
+// The day-pattern half shared by kind='time' and kind='anytime': either repeat
+// days (CSV of JS getDay() numbers) or a one-time date, never neither. Returns
+// { days, date } or { error }.
+function parseDayPattern(body) {
+  const { days, date } = body || {};
   const daysStr = Array.isArray(days)
     ? [...new Set(days.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
         .sort((a, b) => a - b)
@@ -51,7 +54,29 @@ function parseSchedule(body) {
   const dateStr =
     !daysStr && typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
   if (!daysStr && !dateStr) return { error: 'pick repeat days or a one-time date' };
-  return { time, days: daysStr, date: dateStr };
+  return { days: daysStr, date: dateStr };
+}
+
+// Validate the shared reminder body. Returns { time, days, date } or { error }.
+function parseSchedule(body) {
+  const { time } = body || {};
+  if (!time || !/^\d{2}:\d{2}$/.test(time)) return { error: 'time must be HH:MM' };
+  const pattern = parseDayPattern(body);
+  if (pattern.error) return pattern;
+  return { time, days: pattern.days, date: pattern.date };
+}
+
+// kind='anytime': a day pattern (see parseDayPattern) plus the HH:MM-HH:MM
+// window the client is allowed to pick a fire minute from — no committed
+// clock time. Returns { days, date, windowStart, windowEnd } or { error }.
+function parseNudge(body) {
+  const { windowStart, windowEnd } = body || {};
+  if (!windowStart || !/^\d{2}:\d{2}$/.test(windowStart)) return { error: 'windowStart must be HH:MM' };
+  if (!windowEnd || !/^\d{2}:\d{2}$/.test(windowEnd)) return { error: 'windowEnd must be HH:MM' };
+  if (windowEnd <= windowStart) return { error: 'windowEnd must be after windowStart' };
+  const pattern = parseDayPattern(body);
+  if (pattern.error) return pattern;
+  return { days: pattern.days, date: pattern.date, windowStart, windowEnd };
 }
 
 // A geofence reminder (kind='location'): a circle, no clock. Returns
@@ -100,6 +125,22 @@ router.post('/', (req, res) => {
     return res.status(201).json(serialize(selectOne.get(info.lastInsertRowid, req.userId)));
   }
 
+  if (req.body && req.body.kind === 'anytime') {
+    const nudge = parseNudge(req.body);
+    if (nudge.error) return res.status(400).json({ error: nudge.error });
+    const ack = validTs(req.body.ackAt) ? req.body.ackAt : now();
+    const info = db
+      .prepare(
+        `INSERT INTO reminders (note_id, user_id, kind, time, days, date, window_start, window_end, tz, ack_at, next_at)
+         VALUES (?, ?, 'anytime', '', ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        note.id, req.userId, nudge.days, nudge.date, nudge.windowStart, nudge.windowEnd,
+        tzOf(req.body), ack, tsOrNull(req.body.nextAt)
+      );
+    return res.status(201).json(serialize(selectOne.get(info.lastInsertRowid, req.userId)));
+  }
+
   const s = parseSchedule(req.body);
   if (s.error) return res.status(400).json({ error: s.error });
 
@@ -124,11 +165,28 @@ router.put('/:id', (req, res) => {
     db.prepare(
       `UPDATE reminders
        SET kind = 'location', time = '', days = '', date = NULL,
-           lat = ?, lon = ?, radius_m = ?, tz = ?, ack_at = ?,
-           next_at = NULL, pushed_at = NULL, snooze_until = NULL
+           lat = ?, lon = ?, radius_m = ?, window_start = NULL, window_end = NULL,
+           tz = ?, ack_at = ?, next_at = NULL, pushed_at = NULL, snooze_until = NULL
        WHERE id = ? AND user_id = ?`
     ).run(loc.lat, loc.lon, loc.radiusM, tzOf(req.body, existing.tz), now(),
           req.params.id, req.userId);
+    return res.json(serialize(selectOne.get(req.params.id, req.userId)));
+  }
+
+  if (req.body && req.body.kind === 'anytime') {
+    const nudge = parseNudge(req.body);
+    if (nudge.error) return res.status(400).json({ error: nudge.error });
+    const ack = validTs(req.body.ackAt) ? req.body.ackAt : now();
+    db.prepare(
+      `UPDATE reminders
+       SET kind = 'anytime', time = '', days = ?, date = ?, lat = NULL, lon = NULL, radius_m = NULL,
+           window_start = ?, window_end = ?, tz = ?, ack_at = ?, next_at = ?,
+           pushed_at = NULL, snooze_until = NULL
+       WHERE id = ? AND user_id = ?`
+    ).run(
+      nudge.days, nudge.date, nudge.windowStart, nudge.windowEnd, tzOf(req.body, existing.tz),
+      ack, tsOrNull(req.body.nextAt), req.params.id, req.userId
+    );
     return res.json(serialize(selectOne.get(req.params.id, req.userId)));
   }
 
@@ -139,6 +197,7 @@ router.put('/:id', (req, res) => {
   db.prepare(
     `UPDATE reminders
      SET kind = 'time', time = ?, days = ?, date = ?, lat = NULL, lon = NULL, radius_m = NULL,
+         window_start = NULL, window_end = NULL,
          tz = ?, ack_at = ?, next_at = ?, pushed_at = NULL, snooze_until = NULL
      WHERE id = ? AND user_id = ?`
   ).run(s.time, s.days, s.date, tzOf(req.body, existing.tz), ack, tsOrNull(req.body.nextAt),

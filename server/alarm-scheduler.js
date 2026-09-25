@@ -9,6 +9,9 @@ const { sendToUser } = require('./webpush');
 // is open (and resets pushed_at), which re-arms this.
 const TICK_MS = 30 * 1000;
 
+// kind='anytime' (a soft, untimed "nudge" — see db.js) is deliberately excluded:
+// it's surfaced only in-app (a session toast, the agenda, grid/tab tint), never
+// as an OS push — that's the whole point of it being the *soft* reminder kind.
 const dueStmt = db.prepare(
   `SELECT r.id, r.note_id, r.user_id, r.kind,
           COALESCE(r.snooze_until, r.next_at) AS due_at,
@@ -17,6 +20,7 @@ const dueStmt = db.prepare(
    JOIN notes n ON n.id = r.note_id
    WHERE COALESCE(r.snooze_until, r.next_at) IS NOT NULL
      AND n.status != 'deleted'
+     AND r.kind != 'anytime'
      AND COALESCE(r.snooze_until, r.next_at) <= ?
      AND (r.pushed_at IS NULL OR r.pushed_at < COALESCE(r.snooze_until, r.next_at))`
 );

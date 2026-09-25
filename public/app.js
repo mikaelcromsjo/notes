@@ -80,6 +80,9 @@
   const alarmDateInput = document.getElementById('alarm-date-input');
   const alarmKindRow = document.getElementById('alarm-kind-row');
   const alarmTimeFields = document.getElementById('alarm-time-fields');
+  const alarmWindowFields = document.getElementById('alarm-window-fields');
+  const alarmWindowStartInput = document.getElementById('alarm-window-start-input');
+  const alarmWindowEndInput = document.getElementById('alarm-window-end-input');
   const alarmPlaceFields = document.getElementById('alarm-place-fields');
   const alarmRadiusInput = document.getElementById('alarm-radius-input');
   const alarmLocReadout = document.getElementById('alarm-loc-readout');
@@ -159,7 +162,10 @@
   }
 
   // --- In-app replacements for native alert()/confirm() ---
-  function toast(msg) {
+  // `onClick` (the nudge toast) makes it tappable and gives it longer to be
+  // noticed than a plain fire-and-forget toast; `duration` overrides the
+  // default dismiss delay.
+  function toast(msg, { onClick, duration = 2600 } = {}) {
     let host = document.getElementById('toast-host');
     if (!host) {
       host = document.createElement('div');
@@ -167,14 +173,16 @@
       document.body.appendChild(host);
     }
     const el = document.createElement('div');
-    el.className = 'toast';
+    el.className = 'toast' + (onClick ? ' toast-tap' : '');
     el.textContent = msg;
-    host.appendChild(el);
-    requestAnimationFrame(() => el.classList.add('show'));
-    setTimeout(() => {
+    const dismiss = () => {
       el.classList.remove('show');
       setTimeout(() => el.remove(), 200);
-    }, 2600);
+    };
+    if (onClick) el.addEventListener('click', () => { dismiss(); onClick(); });
+    host.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(dismiss, duration);
   }
 
   function confirmDialog(message, { confirmLabel = 'OK', danger = false } = {}) {
@@ -1618,12 +1626,24 @@
       return {
         kind: 'location', time: '', days: [], date: null,
         lat: b.lat, lon: b.lon, radiusM: b.radiusM || 250,
+        windowStart: null, windowEnd: null,
         tz: b.tz || null, nextAt: null, snoozeUntil: null,
+      };
+    }
+    if (b && b.kind === 'anytime') {
+      return {
+        kind: 'anytime', time: '', days: b.days || [], date: b.date || null,
+        lat: null, lon: null, radiusM: null,
+        windowStart: b.windowStart, windowEnd: b.windowEnd,
+        tz: b.tz || null,
+        ackAt: b.ackAt || new Date().toISOString(),
+        nextAt: b.nextAt || null, snoozeUntil: null,
       };
     }
     return {
       kind: 'time', time: b.time, days: b.days || [], date: b.date || null,
-      lat: null, lon: null, radiusM: null, tz: b.tz || null,
+      lat: null, lon: null, radiusM: null, windowStart: null, windowEnd: null,
+      tz: b.tz || null,
       ackAt: b.ackAt || new Date().toISOString(),
       nextAt: b.nextAt || null, snoozeUntil: null,
     };
@@ -1633,17 +1653,20 @@
     const b = p.body || {};
     const note = allNotesCache.find((n) => n.id === p.noteId);
     const loc = b.kind === 'location';
+    const nudge = b.kind === 'anytime';
     return {
       id: p.tmpId,
       noteId: p.noteId,
       title: (note && note.title) || 'Reminder',
-      kind: loc ? 'location' : 'time',
-      time: loc ? '' : b.time,
+      kind: loc ? 'location' : nudge ? 'anytime' : 'time',
+      time: loc || nudge ? '' : b.time,
       days: loc ? [] : b.days || [],
       date: loc ? null : b.date || null,
       lat: loc ? b.lat : null,
       lon: loc ? b.lon : null,
       radiusM: loc ? b.radiusM || 250 : null,
+      windowStart: nudge ? b.windowStart : null,
+      windowEnd: nudge ? b.windowEnd : null,
       tz: b.tz || null,
       ackAt: b.ackAt || new Date().toISOString(),
       nextAt: b.nextAt || null,
@@ -2169,17 +2192,52 @@
   const ALARM_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const ALARM_DAY_NUM = [1, 2, 3, 4, 5, 6, 0]; // JS getDay() for each chip
 
+  // A small deterministic hash -> [0,1), so the same reminder + calendar day
+  // always agrees on its picked minute (checkAlarms polls every 30s and must
+  // not keep sliding the target forward), while a different day lands at a
+  // different point in the window — a kind='anytime' reminder doesn't quietly
+  // calcify into a fixed-time one just because it always resolves the same way.
+  function seededFraction(seedStr) {
+    let h = 0;
+    for (let i = 0; i < seedStr.length; i += 1) h = (Math.imul(h, 31) + seedStr.charCodeAt(i)) | 0;
+    h = Math.imul(h ^ (h >>> 15), 1 | h);
+    h ^= h + Math.imul(h ^ (h >>> 7), 61 | h);
+    return ((h ^ (h >>> 14)) >>> 0) / 4294967296;
+  }
+
+  function parseHHMM(s) {
+    if (!s || !/^\d{2}:\d{2}$/.test(s)) return null;
+    const [h, m] = s.split(':').map(Number);
+    return h * 60 + m;
+  }
+
+  // The [h, m] a reminder lands on for calendar day `d`: the committed clock
+  // time for kind='time', or — for kind='anytime' — a minute picked
+  // pseudo-randomly (but stably, see seededFraction) from [windowStart, windowEnd).
+  function hmForAlarmDay(a, d) {
+    if (a.kind !== 'anytime') {
+      const [h, m] = (a.time || '00:00').split(':').map(Number);
+      return [h, m];
+    }
+    const startM = parseHHMM(a.windowStart) ?? 8 * 60;
+    const endM = Math.max(startM + 1, parseHHMM(a.windowEnd) ?? 21 * 60);
+    const dayKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const mins = startM + Math.floor(seededFraction(`${a.id}:${dayKey}`) * (endM - startM));
+    return [Math.floor(mins / 60), mins % 60];
+  }
+
   // Most recent scheduled datetime at or before `ref`, in the viewer's local
   // timezone, or null if none applies. Mirrors the (now removed) server logic —
   // computed here so "07:00" means 07:00 where the user is, not on the server.
   function mostRecentAlarmTrigger(a, ref) {
-    if (!a.time || !/^\d{2}:\d{2}$/.test(a.time)) return null;
-    const [h, m] = a.time.split(':').map(Number);
+    if (a.kind !== 'anytime' && (!a.time || !/^\d{2}:\d{2}$/.test(a.time))) return null;
+    if (a.kind === 'anytime' && (!a.windowStart || !a.windowEnd)) return null;
 
     if (a.days && a.days.length) {
       for (let back = 0; back < 8; back += 1) {
         const d = new Date(ref);
         d.setDate(d.getDate() - back);
+        const [h, m] = hmForAlarmDay(a, d);
         d.setHours(h, m, 0, 0);
         if (d > ref) continue;
         if (a.days.includes(d.getDay())) return d;
@@ -2188,7 +2246,9 @@
     }
 
     if (a.date && /^\d{4}-\d{2}-\d{2}$/.test(a.date)) {
-      const d = new Date(`${a.date}T${a.time}:00`);
+      const d = new Date(`${a.date}T00:00:00`);
+      const [h, m] = hmForAlarmDay(a, d);
+      d.setHours(h, m, 0, 0);
       return d <= ref ? d : null;
     }
     return null;
@@ -2250,13 +2310,14 @@
   // null (a one-time alarm whose date/time has already passed). Sent to the
   // server as an absolute instant so the push scheduler knows when to ring.
   function nextAlarmOccurrence(a, ref) {
-    if (!a.time || !/^\d{2}:\d{2}$/.test(a.time)) return null;
-    const [h, m] = a.time.split(':').map(Number);
+    if (a.kind !== 'anytime' && (!a.time || !/^\d{2}:\d{2}$/.test(a.time))) return null;
+    if (a.kind === 'anytime' && (!a.windowStart || !a.windowEnd)) return null;
 
     if (a.days && a.days.length) {
       for (let fwd = 0; fwd < 8; fwd += 1) {
         const d = new Date(ref);
         d.setDate(d.getDate() + fwd);
+        const [h, m] = hmForAlarmDay(a, d);
         d.setHours(h, m, 0, 0);
         if (d <= ref) continue;
         if (a.days.includes(d.getDay())) return d;
@@ -2265,7 +2326,9 @@
     }
 
     if (a.date && /^\d{4}-\d{2}-\d{2}$/.test(a.date)) {
-      const d = new Date(`${a.date}T${a.time}:00`);
+      const d = new Date(`${a.date}T00:00:00`);
+      const [h, m] = hmForAlarmDay(a, d);
+      d.setHours(h, m, 0, 0);
       return d > ref ? d : null;
     }
     return null;
@@ -2275,6 +2338,18 @@
 
   function alarmWhenText(a) {
     if (a.kind === 'location') return `📍 On arrival · ${a.radiusM || 250} m`;
+    if (a.kind === 'anytime') {
+      const range = `${a.windowStart || ''}–${a.windowEnd || ''}`;
+      if (a.days && a.days.length) {
+        if (a.days.length === 7) return `🌊 Sometime daily · ${range}`;
+        const labels = ALARM_DAY_NUM.map((num, i) => (a.days.includes(num) ? ALARM_DAYS[i] : null)).filter(
+          Boolean
+        );
+        return `🌊 ${labels.join(' ')} · sometime ${range}`;
+      }
+      if (a.date) return `🌊 ${a.date} · sometime ${range}`;
+      return `🌊 Sometime · ${range}`;
+    }
     if (a.days && a.days.length) {
       if (a.days.length === 7) return `Every day · ${a.time}`;
       const labels = ALARM_DAY_NUM.map((num, i) => (a.days.includes(num) ? ALARM_DAYS[i] : null)).filter(
@@ -4212,7 +4287,7 @@
       const tabsList = await api.listTabs();
       await refreshFromTabs(tabsList);
       if (deepLinkHashId && deepLinkHashId !== currentId) await goTo(deepLinkHashId, 'hash');
-      await checkAlarms();
+      await checkAlarms({ nudge: true });
       warmCache(); // background; never blocks first render
     } catch (err) {
       // Any unhandled throw in this chain (most likely an offline edge case)
@@ -4229,9 +4304,11 @@
     setInterval(() => flushOutbox(), 30000);
     // Re-check the moment the app is foregrounded again — a backgrounded PWA's
     // timers are throttled, so an alarm that came due while away rings now.
+    // Foregrounding also counts as a fresh "session" for the nudge toast.
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
-        checkAlarms();
+        nudgeToastShown = false;
+        checkAlarms({ nudge: true });
         flushOutbox();
       }
     });
@@ -5552,10 +5629,12 @@
     const underHere = new Set(subtreeIds);
 
     alarmbar.innerHTML = '';
-    // Location reminders have no clock — `⏰ ${a.time} ${a.title}` would read
-    // as a broken chip with a blank time. They're surfaced via the map and
-    // agenda instead, not this time-based bar.
-    const scheduled = alarms.filter((a) => a.kind !== 'location' && underHere.has(a.noteId));
+    // Location and anytime reminders have no single committed clock time —
+    // `⏰ ${a.time} ${a.title}` would read as a broken chip with a blank time.
+    // They're surfaced via the map/toast/agenda instead, not this time-based bar.
+    const scheduled = alarms.filter(
+      (a) => a.kind !== 'location' && a.kind !== 'anytime' && underHere.has(a.noteId)
+    );
     alarmbar.classList.toggle('hidden', scheduled.length === 0 || !barPrefs.alarms);
 
     scheduled.forEach((a) => {
@@ -5575,11 +5654,37 @@
     });
   }
 
+  // The soft surface for kind='anytime' reminders: at most one per session (the
+  // flag resets on each foreground-resume — see init()/visibilitychange), a
+  // random pick among whatever's due, tap-to-open. Skipped while the note
+  // editor is open so it can never interrupt typing/reading. Deliberately not
+  // a hard popup/push — see checkAlarms' `ringing` filter and
+  // alarm-scheduler.js for the other halves of that same "soft" contract.
+  let nudgeToastShown = false;
+  function maybeShowNudgeToast() {
+    if (nudgeToastShown) return;
+    if (!noteOverlay.classList.contains('hidden')) return;
+    const due = alarms.filter((a) => a.kind === 'anytime' && a.triggered);
+    if (!due.length) return;
+    nudgeToastShown = true;
+    const pick = due[Math.floor(Math.random() * due.length)];
+    toast(`🌊 ${pick.title}?`, {
+      duration: 6000,
+      onClick: async () => {
+        await api.ackAlarm(pick.id, isoOrNull(nextAlarmOccurrence(pick, new Date())));
+        await checkAlarms({ popup: false });
+        jumpTo(pick.noteId, 'nudge');
+      },
+    });
+  }
+
   // Fetch alarms, decide (in the viewer's timezone) which are ringing, repaint
   // the triggered tint, roll each alarm's next-ring instant forward on the
   // server so the push scheduler stays armed, and surface the popup /
-  // notification for anything newly due.
-  async function checkAlarms({ popup = true } = {}) {
+  // notification for anything newly due. `nudge: true` additionally offers one
+  // due kind='anytime' reminder as a session toast (see maybeShowNudgeToast) —
+  // only passed at startup/foreground-resume, never the 30s background poll.
+  async function checkAlarms({ popup = true, nudge = false } = {}) {
     const ref = new Date();
     alarms = (await api.listAlarms()).map((a) => ({ ...a, triggered: alarmTriggered(a, ref) }));
 
@@ -5603,6 +5708,9 @@
     // scheduler); offline the reconnect does a fresh checkAlarms that catches up.
     if (net.online) {
       for (const a of alarms) {
+        // Location reminders carry no clock (arms via /arrive); kind='anytime'
+        // has one, but a fresh random minute is fine to compute repeatedly
+        // (hmForAlarmDay is seeded per-day, so this is a no-op most polls).
         if (a.kind === 'location' || isTmp(a.id)) continue;
         if (a.snoozeUntil && new Date(a.snoozeUntil) > ref) continue;
         const want = isoOrNull(nextAlarmOccurrence(a, ref));
@@ -5620,11 +5728,16 @@
       if (!agendaOverlay.classList.contains('hidden')) openAgenda();
     }
 
-    const ringing = alarms.filter((a) => a.triggered && !alarmDismissed.has(a.id));
+    // kind='anytime' is excluded here — it's the *soft* reminder kind (see
+    // db.js/alarm-scheduler.js): grid/tab/pin tint and the agenda still pick it
+    // up via `triggered` above, but it never opens the hard "⏰ Alarm" popup or
+    // a foreground Notification. Its own surface is maybeShowNudgeToast, below.
+    const ringing = alarms.filter((a) => a.triggered && a.kind !== 'anytime' && !alarmDismissed.has(a.id));
     // Auto-open only at startup or when something newly fired — not on every
     // poll while an alarm sits unacknowledged (the bar/grid tint show that).
     if (popup && changed && ringing.length) showAlarmPopup(ringing);
     notifyAlarms(ringing);
+    if (nudge) maybeShowNudgeToast();
   }
 
   // Foreground fallback notification (the server push covers the background
@@ -5784,9 +5897,13 @@
     const w = document.createElement('div');
     w.className = 'agenda-when';
     const snoozed = a.snoozeUntil && new Date(a.snoozeUntil) > new Date();
+    // kind='anytime' always reads as "🌊 Sometime 08:00–21:00" (alarmWhenText)
+    // rather than the resolved clock instant (agendaWhenText) — it's in its
+    // own end-of-agenda section regardless of overdue, so `overdue` here is
+    // only ever true for a real time/location reminder.
     w.textContent = snoozed
       ? `Snoozed · ${agendaWhenText(a.fireAt)}`
-      : overdue
+      : overdue || a.kind === 'anytime'
         ? alarmWhenText(a)
         : agendaWhenText(a.fireAt);
     info.appendChild(t);
@@ -5893,6 +6010,11 @@
 
     const buckets = { overdue: [], today: [], week: [], later: [] };
     for (const a of list) {
+      // kind='anytime' has no committed clock time to bucket by — showing it
+      // as "Overdue"/"Today" would misrepresent a reminder that was
+      // deliberately left untimed. It gets its own section at the end instead
+      // (see the 'Nudges' block below), whether due or not.
+      if (a.kind === 'anytime') continue;
       if (a.triggered) {
         buckets.overdue.push(a);
         continue;
@@ -6009,6 +6131,20 @@
       orphans.forEach((o) => agendaBody.appendChild(todoRow(o)));
     }
 
+    // "Anytime" nudges — deliberately last: due ones ring no differently from
+    // upcoming ones here (no popup/push either, see checkAlarms), so there's
+    // nothing urgent about their position, unlike everything above.
+    const nudges = list
+      .filter((a) => a.kind === 'anytime')
+      .sort((x, y) => y.triggered - x.triggered || (x.fireAt || 0) - (y.fireAt || 0));
+    if (nudges.length) {
+      any = true;
+      const h = document.createElement('h3');
+      h.textContent = 'Nudges';
+      agendaBody.appendChild(h);
+      nudges.forEach((a) => agendaBody.appendChild(agendaRow(a, false)));
+    }
+
     if (!any) {
       const p = document.createElement('p');
       p.className = 'muted';
@@ -6043,7 +6179,8 @@
     ).padStart(2, '0')}`;
   }
 
-  // 'time' (clock) vs 'location' (geofence) — the two alarm-editor modes.
+  // 'time' (clock) vs 'anytime' (untimed nudge, day pattern + window) vs
+  // 'location' (geofence) — the three alarm-editor modes.
   let alarmKind = 'time';
   // The place chosen in the current editor session (current-location or map
   // pick); null falls back to the note's own lat/lon.
@@ -6069,12 +6206,17 @@
   }
 
   function setAlarmKind(kind) {
-    alarmKind = kind === 'location' ? 'location' : 'time';
+    alarmKind = kind === 'location' ? 'location' : kind === 'anytime' ? 'anytime' : 'time';
     alarmKindRow.querySelectorAll('button').forEach((b) => {
       b.classList.toggle('active', b.dataset.kind === alarmKind);
     });
     alarmTimeFields.classList.toggle('hidden', alarmKind === 'location');
     alarmPlaceFields.classList.toggle('hidden', alarmKind !== 'location');
+    // Within alarm-time-fields (shown for both 'time' and 'anytime' — they
+    // share the days/date repeat picker below), swap the single clock input
+    // for the window pair, or back.
+    alarmTimeInput.classList.toggle('hidden', alarmKind === 'anytime');
+    alarmWindowFields.classList.toggle('hidden', alarmKind !== 'anytime');
     if (alarmKind === 'location') refreshAlarmLocReadout();
   }
 
@@ -6115,7 +6257,9 @@
     } else {
       alarmRadiusInput.value = alarmRadiusInput.value || '250';
     }
-    setAlarmKind(existing && existing.kind === 'location' ? 'location' : 'time');
+    alarmWindowStartInput.value = existing && existing.windowStart ? existing.windowStart : '08:00';
+    alarmWindowEndInput.value = existing && existing.windowEnd ? existing.windowEnd : '21:00';
+    setAlarmKind(existing ? existing.kind : 'time');
 
     alarmRemoveBtn.classList.toggle('hidden', !existing);
     alarmOverlay.classList.remove('hidden');
@@ -6232,6 +6376,48 @@
       if (existingAny) await api.updateAlarm(existingAny.id, body);
       else await api.createAlarm({ ...body, noteId: alarmEditNote.id });
       await enableAlarmDelivery();
+      closeAlarmEditor();
+      await afterAlarmChange();
+      return;
+    }
+
+    if (alarmKind === 'anytime') {
+      const windowStart = alarmWindowStartInput.value;
+      const windowEnd = alarmWindowEndInput.value;
+      if (!/^\d{2}:\d{2}$/.test(windowStart) || !/^\d{2}:\d{2}$/.test(windowEnd) || windowEnd <= windowStart) {
+        toast('Pick a window — end after start.');
+        return;
+      }
+      const days = selectedAlarmDays();
+      const body = { kind: 'anytime', windowStart, windowEnd, days };
+      if (days.length === 0) {
+        if (!alarmDateInput.value) {
+          toast('Pick a date, or choose repeat days.');
+          return;
+        }
+        body.date = alarmDateInput.value;
+      }
+      // Same seeding as the 'time' branch below, just via the shared
+      // day-pattern loop in mostRecentAlarmTrigger/nextAlarmOccurrence — id is
+      // a placeholder pre-creation; the very next checkAlarms poll corrects
+      // next_at once the server hands back the real reminder id.
+      const nowRef = new Date();
+      const scheduleShape = {
+        id: existingAny ? existingAny.id : 'new', kind: 'anytime', windowStart, windowEnd,
+        days, date: body.date || null,
+      };
+      const seed = mostRecentAlarmTrigger(scheduleShape, nowRef);
+      body.ackAt = (seed || nowRef).toISOString();
+      body.nextAt = isoOrNull(nextAlarmOccurrence(scheduleShape, nowRef));
+      try {
+        body.tz = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+      } catch {
+        body.tz = null;
+      }
+      // No enableAlarmDelivery() — a nudge never pushes (alarm-scheduler.js
+      // excludes kind='anytime'), so there's nothing to ask permission for.
+      if (existingAny) await api.updateAlarm(existingAny.id, body);
+      else await api.createAlarm({ ...body, noteId: alarmEditNote.id });
       closeAlarmEditor();
       await afterAlarmChange();
       return;

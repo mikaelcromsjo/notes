@@ -68,6 +68,20 @@
                 android:resource="@xml/grid_widget_info" />
         </receiver>
 
+        <!-- A single rotating tile showing one due kind='anytime' ("nudge")
+             reminder at a time, from ?mode=nudge — see NudgeWidgetProvider. -->
+        <receiver
+            android:name=".NudgeWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_nudge_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/nudge_widget_info" />
+        </receiver>
+
         <!-- Backs the agenda widget's scrollable list of every overdue/
              today/to-do/orphan item — AgendaWidgetProvider.bindAgendaList,
              AgendaRemoteViewsFactory. BIND_REMOTEVIEWS is required for any

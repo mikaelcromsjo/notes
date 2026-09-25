@@ -578,6 +578,24 @@ button:hover { filter: brightness(1.05); }
   margin-bottom: 0.75rem;
 }
 
+.alarm-window-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.alarm-window-row .alarm-time-input { margin-bottom: 0; }
+
+.alarm-window-sep {
+  color: var(--muted);
+}
+
+/* A tap-to-open toast (the "anytime" nudge) — same shell as the plain toast,
+   just signals it does something on click. */
+.toast.toast-tap {
+  cursor: pointer;
+}
+
 .alarm-radius-label {
   display: flex;
   align-items: center;

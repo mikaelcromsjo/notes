@@ -73,8 +73,45 @@ router.get('/', (req, res) => {
         week: withUrl(a.reminders.week),
         later: withUrl(a.reminders.later),
       },
+      // kind='anytime' reminders — see buildAgenda — kept out of the buckets
+      // above for the same reason as everywhere else this shows up; not yet
+      // read by AgendaWidgetProvider (only ?mode=nudge is), but included here
+      // so this feed's shape matches buildAgenda's actual data model.
+      nudges: withUrl(a.nudges),
       open_tasks: withUrl(a.openTasks),
       orphans: withUrl(a.orphans),
+    });
+  }
+
+  // ?mode=nudge → the Android nudge widget's own feed: every currently-due
+  // kind='anytime' reminder (public/app.js's own "anytime" scheduling —
+  // see db.js/alarm-scheduler.js's "soft, never-pushed" contract), so a
+  // client with no clock-time math of its own can just show what's due right
+  // now. Deliberately not folded into ?mode=agenda: that feed's reminders
+  // buckets are for a *list*, this one is "what to show on a single rotating
+  // tile" and the widget picks/cycles among the results itself.
+  if (req.query.mode === 'nudge') {
+    const nowIso = new Date().toISOString();
+    const rows = db
+      .prepare(
+        `SELECT r.id, r.note_id, n.title
+         FROM reminders r JOIN notes n ON n.id = r.note_id
+         WHERE r.user_id = ? AND r.kind = 'anytime' AND n.status != 'deleted'
+           AND COALESCE(r.snooze_until, r.next_at) IS NOT NULL
+           AND COALESCE(r.snooze_until, r.next_at) <= ?
+         ORDER BY COALESCE(r.snooze_until, r.next_at) ASC`
+      )
+      .all(user.id, nowIso);
+    return res.json({
+      generated_at: new Date().toISOString(),
+      mode: 'nudge',
+      theme,
+      nudges: rows.map((r) => ({
+        id: r.id,
+        noteId: r.note_id,
+        title: r.title,
+        url: `${origin}/?preview=1#${r.note_id}`,
+      })),
     });
   }
 

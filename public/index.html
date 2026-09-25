@@ -194,10 +194,19 @@
       <h2>Reminder</h2>
       <div class="alarm-kind-row" id="alarm-kind-row">
         <button type="button" data-kind="time" class="alarm-kind-btn active">🕑 Time</button>
+        <button type="button" data-kind="anytime" class="alarm-kind-btn">🌊 Nudge</button>
         <button type="button" data-kind="location" class="alarm-kind-btn">📍 Place</button>
       </div>
       <div id="alarm-time-fields">
         <input type="time" id="alarm-time-input" class="alarm-time-input" />
+        <div id="alarm-window-fields" class="hidden">
+          <p class="alarm-place-hint">A soft nudge — no fixed time, no push when the app's closed. Fires sometime between:</p>
+          <div class="alarm-window-row">
+            <input type="time" id="alarm-window-start-input" class="alarm-time-input" />
+            <span class="alarm-window-sep">–</span>
+            <input type="time" id="alarm-window-end-input" class="alarm-time-input" />
+          </div>
+        </div>
         <div class="alarm-repeat-label">Repeat</div>
         <div class="alarm-days-row" id="alarm-days-row"></div>
         <div id="alarm-date-wrap">
