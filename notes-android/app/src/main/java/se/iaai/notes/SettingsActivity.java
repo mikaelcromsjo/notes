@@ -38,6 +38,12 @@ public class SettingsActivity extends Activity {
     private static final int NOTIFICATIONS_REQUEST = 1001;
     private static final int LOCATION_PERMISSION_REQUEST = 1002;
 
+    // False on the early-finish() path below, where setContentView never runs
+    // — onResume still fires in that case (briefly, before finish() tears the
+    // activity down) and would otherwise crash hitting findViewById on views
+    // that don't exist.
+    private boolean contentReady = false;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -60,6 +66,7 @@ public class SettingsActivity extends Activity {
         }
 
         setContentView(R.layout.activity_settings);
+        contentReady = true;
 
         // So UpdateChecker's "update available" nudge can actually show —
         // harmless to ask again on every open; the system only prompts once
@@ -97,6 +104,23 @@ public class SettingsActivity extends Activity {
             status.setText("Connected — widgets updating.");
             Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show();
         });
+    }
+
+    // onCreate alone isn't enough: this activity isn't recreated on the way
+    // back from the system package installer (only onResume fires), so a
+    // label/banner only ever refreshed in onCreate would still show
+    // pre-install state — "installed the update but the screen still says the
+    // old version" — even though PackageManager already reflects the real,
+    // newly-installed version. Re-reading here on every resume (foreground,
+    // back from the installer, back from Android Settings after a permission
+    // grant) keeps all of it honest.
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (!contentReady) return;
+        showInstalledVersion();
+        showUpdateBannerIfPending();
+        updateTrailUi();
     }
 
     private void showUpdateBannerIfPending() {
