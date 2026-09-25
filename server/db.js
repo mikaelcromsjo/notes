@@ -433,6 +433,28 @@ db.exec(`
   );
 `);
 
+// --- Location trail: periodic (not continuous) GPS samples appended by the
+// Android widget app's own ~30-min background refresh tick — notes-android
+// has no foreground-service GPS session, so this is deliberately coarse,
+// spaced points, not a live track. POST /api/widget/location (token-authed,
+// server/routes/widget.js) inserts one row per tick; GET /api/location-log
+// (cookie-authed, server/routes/location.js) feeds the web app's map-overlay
+// trail toggle. Unrelated to notes.lat/lon (a point on a specific note) or
+// reminders.kind='location' (a geofence) — this is the device's own position
+// over time, not tied to any note.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS location_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    lat         REAL NOT NULL,
+    lon         REAL NOT NULL,
+    accuracy_m  REAL,
+    recorded_at TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_location_log_user ON location_log (user_id, recorded_at);
+`);
+
 // Retention: navigation history is behavioural data — keep 90 days.
 db.prepare(
   "DELETE FROM nav_events WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')"
@@ -441,6 +463,12 @@ db.prepare(
 // Retention: the undo log is only useful for recent moves — keep 30 days.
 db.prepare(
   "DELETE FROM history WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')"
+).run();
+
+// Retention: the GPS trail is behavioural data too — keep 90 days (same window
+// as nav_events).
+db.prepare(
+  "DELETE FROM location_log WHERE recorded_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')"
 ).run();
 
 module.exports = db;

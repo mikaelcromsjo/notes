@@ -12,6 +12,7 @@ import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -35,6 +36,7 @@ public class SettingsActivity extends Activity {
     static final String PREFS = "notes_widget_prefs";
     static final String KEY_TOKEN = "widget_token";
     private static final int NOTIFICATIONS_REQUEST = 1001;
+    private static final int LOCATION_PERMISSION_REQUEST = 1002;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,6 +71,7 @@ public class SettingsActivity extends Activity {
         showUpdateBannerIfPending();
         showInstalledVersion();
         wireCheckUpdateButton();
+        wireTrailSection();
 
         EditText tokenInput = findViewById(R.id.token_input);
         TextView status = findViewById(R.id.sync_status);
@@ -153,6 +156,64 @@ public class SettingsActivity extends Activity {
                 }
             });
         });
+    }
+
+    // See LocationLogger for what the switch actually turns on. The switch
+    // reflects the user's own intent (KEY_TRAIL_ENABLED); the status line +
+    // button below it separately reflect whether the OS permissions needed to
+    // act on that intent are actually in place yet.
+    private void wireTrailSection() {
+        Switch trailSwitch = findViewById(R.id.trail_switch);
+        trailSwitch.setChecked(LocationLogger.isEnabled(this));
+        trailSwitch.setOnCheckedChangeListener((button, isChecked) -> {
+            LocationLogger.setEnabled(this, isChecked);
+            updateTrailUi();
+        });
+        findViewById(R.id.trail_permission_button).setOnClickListener(v -> requestNextTrailPermission());
+        updateTrailUi();
+    }
+
+    private void updateTrailUi() {
+        TextView status = findViewById(R.id.trail_status);
+        Button permButton = findViewById(R.id.trail_permission_button);
+
+        if (!LocationLogger.isEnabled(this)) {
+            status.setText("Off.");
+            permButton.setVisibility(View.GONE);
+            return;
+        }
+        if (LocationLogger.isFullyGranted(this)) {
+            status.setText("On — logging roughly every 30 minutes.");
+            permButton.setVisibility(View.GONE);
+            return;
+        }
+        if (!LocationLogger.hasForegroundPermission(this)) {
+            status.setText("Needs location permission to start.");
+            permButton.setText("Grant location access");
+        } else {
+            status.setText("Needs “Allow all the time” so it can log on a widget refresh "
+                    + "even when the app isn't open. If tapping below does nothing, grant it from "
+                    + "Android Settings → Apps → Notes Widgets → Permissions instead.");
+            permButton.setText("Grant background access");
+        }
+        permButton.setVisibility(View.VISIBLE);
+    }
+
+    // One permission per tap, foreground before background — Android (11+
+    // especially) expects background location to be its own deliberate step,
+    // not bundled into the first request.
+    private void requestNextTrailPermission() {
+        if (!LocationLogger.hasForegroundPermission(this)) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_REQUEST);
+        } else if (!LocationLogger.hasBackgroundPermission(this)) {
+            requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, LOCATION_PERMISSION_REQUEST);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == LOCATION_PERMISSION_REQUEST) updateTrailUi();
     }
 
     // Accepts either the full "Home-screen widget feed" URL the web app's

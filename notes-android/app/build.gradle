@@ -13,8 +13,8 @@ android {
         // Bump both on every release meant for existing installs to pick up —
         // UpdateChecker compares versionCode against downloads/notes-version.json,
         // which must be regenerated to match (see notes-android/CLAUDE.md).
-        versionCode 11
-        versionName "0.11"
+        versionCode 12
+        versionName "0.12"
     }
 
     buildTypes {

@@ -549,6 +549,7 @@ router.get('/delete-confirm', (req, res) => {
       'DELETE FROM nav_events WHERE user_id = ?',
       'DELETE FROM history WHERE user_id = ?',
       'DELETE FROM push_subscriptions WHERE user_id = ?',
+      'DELETE FROM location_log WHERE user_id = ?',
       'DELETE FROM tabs WHERE user_id = ?',
       'DELETE FROM links WHERE user_id = ?',
       'DELETE FROM notes WHERE user_id = ?',

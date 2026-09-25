@@ -1,6 +1,6 @@
 const express = require('express');
 const db = require('../db');
-const { buildAgenda } = require('../agenda');
+const { buildAgenda, dayIndexInZone, pickZone } = require('../agenda');
 const { computeNeighbors } = require('../neighbors');
 const themes = require('../../public/themes.js');
 const { cleanPrefs } = require('./theme');
@@ -83,35 +83,58 @@ router.get('/', (req, res) => {
     });
   }
 
-  // ?mode=nudge → the Android nudge widget's own feed: every currently-due
-  // kind='anytime' reminder (public/app.js's own "anytime" scheduling —
-  // see db.js/alarm-scheduler.js's "soft, never-pushed" contract), so a
-  // client with no clock-time math of its own can just show what's due right
-  // now. Deliberately not folded into ?mode=agenda: that feed's reminders
-  // buckets are for a *list*, this one is "what to show on a single rotating
-  // tile" and the widget picks/cycles among the results itself.
+  // ?mode=nudge → the Android nudge widget's own feed: every kind='anytime'
+  // reminder that's *in range* today — due already (including stale-overdue,
+  // same as the in-app toast) or scheduled for later today — not just the
+  // ones whose exact picked minute (public/app.js's per-day scheduling) has
+  // already passed. A widget only refreshes every 30 min (nudge_widget_info.xml)
+  // and has no clock-time math of its own, so handing it just the
+  // already-due set left it showing "Nothing due" most of the day even with
+  // several nudges genuinely active — the widget caches this whole list and
+  // cycles through it locally (NudgeWidgetProvider), `due` just says which
+  // ones have actually reached their moment. Deliberately not folded into
+  // ?mode=agenda: that feed's reminders buckets are for a *list*, this one is
+  // "what to show on a single rotating tile."
   if (req.query.mode === 'nudge') {
-    const nowIso = new Date().toISOString();
+    const now = new Date();
     const rows = db
       .prepare(
-        `SELECT r.id, r.note_id, n.title
+        `SELECT r.id, r.note_id, r.tz, r.snooze_until, r.next_at, n.title
          FROM reminders r JOIN notes n ON n.id = r.note_id
          WHERE r.user_id = ? AND r.kind = 'anytime' AND n.status != 'deleted'
-           AND COALESCE(r.snooze_until, r.next_at) IS NOT NULL
-           AND COALESCE(r.snooze_until, r.next_at) <= ?
-         ORDER BY COALESCE(r.snooze_until, r.next_at) ASC`
+           AND COALESCE(r.snooze_until, r.next_at) IS NOT NULL`
       )
-      .all(user.id, nowIso);
-    return res.json({
-      generated_at: new Date().toISOString(),
-      mode: 'nudge',
-      theme,
-      nudges: rows.map((r) => ({
+      .all(user.id);
+
+    const zone = pickZone(req.query.tz, rows);
+    const today = dayIndexInZone(now, zone);
+    const nowMs = now.getTime();
+
+    const nudges = rows
+      .map((r) => {
+        const snoozed = r.snooze_until && Date.parse(r.snooze_until) > nowMs;
+        const dueIso = snoozed ? r.snooze_until : r.next_at;
+        return { r, dueIso, dueMs: Date.parse(dueIso) };
+      })
+      // "In range" = today or earlier in this zone — excludes a reminder
+      // whose picked day has rolled forward to tomorrow or later (see
+      // db.js's kind='anytime' doc comment on why that can happen).
+      .filter(({ dueMs }) => dayIndexInZone(new Date(dueMs), zone) <= today)
+      .sort((a, b) => a.dueMs - b.dueMs)
+      .map(({ r, dueIso, dueMs }) => ({
         id: r.id,
         noteId: r.note_id,
         title: r.title,
+        due: dueMs <= nowMs,
         url: `${origin}/?preview=1#${r.note_id}`,
-      })),
+      }));
+
+    return res.json({
+      generated_at: now.toISOString(),
+      mode: 'nudge',
+      tz: zone,
+      theme,
+      nudges,
     });
   }
 
@@ -192,6 +215,50 @@ router.get('/', (req, res) => {
     parent: result.parent ? withUrl(result.parent) : null,
     neighbors: result.neighbors.map(withUrl),
   });
+});
+
+// One periodic GPS sample from the Android widget app's own ~30-min background
+// refresh tick (piggybacked on GridWidgetProvider.onUpdate, see LocationLogger
+// there) — not a continuous background track, notes-android has no foreground
+// location service. Token-authed like the feed above, not cookie-based (this
+// app has no session). Rate-limited server-side too, in case of a buggy/rogue
+// client: at most one accepted sample per MIN_INTERVAL_MS regardless of what
+// the widget sends, so this never becomes a way to get finer-grained tracking
+// than the design intends.
+const MIN_INTERVAL_MS = 5 * 60 * 1000;
+
+router.post('/location', (req, res) => {
+  const user = userForToken(req.query.token);
+  if (!user) return res.status(401).json({ error: 'invalid or missing widget token' });
+
+  const lat = Number(req.body.lat);
+  const lon = Number(req.body.lon);
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+    return res.status(400).json({ error: 'lat must be between -90 and 90' });
+  }
+  if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+    return res.status(400).json({ error: 'lon must be between -180 and 180' });
+  }
+  let accuracy = req.body.accuracy != null ? Number(req.body.accuracy) : null;
+  if (!Number.isFinite(accuracy) || accuracy < 0) accuracy = null;
+
+  const recordedAt = new Date(req.body.recordedAt);
+  const recordedIso = Number.isFinite(recordedAt.getTime())
+    ? recordedAt.toISOString()
+    : new Date().toISOString();
+
+  const last = db
+    .prepare('SELECT recorded_at FROM location_log WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1')
+    .get(user.id);
+  if (last && Date.parse(recordedIso) - Date.parse(last.recorded_at) < MIN_INTERVAL_MS) {
+    return res.json({ ok: true, skipped: 'too soon since last sample' });
+  }
+
+  db.prepare(
+    'INSERT INTO location_log (user_id, lat, lon, accuracy_m, recorded_at) VALUES (?, ?, ?, ?, ?)'
+  ).run(user.id, lat, lon, accuracy, recordedIso);
+
+  res.json({ ok: true });
 });
 
 module.exports = router;

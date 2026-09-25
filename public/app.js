@@ -2878,6 +2878,12 @@
     // (rather than falling back to no colour) — updated on every online fetch.
     getNoteHeat: () => cachedStat('note-heat', 'statNoteHeat', {}),
     getInsights: () => cachedStat('insights', 'statInsights', null),
+    // The periodic GPS trail (map overlay's Trail toggle) — online-only, no
+    // offline mirror, same as the geofence reminder circles it's drawn beside.
+    getLocationTrail: (days) =>
+      fetch(`/api/location-log?days=${encodeURIComponent(days)}`)
+        .then((r) => (r.ok ? r.json() : { points: [] }))
+        .catch(() => ({ points: [] })),
     getHistory: () => fetch('/api/history').then((r) => (r.ok ? r.json() : [])).catch(() => []),
     undoHistory: (id) =>
       fetch(`/api/history/${id}/undo`, { method: 'POST' })
@@ -7197,10 +7203,18 @@
   const mapOverlayClose = document.getElementById('map-overlay-close');
   const mapStatusEl = document.getElementById('map-status');
   const mapModesEl = document.getElementById('map-modes');
+  const mapTrailBtn = document.getElementById('map-trail-btn');
   const mapEl = document.getElementById('map');
 
   let leafletMap = null;
   let mapMarkers = null;
+  // The periodic location trail (server/routes/location.js, fed by the Android
+  // widget app's opt-in LocationLogger) is a separate layer from mapMarkers so
+  // toggling it never disturbs note/reminder pin redraws (e.g. on zoomend).
+  // Persisted so reopening the map (or a future session) keeps it showing.
+  let trailVisible = localStorage.getItem('nico-map-trail-visible') === '1';
+  let trailPoints = null; // cached fetch — null = not loaded yet this session
+  let mapTrailLayer = null;
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
@@ -7361,6 +7375,63 @@
     });
   }
 
+  const TRAIL_DAYS = 14;
+
+  // The periodic location trail: connects the logged points oldest-to-newest,
+  // colouring both the points and the connecting segments by age — lighter
+  // (recent) fading to darker (older) — so the shape of a longer trail reads
+  // at a glance without a legend. A stale-vs-fresh visual, not a heatmap: it
+  // shares mapColorFor's colour-mode tint for nothing, since a trail has no
+  // "note" to tint by.
+  const TRAIL_NEW_HEX = '7dd3fc'; // light sky blue — most recent point
+  const TRAIL_OLD_HEX = '0c4a6e'; // dark navy — oldest point in range
+
+  async function drawMapTrail() {
+    if (mapTrailLayer) {
+      mapTrailLayer.remove();
+      mapTrailLayer = null;
+    }
+    if (!trailVisible) return;
+
+    if (!trailPoints) {
+      const { points } = await api.getLocationTrail(TRAIL_DAYS);
+      trailPoints = points || [];
+    }
+    if (!trailPoints.length) return;
+
+    const oldestMs = Date.parse(trailPoints[0].recordedAt);
+    const newestMs = Date.parse(trailPoints[trailPoints.length - 1].recordedAt);
+    const span = Math.max(newestMs - oldestMs, 1);
+    const colorAt = (iso) => {
+      const frac = (Date.parse(iso) - oldestMs) / span; // 0 = oldest, 1 = newest
+      return lerpHex(TRAIL_OLD_HEX, TRAIL_NEW_HEX, frac);
+    };
+
+    mapTrailLayer = L.layerGroup().addTo(leafletMap);
+
+    for (let i = 1; i < trailPoints.length; i++) {
+      const a = trailPoints[i - 1];
+      const b = trailPoints[i];
+      L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+        color: colorAt(b.recordedAt),
+        weight: 3,
+        opacity: 0.75,
+      }).addTo(mapTrailLayer);
+    }
+
+    trailPoints.forEach((p) => {
+      L.circleMarker([p.lat, p.lon], {
+        radius: 3,
+        color: '#fff',
+        weight: 1,
+        fillColor: colorAt(p.recordedAt),
+        fillOpacity: 0.9,
+      })
+        .bindTooltip(relTime(p.recordedAt))
+        .addTo(mapTrailLayer);
+    });
+  }
+
   // Metres per screen pixel at the map's current zoom and centre latitude.
   function mapMetersPerPixel() {
     const lat = leafletMap.getCenter().lat;
@@ -7394,7 +7465,10 @@
   }
 
   function syncMapModes() {
-    mapModesEl.querySelectorAll('button').forEach((b) => {
+    // Scoped to [data-mode] so the Trail toggle (no data-mode — its active
+    // state is a separate, independent axis, not a colour mode) isn't
+    // clobbered back to inactive every time a colour mode is picked.
+    mapModesEl.querySelectorAll('button[data-mode]').forEach((b) => {
       b.classList.toggle('active', b.dataset.mode === colorMode);
     });
   }
@@ -7442,8 +7516,10 @@
     requestAnimationFrame(() => leafletMap.invalidateSize());
 
     syncMapModes();
+    mapTrailBtn.classList.toggle('active', trailVisible);
     await refreshColorData();
     await drawMapMarkers();
+    await drawMapTrail();
     await centerMapOnNotes();
   }
 
@@ -7486,6 +7562,14 @@
   mapModesEl.addEventListener('click', async (e) => {
     const btn = e.target.closest('button');
     if (!btn) return;
+    if (btn === mapTrailBtn) {
+      trailVisible = !trailVisible;
+      localStorage.setItem('nico-map-trail-visible', trailVisible ? '1' : '0');
+      mapTrailBtn.classList.toggle('active', trailVisible);
+      if (trailVisible) trailPoints = null; // force a fresh fetch on re-enable
+      await drawMapTrail();
+      return;
+    }
     colorMode = btn.dataset.mode;
     applyColorModeButton();
     syncMapModes();

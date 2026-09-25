@@ -59,6 +59,44 @@
         android:text="Save" />
 
     <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="Location trail"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Optional: on each widget refresh (roughly every 30 minutes), log one GPS point so it shows as a trail on the app's map. This is periodic, not continuous — nothing runs between refreshes, and nothing is recorded unless you turn this on."
+        android:textSize="13sp"
+        android:alpha="0.75" />
+
+    <Switch
+        android:id="@+id/trail_switch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Record a location trail" />
+
+    <TextView
+        android:id="@+id/trail_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="12sp"
+        android:alpha="0.75" />
+
+    <Button
+        android:id="@+id/trail_permission_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:visibility="gone" />
+
+    <TextView
         android:id="@+id/version_label"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

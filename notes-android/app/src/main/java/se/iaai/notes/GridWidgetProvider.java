@@ -84,6 +84,10 @@ public class GridWidgetProvider extends AppWidgetProvider {
         // Piggybacks on the OS's own 30-min widget refresh cycle (rate-limited
         // internally to ~daily) rather than a separate wake-up of our own.
         UpdateChecker.maybeCheck(context);
+        // Same piggyback for the opt-in periodic location trail (rate-limited
+        // internally to ~20 min, a no-op unless the user turned it on) — see
+        // LocationLogger.
+        LocationLogger.maybeLog(context);
     }
 
     @Override
