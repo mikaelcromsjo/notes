@@ -163,4 +163,8 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   };
 }
 
-module.exports = { buildAgenda };
+// dayIndexInZone/pickZone are also reused by routes/widget.js's ?mode=nudge —
+// same "which wall-calendar day is this instant on" question, just answered
+// for "is it today (or already overdue) in this account's zone" instead of
+// the overdue/today/week/later buckets above.
+module.exports = { buildAgenda, dayIndexInZone, pickZone };

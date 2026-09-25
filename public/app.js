@@ -4304,10 +4304,10 @@
     setInterval(() => flushOutbox(), 30000);
     // Re-check the moment the app is foregrounded again — a backgrounded PWA's
     // timers are throttled, so an alarm that came due while away rings now.
-    // Foregrounding also counts as a fresh "session" for the nudge toast.
+    // `nudge: true` here too — maybeShowNudgeToast's own per-note cooldown
+    // (not a session flag any more) is what actually rate-limits it.
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) {
-        nudgeToastShown = false;
         checkAlarms({ nudge: true });
         flushOutbox();
       }
@@ -5654,20 +5654,54 @@
     });
   }
 
-  // The soft surface for kind='anytime' reminders: at most one per session (the
-  // flag resets on each foreground-resume — see init()/visibilitychange), a
-  // random pick among whatever's due, tap-to-open. Skipped while the note
-  // editor is open so it can never interrupt typing/reading. Deliberately not
-  // a hard popup/push — see checkAlarms' `ringing` filter and
-  // alarm-scheduler.js for the other halves of that same "soft" contract.
-  let nudgeToastShown = false;
+  // Per-note cooldown for the nudge toast below — persisted (survives an app
+  // restart, not just an in-memory flag) so re-opening the app a few times in
+  // a row can't re-nag about the same note. Map noteId -> ISO instant it was
+  // last *shown* (not acked — showing it at all is what should be rate
+  // limited). localStorage is fine here: purely a per-viewer convenience, never
+  // read back by the server, and a lost/empty read just means "no cooldown
+  // yet" — see the try/catch.
+  const NUDGE_COOLDOWN_MS = 30 * 60 * 1000;
+  const nudgeShownKey = () => `nico-nudge-shown-${currentUser ? currentUser.id : 0}`;
+  function loadNudgeShown() {
+    try {
+      return JSON.parse(localStorage.getItem(nudgeShownKey()) || '{}') || {};
+    } catch {
+      return {};
+    }
+  }
+  function markNudgeShown(noteId) {
+    const map = loadNudgeShown();
+    map[noteId] = new Date().toISOString();
+    try {
+      localStorage.setItem(nudgeShownKey(), JSON.stringify(map));
+    } catch {
+      // storage full/blocked — worst case the cooldown doesn't stick, not fatal
+    }
+  }
+
+  // The soft surface for kind='anytime' reminders: at app start/foreground-resume
+  // (see checkAlarms' `nudge` param), a random pick among whatever's due *and*
+  // outside its own note's 30-min cooldown, tap-to-open. If every due nudge is
+  // still on cooldown, shows nothing this time rather than repeating one —
+  // "exhausted" is a quiet outcome, not a fallback to spam the same note.
+  // Skipped while the note editor is open so it can never interrupt
+  // typing/reading. Deliberately not a hard popup/push — see checkAlarms'
+  // `ringing` filter and alarm-scheduler.js for the other halves of that same
+  // "soft" contract.
   function maybeShowNudgeToast() {
-    if (nudgeToastShown) return;
     if (!noteOverlay.classList.contains('hidden')) return;
     const due = alarms.filter((a) => a.kind === 'anytime' && a.triggered);
     if (!due.length) return;
-    nudgeToastShown = true;
-    const pick = due[Math.floor(Math.random() * due.length)];
+    const shown = loadNudgeShown();
+    const cutoff = Date.now() - NUDGE_COOLDOWN_MS;
+    const eligible = due.filter((a) => {
+      const last = shown[a.noteId] ? Date.parse(shown[a.noteId]) : 0;
+      return !(last > cutoff);
+    });
+    if (!eligible.length) return; // every due nudge was shown within the last 30 min
+    const pick = eligible[Math.floor(Math.random() * eligible.length)];
+    markNudgeShown(pick.noteId);
     toast(`🌊 ${pick.title}?`, {
       duration: 6000,
       onClick: async () => {
@@ -5682,8 +5716,9 @@
   // the triggered tint, roll each alarm's next-ring instant forward on the
   // server so the push scheduler stays armed, and surface the popup /
   // notification for anything newly due. `nudge: true` additionally offers one
-  // due kind='anytime' reminder as a session toast (see maybeShowNudgeToast) —
-  // only passed at startup/foreground-resume, never the 30s background poll.
+  // due-and-off-cooldown kind='anytime' reminder as a toast (see
+  // maybeShowNudgeToast) — only passed at startup/foreground-resume, never
+  // the 30s background poll.
   async function checkAlarms({ popup = true, nudge = false } = {}) {
     const ref = new Date();
     alarms = (await api.listAlarms()).map((a) => ({ ...a, triggered: alarmTriggered(a, ref) }));

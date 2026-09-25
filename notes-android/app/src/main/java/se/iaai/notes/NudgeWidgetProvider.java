@@ -12,6 +12,7 @@ import android.os.Build;
 import android.widget.RemoteViews;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -19,23 +20,34 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.TimeZone;
 
 /**
  * A single rotating tile for the "soft nudge" reminders — public/app.js's
  * kind='anytime' (a day pattern + time window, no committed clock minute;
  * see db.js/alarm-scheduler.js: it never pushes, so this widget and the
  * web app's own session toast are its only surfaces). Each 30-min refresh
- * pulls whatever's currently due (GET /api/widget?token=...&mode=nudge,
- * server/routes/widget.js) and crossfades to the next one round-robin,
- * rather than always showing the same one — see fetchAndApply's cursor.
- * Tapping it opens that note; with nothing due it shows a calm "Nothing due"
- * rather than a forced tap target. Deliberately its own provider, not folded
- * into GridWidgetProvider or AgendaWidgetProvider — a different shape (one
- * item, not a grid or a scrolling list) with its own crossfade mechanics.
+ * pulls every nudge that's *in range* today — due already or scheduled for
+ * later today, not just the ones whose exact picked minute has already
+ * passed (GET /api/widget?token=...&mode=nudge&tz=..., server/routes/widget.js)
+ * — caches that whole list (KEY_CACHE, account-wide like AgendaWidgetProvider's
+ * own item cache) and crossfades through it round-robin, one per refresh
+ * (applyNudgeRotation's cursor), rather than only ever showing whichever one
+ * happens to be exactly due at fetch time. On a dropped connection it keeps
+ * rotating through that same cache instead of replacing it with an error
+ * tile — see fetchAndApply's catch block. Tapping the tile opens that note;
+ * with nothing in range it shows a calm "Nothing due" rather than a forced
+ * tap target. Deliberately its own provider, not folded into
+ * GridWidgetProvider or AgendaWidgetProvider — a different shape (one item,
+ * not a grid or a scrolling list) with its own crossfade mechanics.
  */
 public class NudgeWidgetProvider extends AppWidgetProvider {
 
     private static final String PREFS = "notes_widget_prefs";
+    // The last successfully-fetched ?mode=nudge list, account-wide (not
+    // per-widget-id — there's only one account's worth of nudges regardless
+    // of how many widget instances are showing them).
+    private static final String KEY_CACHE = "nudge_cache_json";
     // A dropped connection (wifi handoff, DNS hiccup) shouldn't sit as
     // "Couldn't reach server" until the system's own 30-min update rolls
     // around (nudge_widget_info.xml) — back off and try again a couple of
@@ -81,12 +93,33 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
         SharedPreferences.Editor editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit();
         for (int id : appWidgetIds) editor.remove(childKey(id)).remove(cursorKey(id));
         editor.apply();
+        // KEY_CACHE is deliberately left alone — it's account-wide, not tied
+        // to any one widget instance (same reasoning as AgendaWidgetProvider's
+        // own item cache never being cleared here).
     }
 
     private static Intent settingsIntent(Context context) {
         Intent intent = new Intent(context, SettingsActivity.class);
         intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         return intent;
+    }
+
+    private static void saveCache(Context context, JSONArray nudges) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY_CACHE, nudges.toString()).apply();
+    }
+
+    // null when there's genuinely nothing cached yet (fresh install, or the
+    // very first fetch ever failed) — distinct from an empty JSONArray, which
+    // means the last real fetch legitimately found nothing in range.
+    private static JSONArray loadCache(Context context) {
+        String raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CACHE, null);
+        if (raw == null) return null;
+        try {
+            return new JSONArray(raw);
+        } catch (JSONException e) {
+            return null;
+        }
     }
 
     private void updateOne(Context context, AppWidgetManager appWidgetManager, int widgetId) {
@@ -127,15 +160,45 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
         views.setDisplayedChild(R.id.nudge_flipper, curChild);
     }
 
+    // Picks the next item from `nudges` (a per-widget-instance round-robin
+    // cursor, wrapped to the current count so a shrinking/growing list
+    // between refreshes never indexes out of range) and crossfades the
+    // ViewFlipper to it. `nudges` must be non-empty — both call sites below
+    // handle "empty" as their own state before reaching here. `due` (server's
+    // ?mode=nudge field — has this one's picked moment actually arrived, or
+    // is it just scheduled for later today) picks the accent-vs-quiet tile
+    // styling, same convention as GridWidgetProvider's centre cell.
+    private static void applyNudgeRotation(Context context, WidgetTheme theme, RemoteViews views,
+                                            int widgetId, int flags, String baseUrl, JSONArray nudges) {
+        int count = nudges.length();
+        SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        int cursor = ((prefs.getInt(cursorKey(widgetId), 0) % count) + count) % count;
+        JSONObject chosen = nudges.optJSONObject(cursor);
+        prefs.edit().putInt(cursorKey(widgetId), (cursor + 1) % count).apply();
+        if (chosen == null) return; // shouldn't happen — malformed cache entry; leave the tile as-is
+
+        int curChild = prefs.getInt(childKey(widgetId), 0);
+        int nextChild = 1 - curChild;
+        int textId = TEXT_IDS[nextChild];
+
+        theme.applyToNudgeTile(views, textId, chosen.optBoolean("due", true));
+        views.setTextViewText(textId, "🌊 " + chosen.optString("title", "Untitled"));
+        Intent open = new Intent(Intent.ACTION_VIEW, Uri.parse(chosen.optString("url", baseUrl + "/")));
+        views.setOnClickPendingIntent(textId, PendingIntent.getActivity(context, widgetId, open, flags));
+        views.setDisplayedChild(R.id.nudge_flipper, nextChild);
+        prefs.edit().putInt(childKey(widgetId), nextChild).apply();
+    }
+
     private void fetchAndApply(Context context, AppWidgetManager appWidgetManager, int widgetId,
                                 String token, int flags, int attempt) {
         String baseUrl = context.getString(R.string.base_url);
+        String tz = TimeZone.getDefault().getID();
         WidgetTheme fallbackTheme = WidgetTheme.load(context);
         RemoteViews views = new RemoteViews(context.getPackageName(), fallbackTheme.nudgeLayout());
         fallbackTheme.applyToNudgeRoot(views);
 
         try {
-            String urlStr = baseUrl + "/api/widget?token=" + token + "&mode=nudge";
+            String urlStr = baseUrl + "/api/widget?token=" + token + "&mode=nudge&tz=" + tz;
             HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
             conn.setConnectTimeout(10000);
             conn.setReadTimeout(10000);
@@ -174,33 +237,20 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
             theme.applyToNudgeRoot(views);
 
             JSONArray nudges = root.optJSONArray("nudges");
-            int count = nudges != null ? nudges.length() : 0;
+            if (nudges == null) nudges = new JSONArray();
+            // A genuine successful fetch is authoritative even when empty —
+            // cache it either way, so a *later* dropped connection falls back
+            // to today's real state instead of something stale from before
+            // this fetch.
+            saveCache(context, nudges);
 
-            if (count == 0) {
+            if (nudges.length() == 0) {
                 showStatic(context, theme, views, widgetId, "🌊 Nothing due", null, false);
                 appWidgetManager.updateAppWidget(widgetId, views);
                 return;
             }
 
-            // Round-robin through whatever's due, one per refresh, instead of
-            // always the same one — a cursor per widget instance, wrapped to
-            // the current count (which can shrink between refreshes).
-            SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            int cursor = ((prefs.getInt(cursorKey(widgetId), 0) % count) + count) % count;
-            JSONObject chosen = nudges.getJSONObject(cursor);
-            prefs.edit().putInt(cursorKey(widgetId), (cursor + 1) % count).apply();
-
-            int curChild = prefs.getInt(childKey(widgetId), 0);
-            int nextChild = 1 - curChild;
-            int textId = TEXT_IDS[nextChild];
-
-            theme.applyToNudgeTile(views, textId, true);
-            views.setTextViewText(textId, "🌊 " + chosen.optString("title", "Untitled"));
-            Intent open = new Intent(Intent.ACTION_VIEW, Uri.parse(chosen.optString("url", baseUrl + "/")));
-            views.setOnClickPendingIntent(textId,
-                    PendingIntent.getActivity(context, widgetId, open, flags));
-            views.setDisplayedChild(R.id.nudge_flipper, nextChild);
-            prefs.edit().putInt(childKey(widgetId), nextChild).apply();
+            applyNudgeRotation(context, theme, views, widgetId, flags, baseUrl, nudges);
 
         } catch (Exception e) {
             if (attempt < MAX_NETWORK_RETRIES) {
@@ -214,7 +264,15 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
                 fetchAndApply(context, appWidgetManager, widgetId, token, flags, attempt + 1);
                 return;
             }
-            showStatic(context, fallbackTheme, views, widgetId, "Couldn't reach server", null, false);
+            // Retries exhausted — keep cycling whatever we last successfully
+            // fetched rather than replacing it with an error tile; only fall
+            // back to the error message if there's truly nothing cached yet.
+            JSONArray cached = loadCache(context);
+            if (cached != null && cached.length() > 0) {
+                applyNudgeRotation(context, fallbackTheme, views, widgetId, flags, baseUrl, cached);
+            } else {
+                showStatic(context, fallbackTheme, views, widgetId, "Couldn't reach server", null, false);
+            }
         }
 
         appWidgetManager.updateAppWidget(widgetId, views);
