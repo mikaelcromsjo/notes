@@ -19,9 +19,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Opt-in periodic (not continuous) GPS trail — LocationLogger, piggybacked
          on GridWidgetProvider's own ~30-min system refresh tick, no foreground
-         service or wake-up of its own. ACCESS_BACKGROUND_LOCATION is required
-         on API 29+ because a widget tick runs with no visible UI, which counts
-         as "background" for location access even without a dedicated service. -->
+         service or wake-up of its own. ACCESS_FINE_LOCATION (rather than just
+         coarse) matters here even though the capture itself stays passive —
+         Android fuzzes every location result to ~city-block precision for an
+         app holding only "Approximate location", regardless of which provider
+         actually supplied the fix. ACCESS_BACKGROUND_LOCATION is required on
+         API 29+ because a widget tick runs with no visible UI, which counts as
+         "background" for location access even without a dedicated service. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
 

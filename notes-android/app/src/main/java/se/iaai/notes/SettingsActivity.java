@@ -228,7 +228,11 @@ public class SettingsActivity extends Activity {
     // not bundled into the first request.
     private void requestNextTrailPermission() {
         if (!LocationLogger.hasForegroundPermission(this)) {
-            requestPermissions(new String[]{Manifest.permission.ACCESS_COARSE_LOCATION}, LOCATION_PERMISSION_REQUEST);
+            // FINE (not just COARSE) — the system dialog offers a "Precise"
+            // vs "Approximate" choice either way, but only requesting FINE
+            // gets that choice offered at all; COARSE alone caps every
+            // result at ~city-block accuracy regardless of what's picked.
+            requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, LOCATION_PERMISSION_REQUEST);
         } else if (!LocationLogger.hasBackgroundPermission(this)) {
             requestPermissions(new String[]{Manifest.permission.ACCESS_BACKGROUND_LOCATION}, LOCATION_PERMISSION_REQUEST);
         }

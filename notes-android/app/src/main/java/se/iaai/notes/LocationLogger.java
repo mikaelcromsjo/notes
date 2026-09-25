@@ -27,10 +27,13 @@ import java.util.TimeZone;
  * active GPS session, so there's no foreground service, no persistent
  * notification, and nothing runs between ticks — a stale/missing fix just
  * means this tick is silently skipped (the trail will have gaps rather than
- * ever forcing a fix). Requires ACCESS_COARSE_LOCATION (+
+ * ever forcing a fix). Requires ACCESS_FINE_LOCATION (+
  * ACCESS_BACKGROUND_LOCATION on API 29+, since a widget tick counts as
  * "background" for location access), both granted from SettingsActivity, and
- * the user's own opt-in (KEY_TRAIL_ENABLED). POSTs to
+ * the user's own opt-in (KEY_TRAIL_ENABLED). Fine, not just coarse, matters
+ * even for a passive read: Android fuzzes every location result to
+ * ~city-block precision for an app holding only "Approximate location",
+ * regardless of which provider actually supplied the fix. POSTs to
  * /api/widget/location?token=... (server/routes/widget.js), which itself also
  * rate-limits — MIN_INTERVAL_MS here just avoids firing that request twice
  * when the grid and agenda widgets happen to tick close together.
@@ -58,7 +61,7 @@ final class LocationLogger {
     }
 
     static boolean hasForegroundPermission(Context context) {
-        return context.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+        return context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
                 == PackageManager.PERMISSION_GRANTED;
     }
 
