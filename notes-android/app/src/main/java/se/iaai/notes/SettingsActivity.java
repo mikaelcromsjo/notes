@@ -166,7 +166,7 @@ public class SettingsActivity extends Activity {
         banner.setVisibility(View.VISIBLE);
         button.setVisibility(View.VISIBLE);
         button.setOnClickListener(v -> {
-            UpdateChecker.startDownloadAndInstall(this);
+            UpdateChecker.startDownloadAndInstall(this, update.versionCode);
             Toast.makeText(this, "Downloading update…", Toast.LENGTH_SHORT).show();
             button.setEnabled(false);
         });

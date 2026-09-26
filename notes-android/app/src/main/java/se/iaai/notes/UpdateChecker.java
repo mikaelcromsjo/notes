@@ -170,8 +170,20 @@ class UpdateChecker {
     // only a content:// Uri, never a raw file path. Once the download lands,
     // that Uri goes straight to the system package installer; the one tap
     // that follows there is unavoidable (see class doc comment).
-    static void startDownloadAndInstall(Context context) {
-        String apkUrl = context.getString(R.string.base_url) + "/downloads/notes.apk";
+    //
+    // `versionCode` is appended as a cache-buster (?v=), same idea as the web
+    // app's own "Check for updates" appending ?__update=<ts> to force a fresh
+    // fetch — observed directly: a "found it, downloaded, installed" cycle
+    // that left the installed version unchanged, with the signing key
+    // confirmed unchanged too, meaning the *download* was quietly reusing
+    // stale bytes from an identical prior request to this same URL (some
+    // combination of DownloadManager and/or a path proxy). The server ignores
+    // the query string when resolving the file (plain express.static), so
+    // this changes nothing server-side — it just guarantees each version gets
+    // its own URL, so nothing upstream can conflate two different versions
+    // under one identical request.
+    static void startDownloadAndInstall(Context context, long versionCode) {
+        String apkUrl = context.getString(R.string.base_url) + "/downloads/notes.apk?v=" + versionCode;
         DownloadManager dm = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
         DownloadManager.Request request = new DownloadManager.Request(Uri.parse(apkUrl));
         request.setTitle("Notes Widgets update");
