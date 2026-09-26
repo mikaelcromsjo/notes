@@ -47,8 +47,19 @@ function hashIp(ip) {
   return crypto.createHash('sha256').update(String(ip)).digest('hex').slice(0, 32);
 }
 
+// The DB never sees the bearer secret itself — only its sha256, same pattern
+// as login_tokens. A stolen/backed-up copy of notes.db can't be replayed as a
+// live cookie; `id` (the row's primary key, and what req.sessionId holds) is
+// this hash, not the secret. `idFor` lets a caller that already minted a
+// fresh token (see index.js's legacy-cookie upgrade) get its `id` without a
+// round trip through resolve().
+function idFor(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
 function create(userId, req) {
-  const id = crypto.randomBytes(32).toString('base64url');
+  const token = crypto.randomBytes(32).toString('base64url');
+  const id = idFor(token);
   const nowMs = Date.now();
   insertStmt.run({
     id,
@@ -60,36 +71,39 @@ function create(userId, req) {
       : null,
     ip_hash: hashIp(req && (req.ip || (req.socket && req.socket.remoteAddress))),
   });
-  return id;
+  return token; // the raw secret — only this goes in the cookie, never stored
 }
 
 // Returns { id, user_id } for a live session, or null. Slides the expiry and
 // bumps last_seen_at at most once per LAST_SEEN_THROTTLE_MS.
 function resolve(token) {
   if (!token) return null;
-  const row = selectStmt.get(token);
+  const id = idFor(token);
+  const row = selectStmt.get(id);
   if (!row) return null;
   const nowMs = Date.now();
   if (Date.parse(row.expires_at) < nowMs) {
-    deleteStmt.run(token);
+    deleteStmt.run(id);
     return null;
   }
   if (nowMs - Date.parse(row.last_seen_at) > LAST_SEEN_THROTTLE_MS) {
     touchStmt.run(
       new Date(nowMs).toISOString(),
       new Date(nowMs + MAX_AGE_MS).toISOString(),
-      token
+      id
     );
   }
   return { id: row.id, user_id: row.user_id };
 }
 
-function destroy(token) {
-  if (token) deleteStmt.run(token);
+// Both take an `id` (the hashed value from resolve()/list()), never the raw
+// cookie secret.
+function destroy(id) {
+  if (id) deleteStmt.run(id);
 }
 
-function destroyOthers(userId, keepToken) {
-  deleteOthersStmt.run(userId, keepToken || '');
+function destroyOthers(userId, keepId) {
+  deleteOthersStmt.run(userId, keepId || '');
 }
 
 function list(userId) {
@@ -118,4 +132,5 @@ module.exports = {
   destroyOthers,
   list,
   sweepExpired,
+  idFor,
 };

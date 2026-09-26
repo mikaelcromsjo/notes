@@ -106,7 +106,9 @@ function resolveSession(req, res, next) {
       res.cookie(sessions.SESSION_COOKIE, token, sessions.COOKIE_OPTS);
       res.clearCookie(sessions.LEGACY_COOKIE, { path: '/' });
       req.userId = user.id;
-      req.sessionId = token;
+      // req.sessionId is the hashed row id (what resolve()/list() deal in),
+      // never the raw cookie secret — see sessions.js.
+      req.sessionId = sessions.idFor(token);
       return next();
     }
   }

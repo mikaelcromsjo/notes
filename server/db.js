@@ -208,9 +208,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_history_user ON history (user_id, id DESC);
 `);
 
-// Server-side sessions. The cookie (nico_sess) holds an opaque 256-bit id; this
-// row is the only thing that authenticates a request. Replaces the old scheme
-// where the cookie was the raw users.id and could be forged.
+// Server-side sessions. The cookie (nico_sess) holds an opaque 256-bit secret;
+// this row is the only thing that authenticates a request. Replaces the old
+// scheme where the cookie was the raw users.id and could be forged.
+// `id` is sha256(secret) (see sessions.js's idFor), never the secret itself —
+// same reasoning as login_tokens.token_hash: a leaked/backed-up copy of this
+// table can't be replayed as a live cookie.
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
