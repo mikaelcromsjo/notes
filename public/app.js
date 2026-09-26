@@ -2220,7 +2220,7 @@
       return [h, m];
     }
     const startM = parseHHMM(a.windowStart) ?? 8 * 60;
-    const endM = Math.max(startM + 1, parseHHMM(a.windowEnd) ?? 21 * 60);
+    const endM = Math.max(startM + 1, parseHHMM(a.windowEnd) ?? 23 * 60);
     const dayKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
     const mins = startM + Math.floor(seededFraction(`${a.id}:${dayKey}`) * (endM - startM));
     return [Math.floor(mins / 60), mins % 60];
@@ -5938,7 +5938,7 @@
     const w = document.createElement('div');
     w.className = 'agenda-when';
     const snoozed = a.snoozeUntil && new Date(a.snoozeUntil) > new Date();
-    // kind='anytime' always reads as "🌊 Sometime 08:00–21:00" (alarmWhenText)
+    // kind='anytime' always reads as "🌊 Sometime 08:00–23:00" (alarmWhenText)
     // rather than the resolved clock instant (agendaWhenText) — it's in its
     // own end-of-agenda section regardless of overdue, so `overdue` here is
     // only ever true for a real time/location reminder.
@@ -6226,6 +6226,9 @@
   // The place chosen in the current editor session (current-location or map
   // pick); null falls back to the note's own lat/lon.
   let alarmPickedLoc = null;
+  // Whether this editor session has already applied the nudge day defaults
+  // (see the alarmKindRow click handler).
+  let alarmNudgeDefaultsDone = false;
 
   function currentAlarmLoc() {
     if (alarmPickedLoc) return alarmPickedLoc;
@@ -6299,7 +6302,10 @@
       alarmRadiusInput.value = alarmRadiusInput.value || '250';
     }
     alarmWindowStartInput.value = existing && existing.windowStart ? existing.windowStart : '08:00';
-    alarmWindowEndInput.value = existing && existing.windowEnd ? existing.windowEnd : '21:00';
+    alarmWindowEndInput.value = existing && existing.windowEnd ? existing.windowEnd : '23:00';
+    // An existing nudge already carries the user's own days (possibly none, if
+    // it's a one-time date) — don't let the all-days default below stomp them.
+    alarmNudgeDefaultsDone = !!(existing && existing.kind === 'anytime');
     setAlarmKind(existing ? existing.kind : 'time');
 
     alarmRemoveBtn.classList.toggle('hidden', !existing);
@@ -6314,7 +6320,18 @@
 
   alarmKindRow.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-kind]');
-    if (b) setAlarmKind(b.dataset.kind);
+    if (!b) return;
+    // A nudge is almost always "every day, at some point" — so the first time
+    // the user picks Nudge in this editor session, fill the shared day row in
+    // for them (an empty one would otherwise drop it onto the one-time-date
+    // path). Once per session only, so toggling the kind back and forth never
+    // overwrites days they went on to change.
+    if (b.dataset.kind === 'anytime' && !alarmNudgeDefaultsDone) {
+      alarmNudgeDefaultsDone = true;
+      alarmDaysRow.querySelectorAll('.alarm-day-btn').forEach((d) => d.classList.add('active'));
+      syncAlarmDateVisibility();
+    }
+    setAlarmKind(b.dataset.kind);
   });
 
   alarmLocCurrentBtn.addEventListener('click', async () => {

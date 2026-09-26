@@ -13,7 +13,7 @@
 //
 // Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
 // a byte change to this file is itself what makes the browser re-run install.
-const CACHE_VERSION = 'v28';
+const CACHE_VERSION = 'v29';
 const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [
@@ -23,12 +23,24 @@ const SHELL_ASSETS = [
   '/store.js',
   '/themes.js',
   '/style.css',
+  '/manifest.webmanifest',
+];
+
+// Fonts, vendored libs and icons: content-stable (they only change when someone
+// deliberately swaps one), and the priciest things to re-fetch. They live in
+// their own cache, keyed by VENDOR_VERSION rather than CACHE_VERSION, so a
+// shell-only deploy (the common case — an app.js/style.css tweak) never forces
+// a re-download of every font/icon/vendor-lib just because *a* new worker
+// installed. Bump VENDOR_VERSION only when one of these files itself changes.
+const VENDOR_VERSION = 'v1';
+const VENDOR_CACHE = `nico-vendor-${VENDOR_VERSION}`;
+
+const VENDOR_ASSETS = [
   '/vendor/fonts/inter.woff2',
   '/vendor/fonts/nunito.woff2',
   '/vendor/fonts/lora.woff2',
   '/vendor/fonts/jetbrains-mono.woff2',
   '/vendor/fonts/orbitron.woff2',
-  '/manifest.webmanifest',
   '/vendor/leaflet.min.js',
   '/vendor/leaflet.min.css',
   '/vendor/marked.min.js',
@@ -43,17 +55,27 @@ const SHELL_ASSETS = [
   '/icon-maskable-512.png',
 ];
 
+const isVendorAsset = (pathname) => VENDOR_ASSETS.includes(pathname);
+const cacheNameFor = (pathname) => (isVendorAsset(pathname) ? VENDOR_CACHE : SHELL_CACHE);
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     (async () => {
-      const cache = await caches.open(SHELL_CACHE);
+      const shell = await caches.open(SHELL_CACHE);
+      const vendor = await caches.open(VENDOR_CACHE);
       // Individually so one 404 (e.g. a missing icon) doesn't fail the whole
       // precache and leave the worker without a shell.
-      await Promise.all(
-        SHELL_ASSETS.map((url) =>
-          cache.add(new Request(url, { cache: 'reload' })).catch(() => {})
-        )
-      );
+      await Promise.all([
+        ...SHELL_ASSETS.map((url) =>
+          shell.add(new Request(url, { cache: 'reload' })).catch(() => {})
+        ),
+        // Vendor assets only get fetched if not already sitting in the (version-
+        // stable) vendor cache from a previous install — no forced re-download.
+        ...VENDOR_ASSETS.map(async (url) => {
+          if (await vendor.match(url)) return;
+          await vendor.add(new Request(url, { cache: 'reload' })).catch(() => {});
+        }),
+      ]);
       await self.skipWaiting();
     })()
   );
@@ -63,7 +85,9 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
       const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k !== SHELL_CACHE).map((k) => caches.delete(k)));
+      await Promise.all(
+        keys.filter((k) => k !== SHELL_CACHE && k !== VENDOR_CACHE).map((k) => caches.delete(k))
+      );
       await self.clients.claim();
       // Tell already-open pages a new worker is in charge — they still hold the
       // previous app.js in memory, so app.js decides whether to prompt a reload.
@@ -106,10 +130,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Stale-while-revalidate for shell assets.
+  // Stale-while-revalidate for shell/vendor assets — whichever cache this one
+  // belongs to (see cacheNameFor).
   event.respondWith(
     (async () => {
-      const cache = await caches.open(SHELL_CACHE);
+      const cache = await caches.open(cacheNameFor(url.pathname));
       const cached = await cache.match(request);
       const network = fetch(request)
         .then((res) => {
