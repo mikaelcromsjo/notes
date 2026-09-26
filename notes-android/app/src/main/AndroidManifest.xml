@@ -29,6 +29,12 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Lets Settings offer the standard "exempt this app from battery
+         optimization" system dialog — widget refreshes (updatePeriodMillis)
+         are only a hint the OS can defer for hours under Doze/App Standby,
+         and this is the only lever available for that without a foreground
+         service or a dedicated wake-up of our own. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:allowBackup="true"

@@ -9,6 +9,7 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -78,6 +79,7 @@ public class SettingsActivity extends Activity {
         showUpdateBannerIfPending();
         showInstalledVersion();
         wireCheckUpdateButton();
+        wireBatterySection();
         wireTrailSection();
 
         EditText tokenInput = findViewById(R.id.token_input);
@@ -120,7 +122,33 @@ public class SettingsActivity extends Activity {
         if (!contentReady) return;
         showInstalledVersion();
         showUpdateBannerIfPending();
+        updateBatteryUi();
         updateTrailUi();
+    }
+
+    // Widget refreshes (GridWidgetProvider/AgendaWidgetProvider/
+    // NudgeWidgetProvider's ~30-min updatePeriodMillis) are only a hint the OS
+    // can defer for hours under Doze/App Standby — observed directly: a
+    // 6-hour gap with nothing wrong in the fetch/parse logic itself, just the
+    // broadcast not being delivered promptly. Requesting exemption from
+    // battery optimization is the standard lever for that without adding a
+    // foreground service or a wake-up of our own.
+    private void wireBatterySection() {
+        findViewById(R.id.battery_button).setOnClickListener(v -> startActivity(
+                new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getPackageName()))));
+        updateBatteryUi();
+    }
+
+    private void updateBatteryUi() {
+        TextView status = findViewById(R.id.battery_status);
+        Button button = findViewById(R.id.battery_button);
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean ignoring = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+        status.setText(ignoring
+                ? "Allowed — refreshes shouldn't be delayed by battery optimization."
+                : "May be restricted, which can delay refreshes by hours (especially overnight).");
+        button.setVisibility(ignoring ? View.GONE : View.VISIBLE);
     }
 
     private void showUpdateBannerIfPending() {

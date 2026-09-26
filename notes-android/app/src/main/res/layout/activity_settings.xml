@@ -62,6 +62,38 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="24dp"
+        android:text="Background refresh"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Android can delay a widget's ~30-min refresh by hours if it decides this app is idle — often overnight. Allowing it to run in the background makes refreshes (grid, agenda, nudge, location trail) more reliable. This only affects timing; nothing changes about what's fetched or how often it's requested."
+        android:textSize="13sp"
+        android:alpha="0.75" />
+
+    <TextView
+        android:id="@+id/battery_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textSize="12sp"
+        android:alpha="0.75" />
+
+    <Button
+        android:id="@+id/battery_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Allow background activity"
+        android:visibility="gone" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
         android:text="Location trail"
         android:textSize="14sp"
         android:textStyle="bold" />
