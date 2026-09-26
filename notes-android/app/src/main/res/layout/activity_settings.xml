@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<!-- ScrollView wrapper: this screen has grown (background refresh + location
+     trail sections on top of the original token/update UI) past what fits on
+     a phone screen without scrolling — a plain top-level LinearLayout left
+     the bottom controls (Check for updates, etc.) unreachable. -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
+    android:layout_height="match_parent">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="24dp">
 
@@ -152,3 +160,4 @@
         android:alpha="0.6" />
 
 </LinearLayout>
+</ScrollView>
