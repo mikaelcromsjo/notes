@@ -1,122 +1,29 @@
 const express = require('express');
 const db = require('../db');
-const history = require('../history');
+const linksCore = require('../links');
+const { HttpError } = require('../http-error');
 
 const router = express.Router();
 
-const nowIso = () => new Date().toISOString();
-
-// The caller's whole link graph — the client mirrors this into IndexedDB so the
-// grid (and, later, offline link edits) can be rebuilt with no connection.
-router.get('/', (req, res) => {
-  const rows = db
-    .prepare('SELECT note_a AS a, note_b AS b, created_at FROM links WHERE user_id = ? ORDER BY created_at')
-    .all(req.userId);
-  res.json(rows);
-});
-
-// Create a link. When `rehomeFrom` is given, this is a card being dragged from
-// one anchor to another: link (a ↔ b), drop (rehomeFrom ↔ b), and log the pair
-// as a single reversible "moved" entry. `b` is the card; `a` the new anchor.
-router.post('/', (req, res) => {
-  const { a, b, rehomeFrom } = req.body;
-  const aNum = Number(a);
-  const bNum = Number(b);
-  if (!Number.isInteger(aNum) || !Number.isInteger(bNum) || aNum <= 0 || bNum <= 0 || aNum === bNum) {
-    return res.status(400).json({ error: 'a and b (distinct note ids) are required' });
-  }
-  const noteA = Math.min(aNum, bNum);
-  const noteB = Math.max(aNum, bNum);
-
-  const owned = db
-    .prepare('SELECT COUNT(*) AS c FROM notes WHERE id IN (?, ?) AND user_id = ?')
-    .get(noteA, noteB, req.userId);
-  if (owned.c !== 2) {
-    return res.status(404).json({ error: 'one or both notes not found' });
-  }
-
-  const isRehome =
-    rehomeFrom &&
-    Number(rehomeFrom) !== Number(b) &&
-    db.prepare('SELECT 1 FROM notes WHERE id = ? AND user_id = ?').get(rehomeFrom, req.userId);
-
-  // Recorded pre-move so undo can restore it exactly, rather than leaving
-  // stale provenance pointing at whichever anchor a later undo/redo landed on.
-  const prevCreatedFrom = isRehome
-    ? db.prepare('SELECT created_from_note_id FROM notes WHERE id = ?').get(bNum).created_from_note_id
-    : null;
-
-  db.transaction(() => {
-    db.prepare(
-      'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
-    ).run(noteA, noteB, nowIso(), req.userId);
-
-    if (isRehome) {
-      const [fa, fb] = [Math.min(rehomeFrom, b), Math.max(rehomeFrom, b)];
-      db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ? AND user_id = ?').run(
-        fa,
-        fb,
-        req.userId
-      );
-      // A move is explicit intent, stronger evidence than link chronology —
-      // stamp it as provenance so the "probable parent" hierarchy (and
-      // anything built on it) reflects the move immediately, rather than an
-      // older surviving link on the card outranking it (see notes.js
-      // /neighbors' "probable parent" for why oldest-link normally wins).
-      db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ? AND user_id = ?').run(
-        aNum,
-        bNum,
-        req.userId
-      );
+// Thin Express adapter over server/links.js — see server/routes/notes.js's
+// `wrap` for the shared convention.
+function wrap(fn, status = 200) {
+  return (req, res) => {
+    try {
+      const result = fn(req, res);
+      if (status === 204) return res.status(204).end();
+      res.status(status).json(result);
+    } catch (err) {
+      if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+      throw err;
     }
-  })();
+  };
+}
 
-  if (isRehome) {
-    history.record(
-      req.userId,
-      'rehome',
-      { card: Number(b), from: Number(rehomeFrom), to: Number(a), prevCreatedFrom },
-      `Moved "${history.noteTitle(req.userId, b)}" from "${history.noteTitle(
-        req.userId,
-        rehomeFrom
-      )}" into "${history.noteTitle(req.userId, a)}"`
-    );
-  } else {
-    history.record(
-      req.userId,
-      'link',
-      { a: noteA, b: noteB },
-      `Linked "${history.noteTitle(req.userId, noteA)}" ↔ "${history.noteTitle(req.userId, noteB)}"`
-    );
-  }
+router.get('/', wrap((req) => linksCore.list(db, req.userId)));
 
-  res.status(201).json({ a: noteA, b: noteB });
-});
+router.post('/', wrap((req) => linksCore.create(db, req.userId, req.body), 201));
 
-router.delete('/', (req, res) => {
-  const { a, b } = req.body;
-  if (!a || !b) return res.status(400).json({ error: 'a and b are required' });
-  const noteA = Math.min(a, b);
-  const noteB = Math.max(a, b);
-
-  const owned = db
-    .prepare('SELECT COUNT(*) AS c FROM notes WHERE id IN (?, ?) AND user_id = ?')
-    .get(noteA, noteB, req.userId);
-  if (owned.c !== 2) return res.status(404).json({ error: 'link not found' });
-
-  const info = db
-    .prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?')
-    .run(noteA, noteB);
-  if (info.changes === 0) return res.status(404).json({ error: 'link not found' });
-
-  history.record(
-    req.userId,
-    'unlink',
-    { a: noteA, b: noteB },
-    `Unlinked "${history.noteTitle(req.userId, noteA)}" ✕ "${history.noteTitle(req.userId, noteB)}"`
-  );
-
-  res.status(204).end();
-});
+router.delete('/', wrap((req) => linksCore.remove(db, req.userId, req.body), 204));
 
 module.exports = router;

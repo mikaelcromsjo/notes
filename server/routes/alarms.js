@@ -1,284 +1,58 @@
 const express = require('express');
 const db = require('../db');
+const reminders = require('../reminders');
+const { HttpError } = require('../http-error');
 
 const router = express.Router();
 
-const now = () => new Date().toISOString();
-const validTs = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
-const tsOrNull = (v) => (validTs(v) ? v : null);
-
-// The server never computes fire times: "11:00" means 11:00 in the *viewer's*
-// timezone and the box runs in UTC. The client (public/app.js) computes ack_at
-// (last "OK"), next_at (absolute UTC of the next ring) and snooze_until, and
-// this route just persists them. next_at / snooze_until + pushed_at drive the
-// server-side Web Push scheduler (server/alarm-scheduler.js).
-function serialize(r) {
-  return {
-    id: r.id,
-    noteId: r.note_id,
-    title: r.title,
-    kind: r.kind || 'time',
-    time: r.time,
-    days: r.days ? r.days.split(',').map(Number) : [],
-    date: r.date,
-    lat: r.lat,
-    lon: r.lon,
-    radiusM: r.radius_m,
-    windowStart: r.window_start,
-    windowEnd: r.window_end,
-    tz: r.tz,
-    ackAt: r.ack_at,
-    nextAt: r.next_at,
-    snoozeUntil: r.snooze_until,
+// Thin Express adapter over server/reminders.js — see server/routes/notes.js's
+// `wrap` for the shared convention.
+function wrap(fn, status = 200) {
+  return (req, res) => {
+    try {
+      const result = fn(req, res);
+      if (status === 204) return res.status(204).end();
+      res.status(status).json(result === undefined ? { ok: true } : result);
+    } catch (err) {
+      if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
   };
 }
 
-const COLS = `r.id, r.note_id, r.kind, r.time, r.days, r.date, r.lat, r.lon, r.radius_m,
-              r.window_start, r.window_end, r.tz, r.ack_at, r.next_at, r.snooze_until, n.title`;
+router.get('/', wrap((req) => reminders.list(db, req.userId)));
 
-const selectOne = db.prepare(
-  `SELECT ${COLS} FROM reminders r JOIN notes n ON n.id = r.note_id
-   WHERE r.id = ? AND r.user_id = ?`
+// Background catch-up sweep for location encryption — see server/notes.js's
+// /encrypt-geo route for the same pattern.
+router.post(
+  '/encrypt-geo',
+  wrap((req) => reminders.encryptGeo(db, req.userId, req.body && req.body.items))
 );
 
-// The day-pattern half shared by kind='time' and kind='anytime': either repeat
-// days (CSV of JS getDay() numbers) or a one-time date, never neither. Returns
-// { days, date } or { error }.
-function parseDayPattern(body) {
-  const { days, date } = body || {};
-  const daysStr = Array.isArray(days)
-    ? [...new Set(days.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
-        .sort((a, b) => a - b)
-        .join(',')
-    : '';
-  const dateStr =
-    !daysStr && typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
-  if (!daysStr && !dateStr) return { error: 'pick repeat days or a one-time date' };
-  return { days: daysStr, date: dateStr };
-}
-
-// Validate the shared reminder body. Returns { time, days, date } or { error }.
-function parseSchedule(body) {
-  const { time } = body || {};
-  if (!time || !/^\d{2}:\d{2}$/.test(time)) return { error: 'time must be HH:MM' };
-  const pattern = parseDayPattern(body);
-  if (pattern.error) return pattern;
-  return { time, days: pattern.days, date: pattern.date };
-}
-
-// kind='anytime': a day pattern (see parseDayPattern) plus the HH:MM-HH:MM
-// window the client is allowed to pick a fire minute from — no committed
-// clock time. Returns { days, date, windowStart, windowEnd } or { error }.
-function parseNudge(body) {
-  const { windowStart, windowEnd } = body || {};
-  if (!windowStart || !/^\d{2}:\d{2}$/.test(windowStart)) return { error: 'windowStart must be HH:MM' };
-  if (!windowEnd || !/^\d{2}:\d{2}$/.test(windowEnd)) return { error: 'windowEnd must be HH:MM' };
-  if (windowEnd <= windowStart) return { error: 'windowEnd must be after windowStart' };
-  const pattern = parseDayPattern(body);
-  if (pattern.error) return pattern;
-  return { days: pattern.days, date: pattern.date, windowStart, windowEnd };
-}
-
-// A geofence reminder (kind='location'): a circle, no clock. Returns
-// { lat, lon, radiusM } or { error }.
-function parseLocation(body) {
-  const lat = Number(body && body.lat);
-  const lon = Number(body && body.lon);
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) return { error: 'lat out of range' };
-  if (!Number.isFinite(lon) || lon < -180 || lon > 180) return { error: 'lon out of range' };
-  let radiusM = Math.round(Number(body && body.radiusM));
-  if (!Number.isFinite(radiusM)) radiusM = 250;
-  radiusM = Math.min(10000, Math.max(50, radiusM));
-  return { lat, lon, radiusM };
-}
-
-const tzOf = (body, fallback = null) =>
-  body && typeof body.tz === 'string' && body.tz ? body.tz.slice(0, 64) : fallback;
-
-router.get('/', (req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT ${COLS} FROM reminders r JOIN notes n ON n.id = r.note_id
-       WHERE r.user_id = ? AND n.status != 'deleted'
-       ORDER BY r.time ASC, n.title ASC`
-    )
-    .all(req.userId);
-  res.json(rows.map(serialize));
-});
-
 // Create a reminder for a note.
-router.post('/', (req, res) => {
-  const note = db
-    .prepare("SELECT id FROM notes WHERE id = ? AND user_id = ? AND status != 'deleted'")
-    .get(req.body && req.body.noteId, req.userId);
-  if (!note) return res.status(404).json({ error: 'note not found' });
-
-  if (req.body && req.body.kind === 'location') {
-    const loc = parseLocation(req.body);
-    if (loc.error) return res.status(400).json({ error: loc.error });
-    const info = db
-      .prepare(
-        `INSERT INTO reminders (note_id, user_id, kind, time, days, date, lat, lon, radius_m, tz, ack_at)
-         VALUES (?, ?, 'location', '', '', NULL, ?, ?, ?, ?, ?)`
-      )
-      .run(note.id, req.userId, loc.lat, loc.lon, loc.radiusM, tzOf(req.body), now());
-    return res.status(201).json(serialize(selectOne.get(info.lastInsertRowid, req.userId)));
-  }
-
-  if (req.body && req.body.kind === 'anytime') {
-    const nudge = parseNudge(req.body);
-    if (nudge.error) return res.status(400).json({ error: nudge.error });
-    const ack = validTs(req.body.ackAt) ? req.body.ackAt : now();
-    const info = db
-      .prepare(
-        `INSERT INTO reminders (note_id, user_id, kind, time, days, date, window_start, window_end, tz, ack_at, next_at)
-         VALUES (?, ?, 'anytime', '', ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        note.id, req.userId, nudge.days, nudge.date, nudge.windowStart, nudge.windowEnd,
-        tzOf(req.body), ack, tsOrNull(req.body.nextAt)
-      );
-    return res.status(201).json(serialize(selectOne.get(info.lastInsertRowid, req.userId)));
-  }
-
-  const s = parseSchedule(req.body);
-  if (s.error) return res.status(400).json({ error: s.error });
-
-  const ack = validTs(req.body.ackAt) ? req.body.ackAt : now();
-  const info = db
-    .prepare(
-      `INSERT INTO reminders (note_id, user_id, time, days, date, tz, ack_at, next_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(note.id, req.userId, s.time, s.days, s.date, tzOf(req.body), ack, tsOrNull(req.body.nextAt));
-  res.status(201).json(serialize(selectOne.get(info.lastInsertRowid, req.userId)));
-});
+router.post('/', wrap((req) => reminders.create(db, req.userId, req.body), 201));
 
 // Update a reminder by its own id.
-router.put('/:id', (req, res) => {
-  const existing = selectOne.get(req.params.id, req.userId);
-  if (!existing) return res.status(404).json({ error: 'not found' });
+router.put('/:id', wrap((req) => reminders.update(db, req.userId, req.params.id, req.body)));
 
-  if (req.body && req.body.kind === 'location') {
-    const loc = parseLocation(req.body);
-    if (loc.error) return res.status(400).json({ error: loc.error });
-    db.prepare(
-      `UPDATE reminders
-       SET kind = 'location', time = '', days = '', date = NULL,
-           lat = ?, lon = ?, radius_m = ?, window_start = NULL, window_end = NULL,
-           tz = ?, ack_at = ?, next_at = NULL, pushed_at = NULL, snooze_until = NULL
-       WHERE id = ? AND user_id = ?`
-    ).run(loc.lat, loc.lon, loc.radiusM, tzOf(req.body, existing.tz), now(),
-          req.params.id, req.userId);
-    return res.json(serialize(selectOne.get(req.params.id, req.userId)));
-  }
-
-  if (req.body && req.body.kind === 'anytime') {
-    const nudge = parseNudge(req.body);
-    if (nudge.error) return res.status(400).json({ error: nudge.error });
-    const ack = validTs(req.body.ackAt) ? req.body.ackAt : now();
-    db.prepare(
-      `UPDATE reminders
-       SET kind = 'anytime', time = '', days = ?, date = ?, lat = NULL, lon = NULL, radius_m = NULL,
-           window_start = ?, window_end = ?, tz = ?, ack_at = ?, next_at = ?,
-           pushed_at = NULL, snooze_until = NULL
-       WHERE id = ? AND user_id = ?`
-    ).run(
-      nudge.days, nudge.date, nudge.windowStart, nudge.windowEnd, tzOf(req.body, existing.tz),
-      ack, tsOrNull(req.body.nextAt), req.params.id, req.userId
-    );
-    return res.json(serialize(selectOne.get(req.params.id, req.userId)));
-  }
-
-  const s = parseSchedule(req.body);
-  if (s.error) return res.status(400).json({ error: s.error });
-
-  const ack = validTs(req.body.ackAt) ? req.body.ackAt : now();
-  db.prepare(
-    `UPDATE reminders
-     SET kind = 'time', time = ?, days = ?, date = ?, lat = NULL, lon = NULL, radius_m = NULL,
-         window_start = NULL, window_end = NULL,
-         tz = ?, ack_at = ?, next_at = ?, pushed_at = NULL, snooze_until = NULL
-     WHERE id = ? AND user_id = ?`
-  ).run(s.time, s.days, s.date, tzOf(req.body, existing.tz), ack, tsOrNull(req.body.nextAt),
-        req.params.id, req.userId);
-  res.json(serialize(selectOne.get(req.params.id, req.userId)));
-});
-
-router.delete('/:id', (req, res) => {
-  const info = db
-    .prepare('DELETE FROM reminders WHERE id = ? AND user_id = ?')
-    .run(req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  res.status(204).end();
-});
+router.delete('/:id', wrap((req) => reminders.remove(db, req.userId, req.params.id), 204));
 
 // "OK" on the popup — quiet until the reminder next goes off. The client sends
 // the rolled-forward nextAt so the scheduler re-arms for that occurrence; any
 // active snooze is spent.
-router.post('/:id/ack', (req, res) => {
-  const at = validTs(req.body && req.body.at) ? req.body.at : now();
-  const next = tsOrNull(req.body && req.body.nextAt);
-  const info = db
-    .prepare(
-      `UPDATE reminders SET ack_at = ?, next_at = ?, pushed_at = NULL, snooze_until = NULL
-       WHERE id = ? AND user_id = ?`
-    )
-    .run(at, next, req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  res.json({ ok: true });
-});
+router.post('/:id/ack', wrap((req) => reminders.ack(db, req.userId, req.params.id, req.body)));
 
 // Push the reminder out to an absolute instant (weeks/months). The client
 // computes `until` in the viewer's timezone; the scheduler treats snooze_until
 // as the due time while it is set.
-router.post('/:id/snooze', (req, res) => {
-  const until = tsOrNull(req.body && req.body.until);
-  if (!until || Date.parse(until) <= Date.now()) {
-    return res.status(400).json({ error: 'until must be a future timestamp' });
-  }
-  const info = db
-    .prepare(
-      `UPDATE reminders SET snooze_until = ?, ack_at = ?, pushed_at = NULL
-       WHERE id = ? AND user_id = ?`
-    )
-    .run(until, now(), req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  res.json({ ok: true });
-});
+router.post('/:id/snooze', wrap((req) => reminders.snooze(db, req.userId, req.params.id, req.body)));
 
 // Roll the next-ring instant forward (client does this on every poll while the
 // app is open, so future occurrences stay armed for push).
-router.post('/:id/schedule', (req, res) => {
-  const next = tsOrNull(req.body && req.body.nextAt);
-  const info = db
-    .prepare(
-      `UPDATE reminders SET next_at = ?, pushed_at = NULL WHERE id = ? AND user_id = ?`
-    )
-    .run(next, req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  res.json({ ok: true });
-});
+router.post('/:id/schedule', wrap((req) => reminders.schedule(db, req.userId, req.params.id, req.body)));
 
 // The client's foreground geofence watch calls this when the viewer crosses into
-// a location reminder's radius. Stamp next_at = now so the normal triggered /
-// push path takes over — but only if it isn't already pending (still ringing, or
-// snoozed into the future), so GPS jitter in and out of the fence can't spam it.
-router.post('/:id/arrive', (req, res) => {
-  const r = db
-    .prepare("SELECT * FROM reminders WHERE id = ? AND user_id = ? AND kind = 'location'")
-    .get(req.params.id, req.userId);
-  if (!r) return res.status(404).json({ error: 'not found' });
-
-  const pending =
-    (r.next_at && (!r.ack_at || Date.parse(r.next_at) > Date.parse(r.ack_at))) ||
-    (r.snooze_until && Date.parse(r.snooze_until) > Date.now());
-  if (pending) return res.json({ ok: true, armed: false });
-
-  db.prepare(
-    'UPDATE reminders SET next_at = ?, pushed_at = NULL, snooze_until = NULL WHERE id = ? AND user_id = ?'
-  ).run(now(), req.params.id, req.userId);
-  res.json({ ok: true, armed: true });
-});
+// a location reminder's radius.
+router.post('/:id/arrive', wrap((req) => ({ ok: true, ...reminders.arrive(db, req.userId, req.params.id) })));
 
 module.exports = router;

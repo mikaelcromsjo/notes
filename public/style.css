@@ -1210,6 +1210,38 @@ button:hover { filter: brightness(1.05); }
   box-shadow: var(--shadow);
 }
 
+/* These open *from inside* the still-open Settings overlay (👤 → Privacy),
+   so they need to stack above it — plain DOM order isn't enough since both
+   are `.overlay` at the same z-index and enc-setup/unlock-overlay come
+   first in index.html. */
+#enc-setup-overlay,
+#enc-unlock-overlay {
+  z-index: 55;
+}
+.enc-modal {
+  max-width: 460px;
+}
+.enc-key-display {
+  font-family: var(--font-mono, monospace);
+  font-size: 1.05rem;
+  letter-spacing: 0.04em;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.8rem;
+  text-align: center;
+  word-break: break-all;
+  user-select: all;
+  margin: 0.6rem 0;
+}
+.enc-key-input {
+  width: 100%;
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 0.4rem 0;
+}
+
 .confirm-message {
   margin: 0 0 1.2rem;
   font-size: 0.95rem;
@@ -1399,11 +1431,8 @@ button:hover { filter: brightness(1.05); }
 .map-fullscreen {
   position: relative;
   background: var(--surface);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  width: 92%;
-  max-width: 1100px;
-  height: 88vh;
+  width: 100%;
+  height: 100%;
   padding: 0;
   overflow: hidden;
 }
@@ -1461,6 +1490,91 @@ button:hover { filter: brightness(1.05); }
   box-shadow: var(--shadow);
 }
 
+.graph-fullscreen {
+  position: relative;
+  background: var(--surface);
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Unlike the geo map, the graph canvas has no on-canvas zoom control to
+   clear (zoom is pinch/wheel-only), so pull the button row in from
+   .map-modes' shared left:3.25rem all the way to the overlay's edge, and up
+   from top:2.75rem onto the same row as the close (✕) button. */
+#graph-layout-modes {
+  top: 0.75rem;
+  left: 0.75rem;
+}
+
+/* Fixed width, sized to fit the wider of "🎯 Radial" / "🌀 Force", and
+   left-aligned content — otherwise the centred default button text shifts
+   the icon sideways every time the label swaps between the two words. */
+#graph-layout-toggle {
+  width: 5.75rem;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+/* Same fixed-width treatment, sized for the wider "🔥 Heat" / "📏 Link". */
+#graph-score-toggle {
+  width: 5.25rem;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+/* Coloured emoji read as "on" even in the unselected, non-accent button
+   state — desaturate so "off" (the default) looks unmistakably off. */
+#graph-done-toggle:not(.active) {
+  filter: grayscale(1);
+}
+
+.graph-canvas-wrap {
+  position: absolute;
+  inset: 0;
+}
+
+#graph-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+/* Full-width bar along the bottom, like the geo map's date-range slider. */
+.graph-level-row {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 1rem;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: 0.4rem 0.75rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.graph-level-row input[type="range"] {
+  flex: 1;
+  width: auto;
+}
+
+#graph-overlay .note-fullscreen-close {
+  z-index: 500;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
 /* Stacked-notes marker: a counted badge standing in for several pins at one spot. */
 .map-stack-icon span {
   display: flex;
@@ -1499,6 +1613,106 @@ button:hover { filter: brightness(1.05); }
   color: #fff;
   font-size: 0.8rem;
   font-weight: 700;
+}
+
+/* Map date-range slider: exponential-scale "today - forever" range picker that
+   filters which pins/trail points show. Stacked bottom-up: static reference
+   ticks, the drag track above them, the live "resolved range" label on top. */
+.map-date-label {
+  position: absolute;
+  bottom: 3.4rem;
+  left: 12px;
+  right: 12px;
+  z-index: 500;
+  text-align: center;
+  pointer-events: none;
+}
+
+.map-date-label span {
+  display: inline-block;
+  pointer-events: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  padding: 0.2rem 0.65rem;
+  font-size: 0.75rem;
+  color: var(--text);
+}
+
+.map-date-slider {
+  position: absolute;
+  /* Inset by slightly more than the thumb's own radius (10px) so a thumb
+     parked at 0%/100% stays fully on-screen instead of being clipped by
+     .map-fullscreen's overflow:hidden. */
+  left: 12px;
+  right: 12px;
+  bottom: 1.7rem;
+  height: 28px;
+  z-index: 500;
+  touch-action: none;
+  user-select: none;
+  cursor: pointer;
+}
+
+.map-date-slider-track,
+.map-date-slider-selection {
+  position: absolute;
+  top: 12px;
+  height: 4px;
+  border-radius: 4px;
+}
+
+.map-date-slider-track {
+  left: 0;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.map-date-slider-selection {
+  background: var(--accent);
+  cursor: grab;
+}
+
+.map-date-slider-selection:active {
+  cursor: grabbing;
+}
+
+.map-date-slider-thumb {
+  position: absolute;
+  top: 4px;
+  width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+  transform: translateX(-50%);
+  cursor: grab;
+  box-shadow: var(--shadow);
+}
+
+.map-date-slider-thumb:active {
+  cursor: grabbing;
+}
+
+.map-date-ticks {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 0.4rem;
+  height: 1rem;
+  z-index: 500;
+  font-size: 0.65rem;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.map-date-ticks span {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
 }
 
 .map-pick-banner {

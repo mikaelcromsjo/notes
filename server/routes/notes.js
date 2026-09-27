@@ -1,648 +1,128 @@
-const fs = require('fs');
-const path = require('path');
 const express = require('express');
 const db = require('../db');
-const history = require('../history');
-const { uploadsDir, diskUpload } = require('../upload-config');
-const { buildHierarchy, subtreeIds, probableRoot } = require('../hierarchy');
-const { computeNeighbors } = require('../neighbors');
-const { extractTags } = require('../tags');
-const themes = require('../../public/themes.js');
-const { ownsUpload, sweepImages } = require('./theme');
+const { diskUpload } = require('../upload-config');
+const notesCore = require('../notes');
+const { HttpError } = require('../http-error');
 
 const router = express.Router();
-
-const now = () => new Date().toISOString();
-
 const upload = diskUpload();
 
-// Coerce a lat/lon pair from request body into finite numbers, or null if absent/invalid.
-function parseCoords(body) {
-  const lat = Number(body.lat);
-  const lon = Number(body.lon);
-  if (body.lat === undefined || body.lon === undefined || !Number.isFinite(lat) || !Number.isFinite(lon)) {
-    return { lat: null, lon: null };
-  }
-  return { lat, lon };
+// Thin Express adapter over the pure functions in server/notes.js — see
+// docs/plan/08-offline-privacy.md §3.1. `fn` gets (req, res) and returns the
+// JSON body to send; `status` is only the *success* status code (errors are
+// carried by the thrown HttpError). Returning undefined with status 204
+// sends an empty body, matching the original handlers' res.status(204).end().
+function wrap(fn, status = 200) {
+  return (req, res) => {
+    try {
+      const result = fn(req, res);
+      if (status === 204) return res.status(204).end();
+      res.status(status).json(result);
+    } catch (err) {
+      if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
+      throw err;
+    }
+  };
 }
 
-
 // List all non-deleted notes for the current user — used for search/picker/pin bar.
-router.get('/', (req, res) => {
-  const notes = db
-    .prepare(
-      `SELECT id, title, updated_at, pinned, type, status, lat, lon, theme, theme_children
-       FROM notes WHERE user_id = ? AND status != 'deleted'
-       ORDER BY updated_at DESC`
-    )
-    .all(req.userId);
-  res.json(notes);
-});
+router.get('/', wrap((req) => notesCore.list(db, req.userId)));
 
-router.post('/', (req, res) => {
-  const { title, content = '', linkTo } = req.body;
-  if (!title || !title.trim()) {
-    return res.status(400).json({ error: 'title is required' });
-  }
-  const { lat, lon } = parseCoords(req.body);
-
-  let linkToId = null;
-  if (linkTo) {
-    const target = db
-      .prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?')
-      .get(linkTo, req.userId);
-    if (!target) return res.status(404).json({ error: 'linkTo note not found' });
-    linkToId = target.id;
-  }
-
-  const insertNote = db.prepare(
-    `INSERT INTO notes (title, content, created_at, updated_at, lat, lon, created_from_note_id, user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  const linkNotes = db.prepare(
-    'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
-  );
-
-  const create = db.transaction(() => {
-    const ts = now();
-    const info = insertNote.run(title.trim(), content, ts, ts, lat, lon, linkToId, req.userId);
-    const id = info.lastInsertRowid;
-    if (linkToId) {
-      linkNotes.run(Math.min(id, linkToId), Math.max(id, linkToId), ts, req.userId);
-    }
-    return id;
-  });
-
-  const id = create();
-  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
-  history.record(req.userId, 'create', { noteId: id, title: note.title }, `Created "${note.title}"`);
-  res.status(201).json(note);
-});
+router.post('/', wrap((req) => notesCore.create(db, req.userId, req.body), 201));
 
 // Full-text search over the caller's notes. Must be declared before "/:id".
-router.get('/search', (req, res) => {
-  const raw = String(req.query.q || '').trim();
-  const terms = raw.toLowerCase().match(/[\p{L}\p{N}_]+/gu) || [];
-  if (!terms.length) return res.json([]);
+router.get('/search', wrap((req) => notesCore.search(db, req.userId, req.query)));
 
-  // Quote each term (defuses FTS operators); prefix-match the last one so
-  // results appear while the user is still typing.
-  const match = terms
-    .map((t, i) => (i === terms.length - 1 ? `"${t}"*` : `"${t}"`))
-    .join(' ');
-  const limit = Math.min(Math.max(Number(req.query.limit) || 12, 1), 30);
-
-  try {
-    const rows = db
-      .prepare(
-        `SELECT n.id, n.title, n.type,
-                snippet(notes_fts, 1, '[', ']', '…', 12) AS snippet
-         FROM notes_fts
-         JOIN notes n ON n.id = notes_fts.rowid
-         WHERE notes_fts MATCH ? AND n.user_id = ? AND n.status != 'deleted'
-         ORDER BY bm25(notes_fts, 5.0, 1.0)
-         LIMIT ?`
-      )
-      .all(match, req.userId, limit);
-    // A match with no content (title-only match, or an attachment note) gets
-    // an empty snippet — fall back to the inferred parent's title so the
-    // result still has some disambiguating subtitle.
-    if (rows.some((r) => !r.snippet)) {
-      const { byId, parentOf } = buildHierarchy(req.userId);
-      for (const r of rows) {
-        if (r.snippet) continue;
-        const parentId = parentOf.get(r.id);
-        const parent = parentId != null ? byId.get(parentId) : null;
-        if (parent) r.parentTitle = parent.title || 'Untitled';
-      }
-    }
-    res.json(rows);
-  } catch (err) {
-    res.json([]);
-  }
-});
-
-// GTD context tags are just `@word` mentions in a note's own text (see
-// server/tags.js) — no column, nothing to keep in sync. This lists what's
-// already in use, for the editor's tag-insert modal — a reuse convenience,
-// typing `@word` directly works with no server involved at all. Must be
+// GTD context tags already in use, for the editor's tag-insert modal. Must be
 // declared before "/:id" for the same reason as "/search" above.
-const DEFAULT_TAGS = ['phone', 'errands', 'home', 'computer', 'anywhere'];
+router.get('/tags', wrap((req) => notesCore.listTags(db, req.userId)));
 
-router.get('/tags', (req, res) => {
-  // Finished (done) or removed notes don't need re-surfacing as suggestions.
-  const rows = db
-    .prepare(
-      "SELECT title, content FROM notes WHERE user_id = ? AND status NOT IN ('deleted', 'done')"
-    )
-    .all(req.userId);
+// The most globally significant root note. Must be declared before "/:id"
+// for the same reason as "/search" above.
+router.get('/probable-root', wrap((req) => notesCore.probableRootNote(db, req.userId)));
 
-  const counts = new Map();
-  for (const { title, content } of rows) {
-    for (const tag of new Set([...extractTags(title), ...extractTags(content)])) {
-      counts.set(tag, (counts.get(tag) || 0) + 1);
-    }
-  }
-
-  const used = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([tag]) => tag);
-  const tags = [...used, ...DEFAULT_TAGS.filter((t) => !counts.has(t))].slice(0, 8);
-  res.json({ tags });
-});
-
-// The most globally significant root note — the landing spot when there's no
-// better context to resume (e.g. the last open tab was just closed). Must be
-// declared before "/:id" for the same reason as "/search" above.
-router.get('/probable-root', (req, res) => {
-  const root = probableRoot(req.userId);
-  res.json({ note: root ? { id: root.id, title: root.title } : null });
-});
+// Background catch-up sweep for location encryption (docs/plan/
+// 08-offline-privacy.md's location note in db.js) — body: { items: [{id, geo}] }.
+// Not gated on account state the way /api/encryption/migrate is; the client
+// only calls this when it actually has pending geo to encrypt.
+router.post('/encrypt-geo', wrap((req) => notesCore.encryptGeo(db, req.userId, req.body && req.body.items)));
 
 // The fields the list endpoint above omits to stay light — content (arbitrary
-// length) and attachment_path (contact/app attachments carry their payload
-// here as text). The client pulls this once per online app-open to pre-cache
-// every note for offline reading, instead of only ever caching notes it has
-// individually opened. Must be declared before "/:id" for the same reason as
-// "/search" above.
-router.get('/full', (req, res) => {
-  const notes = db
-    .prepare(
-      `SELECT id, content, attachment_path, updated_at
-       FROM notes WHERE user_id = ? AND status != 'deleted'`
-    )
-    .all(req.userId);
-  res.json(notes);
-});
+// length) and attachment_path. Must be declared before "/:id" for the same
+// reason as "/search" above.
+router.get('/full', wrap((req) => notesCore.listFull(db, req.userId)));
 
 // The inferred hierarchy as a flat { childId: parentId } map (roots omitted).
-// The client walks it to resolve a note's theme through its ancestors — the
-// local rebuild can't see created_from_note_id, so it would pick different
-// parents than the server does. Must be declared before "/:id" like "/full".
-router.get('/hierarchy-parents', (req, res) => {
-  const { parentOf } = buildHierarchy(req.userId);
-  const parents = {};
-  for (const [id, p] of parentOf) if (p != null) parents[id] = p;
-  res.json({ parents });
-});
+// Must be declared before "/:id" like "/full".
+router.get('/hierarchy-parents', wrap((req) => notesCore.hierarchyParents(db, req.userId)));
 
-// Every cacheable attachment (image/audio/file — contact/app carry their data
-// as text in attachment_path above, nothing to download), newest-updated
-// first, with a byte size so the client can plan an offline cache budget
-// without downloading anything first. Backfills attachment_size for rows
-// uploaded before that column existed. Must be declared before "/:id" for the
-// same reason as "/search" above.
-router.get('/attachments-manifest', (req, res) => {
-  const rows = db
-    .prepare(
-      `SELECT id, type, attachment_path, attachment_size, updated_at
-       FROM notes
-       WHERE user_id = ? AND status != 'deleted' AND type IN ('image', 'audio', 'file')
-             AND attachment_path IS NOT NULL
-       ORDER BY updated_at DESC`
-    )
-    .all(req.userId);
+// Every cacheable attachment, newest-updated first, with a byte size. Must be
+// declared before "/:id" for the same reason as "/search" above.
+router.get('/attachments-manifest', wrap((req) => notesCore.attachmentsManifest(db, req.userId)));
 
-  const backfillSize = db.prepare('UPDATE notes SET attachment_size = ? WHERE id = ?');
-  for (const r of rows) {
-    if (r.attachment_size != null) continue;
-    try {
-      const stat = fs.statSync(path.join(uploadsDir, path.basename(r.attachment_path)));
-      r.attachment_size = stat.size;
-      backfillSize.run(stat.size, r.id);
-    } catch {
-      r.attachment_size = 0;
-    }
-  }
+router.get('/:id', wrap((req) => notesCore.get(db, req.userId, req.params.id)));
 
-  res.json(rows);
-});
+router.put('/:id', wrap((req) => notesCore.update(db, req.userId, req.params.id, req.body)));
 
-router.get('/:id', (req, res) => {
-  const note = db
-    .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!note) return res.status(404).json({ error: 'not found' });
-  res.json(note);
-});
+router.delete(
+  '/:id',
+  wrap((req) => notesCore.remove(db, req.userId, req.params.id), 204)
+);
 
-// Optional offline-sync fields in the body:
-//   baseUpdatedAt   — the `updated_at` the client last saw for this row. If it
-//                     no longer matches, the row changed elsewhere while the
-//                     client was offline: that's a conflict.
-//   clientUpdatedAt — when the offline edit was actually made. On a conflict,
-//                     a field the client sent is kept only if the client's edit
-//                     is newer than the server's current `updated_at`; otherwise
-//                     the server's value wins that field. The response carries
-//                     `conflict: true` so the client can preserve the loser as a
-//                     "conflicted copy" note.
-// Clients that send neither field keep the old last-write-wins behaviour.
-router.put('/:id', (req, res) => {
-  const { title, content, baseUpdatedAt, clientUpdatedAt } = req.body;
-  const note = db
-    .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!note) return res.status(404).json({ error: 'not found' });
+router.put('/:id/pin', wrap((req) => notesCore.pin(db, req.userId, req.params.id)));
 
-  let newTitle = title !== undefined ? title.trim() : note.title;
-  let newContent = content !== undefined ? content : note.content;
-  if (!newTitle) return res.status(400).json({ error: 'title is required' });
-
-  const conflict = Boolean(baseUpdatedAt) && baseUpdatedAt !== note.updated_at;
-  if (conflict) {
-    const serverWins = !clientUpdatedAt || note.updated_at > clientUpdatedAt;
-    if (serverWins) {
-      if (title !== undefined) newTitle = note.title;
-      if (content !== undefined) newContent = note.content;
-    }
-  }
-
-  db.prepare('UPDATE notes SET title = ?, content = ?, updated_at = ? WHERE id = ?').run(
-    newTitle,
-    newContent,
-    now(),
-    req.params.id
-  );
-  history.recordUpdate(
-    req.userId,
-    note.id,
-    { title: note.title, content: note.content },
-    { title: newTitle, content: newContent },
-    `Edited "${newTitle}"`
-  );
-  const row = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
-  res.json(conflict ? { ...row, conflict: true } : row);
-});
-
-router.delete('/:id', (req, res) => {
-  const note = db
-    .prepare('SELECT pinned, type, attachment_path FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!note) return res.status(404).json({ error: 'not found' });
-  if (note.pinned) return res.status(409).json({ error: 'note is pinned; unpin before deleting' });
-
-  db.prepare('DELETE FROM notes WHERE id = ?').run(req.params.id);
-
-  if (
-    (note.type === 'image' || note.type === 'audio' || note.type === 'file') &&
-    note.attachment_path
-  ) {
-    const filePath = path.join(uploadsDir, path.basename(note.attachment_path));
-    fs.unlink(filePath, () => {});
-  }
-
-  res.status(204).end();
-});
-
-router.put('/:id/pin', (req, res) => {
-  const info = db
-    .prepare('UPDATE notes SET pinned = 1 WHERE id = ? AND user_id = ?')
-    .run(req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
-  history.record(req.userId, 'pin', { noteId: note.id }, `Pinned "${note.title}"`);
-  res.json(note);
-});
-
-router.delete('/:id/pin', (req, res) => {
-  const info = db
-    .prepare('UPDATE notes SET pinned = 0 WHERE id = ? AND user_id = ?')
-    .run(req.params.id, req.userId);
-  if (info.changes === 0) return res.status(404).json({ error: 'not found' });
-  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id);
-  history.record(req.userId, 'unpin', { noteId: note.id }, `Unpinned "${note.title}"`);
-  res.json(note);
-});
+router.delete('/:id/pin', wrap((req) => notesCore.unpin(db, req.userId, req.params.id)));
 
 // Per-note theme: { theme: <style>|null, children: bool }. Cosmetic, so it does
 // not touch updated_at (no conflict base shift, no "latest" bar reshuffle) and
 // is not in the undo history.
-router.put('/:id/theme', (req, res) => {
-  const note = db
-    .prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!note) return res.status(404).json({ error: 'not found' });
+router.put('/:id/theme', wrap((req) => notesCore.setTheme(db, req.userId, req.params.id, req.body)));
 
-  const style = themes.sanitizeStyle(req.body.theme, { uploadOk: ownsUpload(req.userId) });
-  db.prepare('UPDATE notes SET theme = ?, theme_children = ? WHERE id = ?').run(
-    style ? JSON.stringify(style) : null,
-    style && req.body.children ? 1 : 0,
-    note.id
-  );
-  sweepImages(req.userId);
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id));
-});
-
-const NOTE_STATUSES = new Set(['active', 'waiting', 'todo', 'done', 'deleted']);
-
-const STATUS_VERB = {
-  deleted: 'Deleted',
-  done: 'Completed',
-  todo: 'Flagged to-do',
-  waiting: 'Flagged waiting',
-  active: 'Reopened',
-};
-
-router.put('/:id/status', (req, res) => {
-  const { status } = req.body;
-  if (!NOTE_STATUSES.has(status)) {
-    return res.status(400).json({ error: `status must be one of: ${[...NOTE_STATUSES].join(', ')}` });
-  }
-  const prev = db
-    .prepare('SELECT id, title, status FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!prev) return res.status(404).json({ error: 'not found' });
-
-  db.prepare('UPDATE notes SET status = ?, updated_at = ? WHERE id = ? AND user_id = ?').run(
-    status,
-    now(),
-    req.params.id,
-    req.userId
-  );
-
-  if (status !== prev.status) {
-    history.record(
-      req.userId,
-      'status',
-      { noteId: prev.id, from: prev.status, to: status },
-      `${STATUS_VERB[status] || 'Changed'} "${prev.title}"`
-    );
-  }
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(req.params.id));
-});
+router.put('/:id/status', wrap((req) => notesCore.setStatus(db, req.userId, req.params.id, req.body.status)));
 
 // Linked, non-deleted notes ranked by "probable next step", plus the single
 // "probable parent" — recorded provenance, falling back to the oldest link.
-// Deliberately *not* based on nav_events: as you go back and forth between a
-// child and its parent, that back-and-forth would itself pile up "inbound
-// transition" weight and could point "back" at whichever note you happened
-// to arrive from, rather than the note's actual place in the hierarchy.
 // Shape: { parent: <neighbor|null>, neighbors: [<neighbor with .p and .score>] }.
-router.get('/:id/neighbors', (req, res) => {
-  const result = computeNeighbors(req.userId, Number(req.params.id));
-  if (!result) return res.status(404).json({ error: 'not found' });
-  res.json(result);
-});
+router.get('/:id/neighbors', wrap((req) => notesCore.neighbors(db, req.userId, Number(req.params.id))));
 
-// Every 'todo'-flagged note anywhere under this one in the inferred hierarchy
-// (any depth) — the to-do header bar scopes to this instead of every open
-// note account-wide, so it reads as "what's left to do in this project."
-router.get('/:id/subtree-todos', (req, res) => {
-  const id = Number(req.params.id);
-  const uid = req.userId;
-  const center = db.prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
-  if (!center) return res.status(404).json({ error: 'not found' });
+// Every 'todo'-flagged note anywhere under this one in the inferred hierarchy.
+router.get('/:id/subtree-todos', wrap((req) => notesCore.subtreeTodos(db, req.userId, Number(req.params.id))));
 
-  const { byId, childrenOf } = buildHierarchy(uid);
-  const todos = subtreeIds(childrenOf, id)
-    .map((nid) => byId.get(nid))
-    .filter((n) => n && n.status === 'todo')
-    .map((n) => ({ id: n.id, title: n.title }));
-  res.json({ todos });
-});
-
-// Every note id anywhere under this one, any depth — excludes the note
-// itself. Generic version of subtree-todos, for scoping other per-note lists
-// (the alarm header bar) to "under here" instead of account-wide.
-router.get('/:id/subtree-ids', (req, res) => {
-  const id = Number(req.params.id);
-  const uid = req.userId;
-  const center = db.prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
-  if (!center) return res.status(404).json({ error: 'not found' });
-
-  const { childrenOf } = buildHierarchy(uid);
-  res.json({ ids: subtreeIds(childrenOf, id) });
-});
-
-const ATTACHMENT_TYPES = new Set(['image', 'audio', 'file', 'contact', 'app']);
-
-// Shared by both create routes below: validate + insert a new attachment note.
-// `parent` is the parent row (already looked up and ownership-checked) or null
-// for a standalone attachment with no link at all — the header/PWA-shortcut
-// "new note" flow, which has no "current note" to hang off of.
-function createAttachmentNote(req, res, parent) {
-  const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = req.body;
-  if (!ATTACHMENT_TYPES.has(type)) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(400).json({ error: `type must be one of: ${[...ATTACHMENT_TYPES].join(', ')}` });
-  }
-
-  let attachmentPath = null;
-  let attachmentSize = null;
-  let defaultTitle = 'Attachment';
-
-  if (type === 'image' || type === 'audio' || type === 'file') {
-    if (!req.file) {
-      return res.status(400).json({ error: 'a supported file is required' });
-    }
-    if (type !== 'file') {
-      const kind = req.file.mimetype.split('/')[0];
-      if (kind !== type) {
-        fs.unlink(req.file.path, () => {});
-        return res.status(400).json({ error: `file type does not match "${type}"` });
-      }
-    }
-    attachmentPath = `/uploads/${req.file.filename}`;
-    attachmentSize = req.file.size;
-    defaultTitle =
-      type === 'image' ? 'Photo' : type === 'audio' ? 'Recording' : req.file.originalname || 'File';
-  } else if (type === 'contact') {
-    if (!contactName || !contactName.trim()) {
-      return res.status(400).json({ error: 'contactName is required for contact attachments' });
-    }
-    attachmentPath = JSON.stringify({
-      name: contactName.trim(),
-      phone: contactPhone || '',
-      email: contactEmail || '',
-    });
-    defaultTitle = contactName.trim();
-  } else if (type === 'app') {
-    if (!appUri || !appUri.trim()) {
-      return res.status(400).json({ error: 'appUri is required for app attachments' });
-    }
-    attachmentPath = appUri.trim();
-    defaultTitle = (appLabel && appLabel.trim()) || appUri.trim();
-  }
-
-  const title = (req.body.title && req.body.title.trim()) || defaultTitle;
-  const content = req.body.content || '';
-  const { lat, lon } = parseCoords(req.body);
-
-  const insertNote = db.prepare(
-    `INSERT INTO notes (title, content, created_at, updated_at, type, lat, lon, created_from_note_id, attachment_path, attachment_size, user_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  );
-  const linkNotes = db.prepare(
-    'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
-  );
-
-  const create = db.transaction(() => {
-    const ts = now();
-    const info = insertNote.run(
-      title,
-      content,
-      ts,
-      ts,
-      type,
-      lat,
-      lon,
-      parent ? parent.id : null,
-      attachmentPath,
-      attachmentSize,
-      req.userId
-    );
-    const id = info.lastInsertRowid;
-    if (parent) linkNotes.run(Math.min(id, parent.id), Math.max(id, parent.id), ts, req.userId);
-    return id;
-  });
-
-  const id = create();
-  const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
-  history.record(
-    req.userId,
-    'create',
-    { noteId: id, title: note.title },
-    `Added ${type} "${note.title}"`
-  );
-  res.status(201).json(note);
-}
+// Every note id anywhere under this one, any depth — excludes the note itself.
+router.get('/:id/subtree-ids', wrap((req) => notesCore.subtreeIdsFor(db, req.userId, Number(req.params.id))));
 
 // Create a new note of a given attachment type, linked to :id (the note it was
 // captured from). One note per attachment — image/audio/file upload a file;
 // contact and app store their data directly on the note.
-router.post('/:id/attachments', upload.single('file'), (req, res) => {
-  const parentId = Number(req.params.id);
-  const parent = db
-    .prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?')
-    .get(parentId, req.userId);
-  if (!parent) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(404).json({ error: 'parent note not found' });
-  }
-
-  // Inline image: store the file through the same MIME allowlist + size cap as a
-  // normal attachment, but create no attachment note and no link — the caller
-  // drops a `![](<path>)` into the markdown source instead. No history entry.
-  // Only reachable here (the editor always has a note open to paste/drop into).
-  if (req.body.inline === '1' || req.body.inline === 'true') {
-    if (!req.file || req.file.mimetype.split('/')[0] !== 'image') {
-      if (req.file) fs.unlink(req.file.path, () => {});
-      return res.status(400).json({ error: 'a supported image file is required' });
+router.post(
+  '/:id/attachments',
+  upload.single('file'),
+  wrap((req) => {
+    const parentId = Number(req.params.id);
+    // Inline image: no attachment note, no link — see server/notes.js.
+    if (req.body.inline === '1' || req.body.inline === 'true') {
+      return notesCore.createInlineImage(db, req.userId, parentId, req.file);
     }
-    return res.status(201).json({ path: `/uploads/${req.file.filename}` });
-  }
+    return notesCore.createAttachmentNote(db, req.userId, parentId, req.body, req.file);
+  }, 201)
+);
 
-  createAttachmentNote(req, res, parent);
-});
-
-// Same as above but with no parent/link at all — a standalone attachment note,
-// for "create a note" flows that don't have a current note to hang off of (the
-// header's + New note button, the PWA/widget "new note" shortcut).
-router.post('/attachments', upload.single('file'), (req, res) => {
-  createAttachmentNote(req, res, null);
-});
+// Same as above but with no parent/link at all — a standalone attachment note.
+router.post(
+  '/attachments',
+  upload.single('file'),
+  wrap((req) => notesCore.createAttachmentNote(db, req.userId, null, req.body, req.file), 201)
+);
 
 // Replace *this* note's own attachment — distinct from POST /:id/attachments
-// above, which creates a brand-new linked attachment note. No link row, no new
-// note: just this note's type/attachment_path/attachment_size, so a text note
-// can become e.g. an image note and vice versa. Undoable (history action
-// 'attach'), which is why the file being replaced is deliberately NOT deleted
-// here — an undo has to be able to point back at it, and there's no "is this
-// history entry still reachable" check cheap enough to run at swap time (the
-// history table itself is never pruned either, for the same reason: keeping
-// undo reliable is worth more here than reclaiming the disk). A hard note
-// delete (DELETE /:id) still deletes its attachment file immediately — that
-// path is genuinely irreversible already, nothing points back at it.
-router.put('/:id/attachment', upload.single('file'), (req, res) => {
-  const note = db
-    .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!note) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(404).json({ error: 'not found' });
-  }
+// above, which creates a brand-new linked attachment note.
+router.put(
+  '/:id/attachment',
+  upload.single('file'),
+  wrap((req) => notesCore.replaceAttachment(db, req.userId, req.params.id, req.body, req.file))
+);
 
-  const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = req.body;
-  if (!ATTACHMENT_TYPES.has(type)) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    return res.status(400).json({ error: `type must be one of: ${[...ATTACHMENT_TYPES].join(', ')}` });
-  }
-
-  let attachmentPath = null;
-  let attachmentSize = null;
-
-  if (type === 'image' || type === 'audio' || type === 'file') {
-    if (!req.file) return res.status(400).json({ error: 'a supported file is required' });
-    if (type !== 'file') {
-      const kind = req.file.mimetype.split('/')[0];
-      if (kind !== type) {
-        fs.unlink(req.file.path, () => {});
-        return res.status(400).json({ error: `file type does not match "${type}"` });
-      }
-    }
-    attachmentPath = `/uploads/${req.file.filename}`;
-    attachmentSize = req.file.size;
-  } else if (type === 'contact') {
-    if (!contactName || !contactName.trim()) {
-      return res.status(400).json({ error: 'contactName is required for contact attachments' });
-    }
-    attachmentPath = JSON.stringify({
-      name: contactName.trim(),
-      phone: contactPhone || '',
-      email: contactEmail || '',
-    });
-  } else if (type === 'app') {
-    if (!appUri || !appUri.trim()) {
-      return res.status(400).json({ error: 'appUri is required for app attachments' });
-    }
-    attachmentPath = appUri.trim();
-  }
-
-  const titleOverride =
-    (req.body.title && req.body.title.trim()) || (type === 'app' && appLabel && appLabel.trim());
-  const newTitle = titleOverride || note.title;
-  db.prepare(
-    'UPDATE notes SET type = ?, title = ?, attachment_path = ?, attachment_size = ?, updated_at = ? WHERE id = ?'
-  ).run(type, newTitle, attachmentPath, attachmentSize, now(), note.id);
-
-  const updated = db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id);
-  history.record(
-    req.userId,
-    'attach',
-    {
-      noteId: note.id,
-      before: { type: note.type, attachment_path: note.attachment_path, attachment_size: note.attachment_size },
-      after: { type, attachment_path: attachmentPath, attachment_size: attachmentSize },
-    },
-    `${note.type === 'text' ? 'Attached' : 'Changed'} ${type} on "${newTitle}"`
-  );
-  res.json(updated);
-});
-
-// Remove this note's attachment, reverting it to a plain text note. The
-// content field (any text typed alongside the attachment) is left as-is. Same
-// undo-ability and file-retention reasoning as PUT above.
-router.delete('/:id/attachment', (req, res) => {
-  const note = db
-    .prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?')
-    .get(req.params.id, req.userId);
-  if (!note) return res.status(404).json({ error: 'not found' });
-  if (note.type === 'text') return res.status(409).json({ error: 'note has no attachment' });
-
-  db.prepare(
-    "UPDATE notes SET type = 'text', attachment_path = NULL, attachment_size = NULL, updated_at = ? WHERE id = ?"
-  ).run(now(), note.id);
-
-  history.record(
-    req.userId,
-    'attach',
-    {
-      noteId: note.id,
-      before: { type: note.type, attachment_path: note.attachment_path, attachment_size: note.attachment_size },
-      after: { type: 'text', attachment_path: null, attachment_size: null },
-    },
-    `Removed attachment from "${note.title}"`
-  );
-
-  res.json(db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id));
-});
+// Remove this note's attachment, reverting it to a plain text note.
+router.delete('/:id/attachment', wrap((req) => notesCore.removeAttachment(db, req.userId, req.params.id)));
 
 module.exports = router;

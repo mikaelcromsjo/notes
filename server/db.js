@@ -148,6 +148,44 @@ for (const [name, decl] of digestCols) {
   }
 }
 
+// Zero-knowledge location encryption (docs/plan/08-offline-privacy.md,
+// server/location.js) — a *separate* mechanism from content's migrate()/
+// revert() ceremony, deliberately: unlike content, nothing writes location
+// server-side that can't eventually encrypt it itself, so instead of a
+// one-time batch, each of these three `geo` columns holds either NULL
+// (still-plaintext lat/lon/etc — "pending") or a ciphertext blob (lat/lon
+// cleared to NULL). A background sweep (public/app.js's
+// sweepGeoEncryption()) catches up any pending row on every app open, for
+// as long as the account has encryption on — this also naturally catches up
+// an account that enabled encryption *before* this feature existed, with no
+// separate migration step. See the risk note in the plan doc: the Android
+// widget's own background GPS sampling (server/routes/widget.js's POST
+// /location) has no crypto of its own, so a widget-authored point always
+// starts pending; the web app's own opportunistic sampling encrypts inline
+// and is never plaintext at rest at all.
+if (!noteColumns.some((c) => c.name === 'geo')) {
+  db.exec('ALTER TABLE notes ADD COLUMN geo TEXT');
+}
+
+// Zero-knowledge note-content encryption (docs/plan/08-offline-privacy.md,
+// server/encryption.js). enc_salt/enc_iterations are the PBKDF2 parameters a
+// device recorded at the "Set up encryption" ceremony — not secret, just the
+// public half of key derivation. enc_enabled_at is set only once the
+// one-time re-encryption migration has actually run; from that instant on
+// `notes.content` is ciphertext for this user, account-wide, forever after
+// (opt-in, and there is deliberately no server-side decrypt path — see the
+// plan doc's recovery-key risk note).
+const encCols = [
+  ['enc_salt', 'TEXT'],
+  ['enc_iterations', 'INTEGER'],
+  ['enc_enabled_at', 'TEXT'],
+];
+for (const [name, decl] of encCols) {
+  if (!userCols.some((c) => c.name === name)) {
+    db.exec(`ALTER TABLE users ADD COLUMN ${name} ${decl}`);
+  }
+}
+
 // Stamped once POST /api/onboarding/begin has wiped a fresh account's seeded
 // sample graph — doubles as a one-time-use guard (see server/onboarding.js)
 // so a repeat call can't be replayed against real notes created since.
@@ -374,6 +412,13 @@ if (!reminderColumns.some((c) => c.name === 'window_start')) {
 if (!reminderColumns.some((c) => c.name === 'window_end')) {
   db.exec('ALTER TABLE reminders ADD COLUMN window_end TEXT');
 }
+// Zero-knowledge location encryption — see the `notes.geo` comment above.
+// Only meaningful for kind='location'; NULL (plaintext lat/lon/radius_m,
+// possibly "pending" — see above) or a ciphertext blob (lat/lon/radius_m
+// cleared to NULL).
+if (!reminderColumns.some((c) => c.name === 'geo')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN geo TEXT');
+}
 
 // One-time backfill of every armed notes.alarm_* row into reminders. Shares the
 // user_version counter with the FTS rebuild above (1 = FTS built); to force
@@ -457,6 +502,19 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_location_log_user ON location_log (user_id, recorded_at);
 `);
+
+// Zero-knowledge location encryption — see the `notes.geo` comment above.
+// `lat`/`lon` are NOT NULL from the CREATE TABLE above (never edit that
+// block — see this file's standing convention), so unlike notes/reminders
+// this can't null them out once encrypted: server/location.js's
+// encryptGeo() instead writes the placeholder (0, 0) into lat/lon (clearing
+// accuracy_m to NULL) once `geo` is set. **Every reader must check `geo`
+// first** — (0, 0) here never means "Gulf of Guinea", it means "look at geo
+// instead". A row is "pending" (still real plaintext lat/lon) while geo IS NULL.
+const locationLogColumns = db.prepare('PRAGMA table_info(location_log)').all();
+if (!locationLogColumns.some((c) => c.name === 'geo')) {
+  db.exec('ALTER TABLE location_log ADD COLUMN geo TEXT');
+}
 
 // Retention: navigation history is behavioural data — keep 90 days.
 db.prepare(

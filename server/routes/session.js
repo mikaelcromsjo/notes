@@ -3,6 +3,7 @@ const express = require('express');
 const db = require('../db');
 const sessions = require('../sessions');
 const { ensureWidgetToken } = require('../widget-token');
+const encryption = require('../encryption');
 
 const router = express.Router();
 
@@ -18,6 +19,10 @@ router.get('/', (req, res) => {
   res.json({
     user: { id: user.id, email: user.email },
     widgetToken: ensureWidgetToken(user.id),
+    // Not secret — see server/encryption.js. Lets the client know on boot
+    // whether this account's note content is ciphertext, and (if so) whether
+    // *this* device still needs the recovery key re-entered to unlock it.
+    encryption: encryption.getPrefs(db, user.id),
   });
 });
 

@@ -16,7 +16,14 @@ const remindersStmt = db.prepare(
 );
 
 // `[` is not a LIKE metacharacter in SQLite, so this is a literal-substring
-// prefilter for "has an unchecked GFM task" — the regex below does the real work.
+// prefilter for "has an unchecked GFM task" — the regex below does the real
+// work. Once an account has opted into content encryption (docs/plan/
+// 08-offline-privacy.md §3.4), `content` here is ciphertext and this
+// harmlessly matches nothing — openTasks/todos below come back empty for
+// that account rather than garbled text, both for GET /api/agenda (the
+// in-app 🔔 overlay recomputes them client-side instead, see public/app.js's
+// localOpenTasksAndTodos, §3.5) and for the Android widget feed, which has
+// no crypto of its own and so is *meant* to just show nothing here.
 const taskNotesStmt = db.prepare(
   `SELECT id, title, content, updated_at FROM notes
    WHERE user_id = ? AND status != 'deleted' AND content LIKE '%[ ]%'`

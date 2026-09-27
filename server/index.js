@@ -14,6 +14,7 @@ const notesRouter = require('./routes/notes');
 const linksRouter = require('./routes/links');
 const tabsRouter = require('./routes/tabs');
 const themeRouter = require('./routes/theme');
+const encryptionRouter = require('./routes/encryption');
 const navRouter = require('./routes/nav');
 const statsRouter = require('./routes/stats');
 const alarmsRouter = require('./routes/alarms');
@@ -139,6 +140,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.use('/api/theme', themeRouter);
+app.use('/api/encryption', encryptionRouter);
 app.use('/api/notes', notesRouter);
 app.use('/api/links', linksRouter);
 app.use('/api/tabs', tabsRouter);

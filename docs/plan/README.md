@@ -20,6 +20,7 @@ domain).
 | 5 | Reminders & Resurfacing | `05-reminders-resurfacing.md` | Alarm snooze/natural-language recurrence, "due today" view, graph digests (on-this-day / stale cluster), weekly review push. **The wedge.** |
 | 6 | Monetization & Plan Gating | `06-monetization.md` | Billing (Stripe or Paddle/Lemon Squeezy), plan model, in-app gating, trial, dunning, pricing page. |
 | 7 | GTM & Growth | `07-gtm-growth.md` | Positioning copy, landing page, onboarding/sample graph, App Store wrapper (Capacitor/PWABuilder), self-hosted analytics + activation metric. |
+| 8 | Offline & Privacy | `08-offline-privacy.md` | Phase 1 only (no full offline rewrite): route logic extracted into pure functions, client-side content search over the existing offline mirror, zero-knowledge encryption at rest for note content (title/due-times stay plaintext). Phase 2 (embedded client DB, encrypted op-log sync) is out of scope, sketched as a placeholder only. |
 
 ## Dependency graph
 
@@ -31,6 +32,9 @@ domain).
 3 Import & Capture ───────> 7 GTM (onboarding needs import)
 4 Editor & Search ───────>  (independent; improves activation)
 5 Reminders & Resurfacing > (independent; the retention driver)
+
+8 Offline & Privacy ──────> (independent; shares its table changes with 2 —
+                             coordinate schema edits if both are in flight)
 ```
 
 - **1 and 2 are the trust gate.** Nothing is charged for until both ship.

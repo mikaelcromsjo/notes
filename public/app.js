@@ -13,6 +13,16 @@
   const imageOverlayClose = document.getElementById('image-overlay-close');
   const imageOverlayImg = document.getElementById('image-overlay-img');
   const mapBtn = document.getElementById('map-btn');
+  const graphBtn = document.getElementById('graph-btn');
+  const graphOverlay = document.getElementById('graph-overlay');
+  const graphOverlayClose = document.getElementById('graph-overlay-close');
+  const graphCanvasWrap = document.getElementById('graph-canvas-wrap');
+  const graphCanvas = document.getElementById('graph-canvas');
+  const graphLevelInput = document.getElementById('graph-level');
+  const graphLevelLabel = document.getElementById('graph-level-label');
+  const graphLayoutToggleBtn = document.getElementById('graph-layout-toggle');
+  const graphScoreToggleBtn = document.getElementById('graph-score-toggle');
+  const graphDoneToggleBtn = document.getElementById('graph-done-toggle');
   const insightsBtn = document.getElementById('insights-btn');
   const insightsOverlay = document.getElementById('insights-overlay');
   const insightsClose = document.getElementById('insights-close');
@@ -127,6 +137,28 @@
   const digestTestBtn = document.getElementById('digest-test-btn');
   const settingsNav = document.getElementById('settings-nav');
 
+  // Privacy section (encryption ceremony) — see the "Encryption" block near
+  // the `store` const and the wiring below, near loadDigestPrefs.
+  const encPanelOff = document.getElementById('enc-panel-off');
+  const encPanelSetup = document.getElementById('enc-panel-setup');
+  const encPanelOn = document.getElementById('enc-panel-on');
+  const encSetupBtn = document.getElementById('enc-setup-btn');
+  const encEnableBtn = document.getElementById('enc-enable-btn');
+  const encCancelSetupBtn = document.getElementById('enc-cancel-setup-btn');
+  const encSetupPanelStatus = document.getElementById('enc-setup-panel-status');
+  const encUnlockBtn = document.getElementById('enc-unlock-btn');
+  const encSetupOverlay = document.getElementById('enc-setup-overlay');
+  const encSetupCancelBtn = document.getElementById('enc-setup-cancel-btn');
+  const encSetupContinueBtn = document.getElementById('enc-setup-continue-btn');
+  const encRecoveryKeyEl = document.getElementById('enc-recovery-key');
+  const encConfirmSaved = document.getElementById('enc-confirm-saved');
+  const encSetupStatus = document.getElementById('enc-setup-status');
+  const encUnlockOverlay = document.getElementById('enc-unlock-overlay');
+  const encUnlockCancelBtn = document.getElementById('enc-unlock-cancel-btn');
+  const encUnlockSubmitBtn = document.getElementById('enc-unlock-submit-btn');
+  const encUnlockInput = document.getElementById('enc-unlock-input');
+  const encUnlockStatus = document.getElementById('enc-unlock-status');
+
   // --- Header-row visibility (per device, like zoom / colour mode). A row is
   // shown only when its toggle is on AND it has something to display. ---
   const BAR_PREF_KEY = {
@@ -231,6 +263,153 @@
   // that drains, in order, once the connection returns (phase 2). ---
   const store = window.NicoStore && window.NicoStore.available ? window.NicoStore : null;
 
+  // --- Zero-knowledge note-content encryption (docs/plan/08-offline-privacy.md
+  // §3.3/§3.4). The server (server/encryption.js) never sees a plaintext
+  // recovery key, the derived key, or plaintext content once an account has
+  // opted in — it only stores/returns whatever bytes it's given. This is the
+  // single seam: every place `content` crosses the network (api.createNote/
+  // updateNote/getNote, warmCache, the outbox's sendEntry) encrypts right
+  // before the request and decrypts right after the response; the IndexedDB
+  // mirror and everything built on it (rendering, cache.localSearch, the
+  // outbox itself) always holds plaintext, exactly as before encryption
+  // existed at all.
+  const ENC_KEY_META = () => `encKeyRaw-${currentUser && currentUser.id}`;
+
+  function encryptionActive() {
+    return Boolean(encPrefs && encPrefs.enabled && encKey);
+  }
+
+  // This device has opted in (has a key) but the account hasn't run the
+  // one-time migration yet (nothing encrypted server-side either way), vs.
+  // set up *and* enabled but this device specifically hasn't unlocked.
+  function encryptionLocked() {
+    return Boolean(encPrefs && encPrefs.enabled && !encKey);
+  }
+
+  async function loadEncKeyFromStore() {
+    if (!store || !currentUser) return null;
+    try {
+      const raw = await store.meta(ENC_KEY_META(), null);
+      if (!raw) return null;
+      encKey = await window.NicoCrypto.importKeyRaw(raw);
+      return encKey;
+    } catch {
+      return null;
+    }
+  }
+
+  async function saveEncKeyToStore(key) {
+    encKey = key;
+    if (!store || !currentUser) return;
+    try {
+      await store.setMeta(ENC_KEY_META(), await window.NicoCrypto.exportKeyRaw(key));
+    } catch {
+      /* IndexedDB unavailable — the key still works for this page load */
+    }
+  }
+
+  // content === undefined means "this write doesn't touch content at all"
+  // (a title-only or status-only update) — pass it through unchanged so the
+  // server's own "no fields = plain overwrite" behaviour still applies.
+  async function encryptOutgoing(content) {
+    if (content === undefined || !encryptionActive()) return content;
+    return window.NicoCrypto.encryptText(encKey, content);
+  }
+
+  // Returns null — the same "not available" sentinel the ordinary
+  // never-cached-offline case already uses (see CLAUDE.md's Warm cache
+  // section) — rather than raw ciphertext, whenever this device can't read
+  // it. That keeps a locked note exactly as inert as an uncached one: no
+  // garbled bytes rendered, and no risk of autosaving them back over the
+  // real text (buildNoteEditor/makeCenterCell key off `content == null`
+  // either way — see contentUnavailableMessage below for which wording).
+  async function decryptIncoming(content) {
+    if (content == null || !encPrefs || !encPrefs.enabled) return content;
+    if (!encKey) return null;
+    if (!window.NicoCrypto.isEncrypted(content)) return content;
+    try {
+      return await window.NicoCrypto.decryptText(encKey, content);
+    } catch {
+      return null; // wrong/corrupt ciphertext — surfaced the same way as "locked"
+    }
+  }
+
+  // The two "content isn't here" messages (buildNoteEditor's editable
+  // placeholder, makeCenterCell's read-only one) differ only in wording.
+  function contentUnavailableMessage(short) {
+    if (encryptionLocked()) {
+      return short ? '🔒 Locked' : '🔒 Locked — enter your recovery key in Settings → Privacy to view this note.';
+    }
+    return short ? 'Not available offline' : 'Not available offline — open this note once online to load and edit it.';
+  }
+
+  // --- Location encryption (docs/plan/08-offline-privacy.md's `notes.geo`
+  // comment in server/db.js). A separate mechanism from content's ceremony —
+  // nothing here has a one-time migrate() to run through, since every writer
+  // either already has the key (encrypts inline) or never will (the Android
+  // widget, which leaves its own points "pending" for sweepGeoEncryption to
+  // catch up later). `extra` is folded into the plaintext JSON before
+  // encrypting (radiusM for a reminder, accuracy for a trail point).
+  async function encryptGeoOutgoing(lat, lon, extra) {
+    if (!encryptionActive() || lat == null || lon == null) return null;
+    return window.NicoCrypto.encryptText(encKey, JSON.stringify({ lat, lon, ...extra }));
+  }
+
+  // Returns null when there's nothing to decrypt, this device is locked, or
+  // decryption fails — callers then fall back to whatever plain lat/lon the
+  // server sent alongside (real coordinates for a still-pending row, or the
+  // (0, 0) placeholder for location_log — see server/location.js — which a
+  // locked-device caller must NOT mistake for a real point).
+  async function decryptGeoIncoming(geo) {
+    if (!geo || !encKey || !window.NicoCrypto.isEncrypted(geo)) return null;
+    try {
+      return JSON.parse(await window.NicoCrypto.decryptText(encKey, geo));
+    } catch {
+      return null;
+    }
+  }
+
+  // Mutates `note` in place: when it carries a `geo` blob this device can
+  // read, overwrites lat/lon with the decrypted values (server sends them
+  // NULL alongside geo, so a locked device just sees no pin — same
+  // degrade-gracefully rule as note content). Notes with no location at all
+  // are a no-op. Returns `note` for chaining into Promise.all(rows.map(...)).
+  async function decryptNoteGeo(note) {
+    if (note && note.geo) {
+      const g = await decryptGeoIncoming(note.geo);
+      if (g) {
+        note.lat = g.lat;
+        note.lon = g.lon;
+      }
+    }
+    return note;
+  }
+
+  // Same idea, for a kind='location' reminder body/row — bundles radiusM
+  // into the encrypted blob alongside lat/lon since a geofence needs all
+  // three. `body` here is whatever's about to be POST/PUT-ed to /api/alarms;
+  // a non-location reminder (or one with no lat/lon yet) passes through
+  // untouched.
+  async function encryptReminderBody(body) {
+    if (!body || body.kind !== 'location' || !encryptionActive() || body.lat == null || body.lon == null) {
+      return body;
+    }
+    const { lat, lon, radiusM, ...rest } = body;
+    const geo = await encryptGeoOutgoing(lat, lon, { radiusM });
+    return geo ? { ...rest, geo } : body;
+  }
+  async function decryptReminderRow(row) {
+    if (row && row.geo) {
+      const g = await decryptGeoIncoming(row.geo);
+      if (g) {
+        row.lat = g.lat;
+        row.lon = g.lon;
+        row.radiusM = g.radiusM;
+      }
+    }
+    return row;
+  }
+
   // Counts surfaced by the pill; kept current by refreshPending().
   let pendingCount = 0;
   let failedCount = 0;
@@ -281,6 +460,26 @@
       el.textContent = text;
     },
   };
+
+  // Excerpt ~60 chars of `content` around the first matched term, for
+  // cache.localSearch below — the client-side analogue of the server FTS
+  // route's snippet(notes_fts, ...) call. Plain text, no match markers (the
+  // result row never highlighted the server's either — see buildResultRow).
+  function snippetFor(content, terms) {
+    const text = String(content || '');
+    if (!text) return '';
+    const lower = text.toLowerCase();
+    let hitAt = -1;
+    for (const t of terms) {
+      const i = lower.indexOf(t);
+      if (i !== -1 && (hitAt === -1 || i < hitAt)) hitAt = i;
+    }
+    if (hitAt === -1) return '';
+    const RADIUS = 30;
+    const start = Math.max(0, hitAt - RADIUS);
+    const end = Math.min(text.length, hitAt + RADIUS);
+    return (start > 0 ? '…' : '') + text.slice(start, end).trim() + (end < text.length ? '…' : '');
+  }
 
   // Note rows arrive in two shapes: the list (GET /api/notes, no `content`) and
   // the full row (GET /api/notes/:id). Merge so a list refresh never drops the
@@ -653,17 +852,59 @@
       }
       return best == null ? null : byId.get(best);
     },
-    localSearch(q) {
-      const ql = String(q || '').toLowerCase().trim();
-      if (!ql) return [];
-      return allNotesCache
-        .filter(
-          (n) =>
-            (n.title || '').toLowerCase().includes(ql) ||
-            (n.content || '').toLowerCase().includes(ql)
-        )
-        .slice(0, 12)
-        .map((n) => ({ id: n.id, title: n.title, type: n.type, snippet: '' }));
+    // Client-side content search over the IndexedDB mirror (docs/plan/
+    // 08-offline-privacy.md §3.2) — the primary search path, online or off,
+    // so a query never has to round-trip to the server (or leave the device)
+    // just to search the notes already sitting in this browser. Same
+    // tokenizing as the server's FTS5 query (server/notes.js's `search`):
+    // split into \p{L}\p{N}_ runs, every term must appear (AND) somewhere in
+    // title+content; a note ranks by title match first, then content match,
+    // tied-broken by recency. This is a plain substring scan, not a real
+    // index — fine at personal-notebook scale (hundreds to low thousands of
+    // notes).
+    async localSearch(q) {
+      const terms = String(q || '')
+        .toLowerCase()
+        .match(/[\p{L}\p{N}_]+/gu);
+      if (!terms || !terms.length) return [];
+
+      const notesArr = await this.cachedList(); // already excludes status 'deleted'
+      const scored = [];
+      for (const n of notesArr) {
+        const title = (n.title || '').toLowerCase();
+        // A note not yet full-warmed has content === undefined (never
+        // fetched) vs. '' (a real empty note) — search only what's actually
+        // mirrored, same "undefined vs ''" tell the offline editor uses.
+        const content = (n.content || '').toLowerCase();
+        const titleHit = terms.every((t) => title.includes(t));
+        const anyHit = titleHit || terms.every((t) => title.includes(t) || content.includes(t));
+        if (!anyHit) continue;
+        scored.push({ n, titleHit, content: n.content });
+      }
+      scored.sort((a, b) => {
+        if (a.titleHit !== b.titleHit) return a.titleHit ? -1 : 1;
+        return String(b.n.updated_at).localeCompare(String(a.n.updated_at));
+      });
+
+      const results = scored.slice(0, 12).map(({ n, content }) => {
+        const snippet = snippetFor(content, terms);
+        return { id: n.id, title: n.title, type: n.type, snippet };
+      });
+
+      // A result with no content snippet (title-only match, or an attachment
+      // note with nothing to excerpt) falls back to the inferred parent's
+      // title as a disambiguating subtitle — same UX the server-side search
+      // gave via buildHierarchy, rebuilt here from the local link mirror.
+      if (results.some((r) => !r.snippet)) {
+        const { byId, parentOf } = await this.buildLocalHierarchy();
+        for (const r of results) {
+          if (r.snippet) continue;
+          const parentId = parentOf.get(r.id);
+          const parent = parentId != null ? byId.get(parentId) : null;
+          if (parent) r.parentTitle = parent.title || 'Untitled';
+        }
+      }
+      return results;
     },
 
     // --- Cached neighbour responses (phase 4): the last server-ranked
@@ -765,6 +1006,7 @@
     if (currentUser) checkAlarms({ popup: false });
     syncThemePrefs();
     warmCache();
+    sweepGeoEncryption();
   }
 
   // --- Warm cache (phase 5): note text is cheap even at thousands of notes,
@@ -777,12 +1019,76 @@
     if (!store || !navigator.onLine || !currentUser) return;
     try {
       const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : null));
-      if (rows) await cache.mergeFullNotes(rows);
+      if (rows) {
+        await Promise.all(
+          rows.map(async (r) => {
+            r.content = await decryptIncoming(r.content);
+          })
+        );
+        await cache.mergeFullNotes(rows);
+      }
     } catch {
       /* offline mid-flight — next warm cache run retries */
     }
     await warmAttachmentCache();
     await warmThemeImages();
+  }
+
+  // Background catch-up sweep for location encryption (see server/db.js's
+  // `notes.geo` comment) — unlike content, there's no one-time ceremony:
+  // this just finds whatever's still plaintext across notes, geofence
+  // reminders, and the GPS trail, and encrypts it, every time it runs.
+  // Naturally catches up an account that turned encryption on *before* this
+  // feature existed, and a device that just unlocked and can suddenly read
+  // (and so encrypt) what was pending. Best-effort — a failure in one table
+  // doesn't stop the others, and there's always a next call to retry.
+  async function sweepGeoEncryption() {
+    if (!encryptionActive()) return;
+
+    try {
+      const notes = await api.listNotes();
+      const pending = notes.filter((n) => !n.geo && n.lat != null && n.lon != null);
+      if (pending.length) {
+        const items = await Promise.all(
+          pending.map(async (n) => ({ id: n.id, geo: await encryptGeoOutgoing(n.lat, n.lon) }))
+        );
+        await api.encryptNoteGeo(items);
+      }
+    } catch {
+      /* retry next sweep */
+    }
+
+    try {
+      const rems = await api.listAlarms();
+      const pending = rems.filter((a) => a.kind === 'location' && !a.geo && a.lat != null && a.lon != null);
+      if (pending.length) {
+        const items = await Promise.all(
+          pending.map(async (a) => ({
+            id: a.id,
+            geo: await encryptGeoOutgoing(a.lat, a.lon, { radiusM: a.radiusM }),
+          }))
+        );
+        await api.encryptReminderGeo(items);
+      }
+    } catch {
+      /* retry next sweep */
+    }
+
+    try {
+      const { points } = await api.getLocationTrail(90); // the full retention window, not just the map's current view
+      const pending = points.filter((p) => !p.geo);
+      if (pending.length) {
+        const items = await Promise.all(
+          pending.map(async (p) => ({
+            id: p.id,
+            geo: await encryptGeoOutgoing(p.lat, p.lon, { accuracy: p.accuracy }),
+          }))
+        );
+        await api.encryptLocationLogGeo(items);
+      }
+    } catch {
+      /* retry next sweep */
+    }
   }
 
   // Detected once at load: how durable this origin's IndexedDB actually is.
@@ -1177,12 +1483,20 @@
     const p = e.payload;
 
     if (e.kind === 'note.create') {
-      const body = { title: p.title, content: p.content || '' };
+      const body = { title: p.title, content: await encryptOutgoing(p.content || '') };
       const linkTo = p.linkTo != null ? idResolve(p.linkTo) : null;
       if (linkTo != null && !isTmp(linkTo)) body.linkTo = linkTo;
-      if (p.lat != null) body.lat = p.lat;
-      if (p.lon != null) body.lon = p.lon;
+      if (p.lat != null && p.lon != null) {
+        const geo = await encryptGeoOutgoing(p.lat, p.lon);
+        if (geo) body.geo = geo;
+        else {
+          body.lat = p.lat;
+          body.lon = p.lon;
+        }
+      }
       const note = await postJson('/api/notes', body);
+      note.content = await decryptIncoming(note.content);
+      await decryptNoteGeo(note);
       await remapId(p.tmpId, note.id);
       await cache.putNote(note);
       return;
@@ -1193,10 +1507,11 @@
       if (isTmp(id)) throw httpErr(0, 'note not synced yet');
       const note = await putJson(`/api/notes/${id}`, {
         title: p.title,
-        content: p.content,
+        content: await encryptOutgoing(p.content),
         baseUpdatedAt: p.baseUpdatedAt || null,
         clientUpdatedAt: p.clientUpdatedAt || null,
       });
+      note.content = await decryptIncoming(note.content);
       if (note && note.conflict) await handleConflict(note, p);
       if (note) delete note.conflict;
       await cache.putNote(note);
@@ -1261,6 +1576,7 @@
       if (!res.ok) throw httpErr(res.status, `HTTP ${res.status}`);
       const note = await res.json().catch(() => null);
       if (p.tmpId && note && note.id != null) {
+        await decryptNoteGeo(note);
         await remapId(p.tmpId, note.id);
         await cache.putNote(note);
       }
@@ -1279,7 +1595,8 @@
     if (e.kind === 'reminder.create') {
       const noteId = idResolve(p.noteId);
       if (isTmp(noteId)) throw httpErr(0, 'note not synced yet');
-      const row = await postJson('/api/alarms', { ...p.body, noteId });
+      const row = await postJson('/api/alarms', await encryptReminderBody({ ...p.body, noteId }));
+      await decryptReminderRow(row);
       await remapReminderId(p.tmpId, row.id);
       await mirrorUpsertAlarm(row);
       return;
@@ -1287,7 +1604,9 @@
     if (e.kind === 'reminder.update') {
       const id = ridResolve(p.id);
       if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
-      await mirrorUpsertAlarm(await putJson(`/api/alarms/${id}`, p.body));
+      const row = await putJson(`/api/alarms/${id}`, await encryptReminderBody(p.body));
+      await decryptReminderRow(row);
+      await mirrorUpsertAlarm(row);
       return;
     }
     if (e.kind === 'reminder.delete') {
@@ -1545,6 +1864,11 @@
       created_at: ts,
       updated_at: ts,
       created_from_note_id: parentId,
+      // Offline + encryption active: api.createAttachment already swapped
+      // lat/lon for an encrypted `geo` field in formData (this device has the
+      // key regardless of connectivity), so there's nothing plain left to
+      // read here — the optimistic local copy just has no pin until this
+      // syncs and the server's decrypted response overwrites it.
       lat: fields.lat != null ? Number(fields.lat) : null,
       lon: fields.lon != null ? Number(fields.lon) : null,
       attachment_path:
@@ -1751,6 +2075,16 @@
   let saveTimer = null;
   let currentUser = null;
   let widgetToken = null;
+  // Zero-knowledge note-content encryption (docs/plan/08-offline-privacy.md
+  // §3.3/§3.4) — see the "Encryption" block below (near the api object) for
+  // the actual encrypt/decrypt seam. encPrefs mirrors GET /api/session's
+  // `encryption` field: { salt, iterations, enabled }, enabled meaning
+  // "notes.content is ciphertext for this account, account-wide, forever
+  // after". encKey is the derived AES-GCM CryptoKey for *this device*,
+  // loaded from IndexedDB at boot if this device has already unlocked —
+  // never sent anywhere, never derived from anything the server holds.
+  let encPrefs = null;
+  let encKey = null;
 
   const TYPE_ICON = { image: '🖼️', audio: '🎤', file: '📎', contact: '👤', app: '🔗' };
 
@@ -2148,6 +2482,9 @@
   let colorMode = localStorage.getItem('nico-notes-color-mode') || 'off';
   if (!COLOR_MODES.includes(colorMode)) colorMode = 'off';
   let noteHeat = {};
+  // Bumped whenever noteHeat is (re)fetched — lets the map's marker-diffing
+  // notice a heat-driven colour change even though note ids/updated_at didn't move.
+  let noteHeatVersion = 0;
 
   async function loadNeighbors(id) {
     const data = await api.getNeighbors(id);
@@ -2368,6 +2705,51 @@
     Math.max(GRID_DEPTH_MIN, Number(localStorage.getItem('nico-notes-grid-depth')) || 1)
   );
 
+  // Opportunistic GPS trail sample: any time the app already asked for the
+  // device's current position for something else (tagging a new note or
+  // attachment, "use current location" for a reminder, centering the map
+  // when there's nothing else to fit), piggyback a location_log point off
+  // that same fix — same ~30-min cadence as the Android widget's own
+  // background sampling (server/routes/widget.js's POST /location, which
+  // this reuses token-and-all) — so the map's Trail toggle stays populated
+  // for web-only use without needing the widget app installed. Best-effort
+  // and fire-and-forget: never blocks or fails whatever asked for the
+  // location in the first place, and a missed sample (offline, no token yet)
+  // just waits for the next opportunity rather than retrying on a timer.
+  const TRAIL_LOG_INTERVAL_MS = 30 * 60 * 1000;
+  let trailLogPending = false;
+
+  async function maybeLogTrailPoint(loc) {
+    if (!widgetToken || !loc || trailLogPending) return;
+    const last = Number(localStorage.getItem('nico-trail-last-logged')) || 0;
+    if (Date.now() - last < TRAIL_LOG_INTERVAL_MS) return;
+    trailLogPending = true;
+    // A web-authored point always has the key on hand (this function only
+    // ever runs in the browser), so it can encrypt inline and never touch
+    // the DB as plaintext at all — unlike the Android widget's own samples
+    // through this same endpoint, which always start "pending" (see
+    // server/location.js's encryptGeo / sweepGeoEncryption below).
+    const geo = await encryptGeoOutgoing(loc.lat, loc.lon, { accuracy: loc.accuracy ?? null });
+    const body = geo
+      ? { geo, recordedAt: new Date().toISOString() }
+      : { lat: loc.lat, lon: loc.lon, accuracy: loc.accuracy ?? null, recordedAt: new Date().toISOString() };
+    fetch(`/api/widget/location?token=${encodeURIComponent(widgetToken)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then((r) => {
+        // Only start the next 30-min window on an actual success — a failed
+        // attempt (offline, server hiccup) should retry next time, not wait
+        // out the interval it never accomplished.
+        if (r.ok) localStorage.setItem('nico-trail-last-logged', String(Date.now()));
+      })
+      .catch(() => {})
+      .finally(() => {
+        trailLogPending = false;
+      });
+  }
+
   // Best-effort current position: resolves to {lat, lon} if permission is
   // already granted (or granted promptly), null otherwise — never blocks
   // note creation waiting on a slow/denied prompt.
@@ -2375,7 +2757,15 @@
     if (!navigator.geolocation) return Promise.resolve(null);
     return new Promise((resolve) => {
       navigator.geolocation.getCurrentPosition(
-        (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+        (pos) => {
+          const loc = {
+            lat: pos.coords.latitude,
+            lon: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+          };
+          maybeLogTrailPoint(loc);
+          resolve(loc);
+        },
         () => resolve(null),
         { timeout: 5000, maximumAge: 60000 }
       );
@@ -2482,18 +2872,19 @@
     listNotes: async () => {
       try {
         const rows = await fetch('/api/notes').then((r) => r.json());
+        await Promise.all(rows.map(decryptNoteGeo));
         await cache.mergeNotes(rows);
         return rows;
       } catch {
         return cache.cachedList();
       }
     },
-    searchNotes: (q) => {
-      if (!navigator.onLine) return Promise.resolve(cache.localSearch(q));
-      return fetch(`/api/notes/search?q=${encodeURIComponent(q)}`)
-        .then((r) => (r.ok ? r.json() : []))
-        .catch(() => cache.localSearch(q));
-    },
+    // Client-side content search over the mirror (docs/plan/
+    // 08-offline-privacy.md §3.2) — always local now, online or off, so a
+    // search query never round-trips to the server. GET /api/notes/search
+    // still exists server-side as a fallback path (see server/notes.js) but
+    // nothing here calls it any more.
+    searchNotes: (q) => cache.localSearch(q),
     // Every open ('todo') note anywhere below `id` in the inferred hierarchy —
     // powers the to-do bar's "under here" scoping.
     getSubtreeTodos: async (id) => {
@@ -2554,7 +2945,11 @@
     getNote: async (id) => {
       try {
         const n = await fetch(`/api/notes/${id}`).then((r) => (r.ok ? r.json() : null));
-        if (n) await cache.putNote(n);
+        if (n) {
+          n.content = await decryptIncoming(n.content);
+          await decryptNoteGeo(n);
+          await cache.putNote(n);
+        }
         return n || (await cache.cachedNote(id));
       } catch {
         return cache.cachedNote(id);
@@ -2565,10 +2960,14 @@
     // change locally and queue it (see the write-queue section above).
     createNote: async (data) => {
       const loc = await getLocation();
-      const body = loc ? { ...data, lat: loc.lat, lon: loc.lon } : data;
+      const geo = loc ? await encryptGeoOutgoing(loc.lat, loc.lon) : null;
+      const body = loc ? (geo ? { ...data, geo } : { ...data, lat: loc.lat, lon: loc.lon }) : data;
       if (navigator.onLine) {
         try {
-          const note = await postJson('/api/notes', body);
+          const wireBody = { ...body, content: await encryptOutgoing(body.content) };
+          const note = await postJson('/api/notes', wireBody);
+          note.content = await decryptIncoming(note.content);
+          await decryptNoteGeo(note);
           await cache.putNote(note);
           return note;
         } catch (err) {
@@ -2580,8 +2979,13 @@
     createAttachment: async (parentId, formData) => {
       const loc = await getLocation();
       if (loc) {
-        formData.set('lat', String(loc.lat));
-        formData.set('lon', String(loc.lon));
+        const geo = await encryptGeoOutgoing(loc.lat, loc.lon);
+        if (geo) {
+          formData.set('geo', geo);
+        } else {
+          formData.set('lat', String(loc.lat));
+          formData.set('lon', String(loc.lon));
+        }
       }
       const inline = formData.get('inline') === '1' || formData.get('inline') === 'true';
       // No parentId = a standalone attachment note (header/PWA-shortcut "new
@@ -2595,7 +2999,10 @@
           });
           if (!res.ok) throw httpErr(res.status, `HTTP ${res.status}`);
           const note = await res.json();
-          if (note && note.id != null) await cache.putNote(note);
+          if (note && note.id != null) {
+            await decryptNoteGeo(note);
+            await cache.putNote(note);
+          }
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
@@ -2650,10 +3057,11 @@
         try {
           const note = await putJson(`/api/notes/${id}`, {
             title: data.title,
-            content: data.content,
+            content: await encryptOutgoing(data.content),
             baseUpdatedAt: prev._serverUpdatedAt || prev.updated_at || null,
             clientUpdatedAt: new Date().toISOString(),
           });
+          note.content = await decryptIncoming(note.content);
           if (note && note.conflict) await handleConflict(note, data);
           if (note) delete note.conflict;
           await cache.putNote(note);
@@ -2880,10 +3288,27 @@
     getInsights: () => cachedStat('insights', 'statInsights', null),
     // The periodic GPS trail (map overlay's Trail toggle) — online-only, no
     // offline mirror, same as the geofence reminder circles it's drawn beside.
-    getLocationTrail: (days) =>
-      fetch(`/api/location-log?days=${encodeURIComponent(days)}`)
-        .then((r) => (r.ok ? r.json() : { points: [] }))
-        .catch(() => ({ points: [] })),
+    // Each point either already has plain lat/lon (never encrypted, or still
+    // "pending" — see sweepGeoEncryption) or a `geo` blob to decrypt; a point
+    // this device can't decrypt (locked, or the (0, 0) placeholder alongside
+    // a geo it can't read) is dropped rather than plotted as a fake location.
+    async getLocationTrail(days) {
+      let points;
+      try {
+        const r = await fetch(`/api/location-log?days=${encodeURIComponent(days)}`);
+        points = r.ok ? (await r.json()).points || [] : [];
+      } catch {
+        return { points: [] };
+      }
+      const resolved = await Promise.all(
+        points.map(async (p) => {
+          if (!p.geo) return p;
+          const g = await decryptGeoIncoming(p.geo);
+          return g ? { ...p, lat: g.lat, lon: g.lon, accuracy: g.accuracy } : null;
+        })
+      );
+      return { points: resolved.filter(Boolean) };
+    },
     getHistory: () => fetch('/api/history').then((r) => (r.ok ? r.json() : [])).catch(() => []),
     undoHistory: (id) =>
       fetch(`/api/history/${id}/undo`, { method: 'POST' })
@@ -2899,6 +3324,7 @@
     listAlarms: async () => {
       try {
         const rows = await fetch('/api/alarms').then((r) => (r.ok ? r.json() : []));
+        await Promise.all(rows.map(decryptReminderRow));
         const merged = await applyLocalAlarmOps(rows);
         if (store) store.setMeta('alarms', merged).catch(() => {});
         return merged;
@@ -2910,7 +3336,8 @@
       const { noteId, ...body } = data;
       if (navigator.onLine && !isTmp(noteId)) {
         try {
-          const row = await postJson('/api/alarms', data);
+          const row = await postJson('/api/alarms', await encryptReminderBody(data));
+          await decryptReminderRow(row);
           await mirrorUpsertAlarm(row);
           return row;
         } catch (err) {
@@ -2928,7 +3355,8 @@
     updateAlarm: async (id, data) => {
       if (navigator.onLine && !isTmp(id)) {
         try {
-          const row = await putJson(`/api/alarms/${id}`, data);
+          const row = await putJson(`/api/alarms/${id}`, await encryptReminderBody(data));
+          await decryptReminderRow(row);
           await mirrorUpsertAlarm(row);
           return row;
         } catch (err) {
@@ -3045,6 +3473,68 @@
       })
         .then((r) => r.json().then((j) => ({ ok: r.ok, ...j })))
         .catch(() => ({ ok: false, error: 'network error' })),
+    // Encryption (docs/plan/08-offline-privacy.md §3.3/§3.4) — thin wrappers;
+    // all crypto happens in public/crypto.js / the helpers near the `store`
+    // const above. These throw with the server's own message on a non-2xx
+    // response (409 "already enabled", etc.) so the settings UI can show it.
+    async getEncryptionPrefs() {
+      const r = await fetch('/api/encryption');
+      if (!r.ok) throw httpErr(r.status, 'could not load encryption status');
+      return r.json();
+    },
+    async setupEncryption(salt, iterations) {
+      const r = await fetch('/api/encryption/setup', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ salt, iterations }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw httpErr(r.status, j.error || `HTTP ${r.status}`);
+      return j;
+    },
+    cancelEncryptionSetup: () => fetch('/api/encryption/setup', { method: 'DELETE' }),
+    async migrateEncryption(items) {
+      const r = await fetch('/api/encryption/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw httpErr(r.status, j.error || `HTTP ${r.status}`);
+      return j;
+    },
+    // The inverse of migrateEncryption — see server/encryption.js's revert()
+    // and the import wiring below (near importRunBtn).
+    async revertEncryption(items) {
+      const r = await fetch('/api/encryption/revert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw httpErr(r.status, j.error || `HTTP ${r.status}`);
+      return j;
+    },
+    // Location-geo catch-up sweep (see sweepGeoEncryption below) — three
+    // small write-back endpoints, one per table, each { items: [{id, geo}] }.
+    encryptNoteGeo: (items) =>
+      fetch('/api/notes/encrypt-geo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      }).then((r) => r.ok),
+    encryptReminderGeo: (items) =>
+      fetch('/api/alarms/encrypt-geo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      }).then((r) => r.ok),
+    encryptLocationLogGeo: (items) =>
+      fetch('/api/location-log/encrypt-geo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items }),
+      }).then((r) => r.ok),
     onboardingBegin: () =>
       fetch('/api/onboarding/begin', { method: 'POST' }).then((r) => r.ok).catch(() => false),
     getPushKey: () => fetch('/api/push/key').then((r) => (r.ok ? r.json() : null)).catch(() => null),
@@ -3061,6 +3551,7 @@
     if (colorMode === 'note') {
       noteHeat = await api.getNoteHeat();
     }
+    noteHeatVersion++;
   }
 
   // The translucent tint for a note under the active colour mode, or null.
@@ -4270,6 +4761,8 @@
     }
     currentUser = sess.user;
     widgetToken = sess.widgetToken || null;
+    encPrefs = sess.encryption || null;
+    await loadEncKeyFromStore();
     accountBtn.title = `Signed in as ${currentUser.email}`;
     loadThemePrefsLocal();
     applyScreenTheme();
@@ -4295,6 +4788,7 @@
       if (deepLinkHashId && deepLinkHashId !== currentId) await goTo(deepLinkHashId, 'hash');
       await checkAlarms({ nudge: true });
       warmCache(); // background; never blocks first render
+      sweepGeoEncryption(); // background; also catches up an account encrypted before this feature existed
     } catch (err) {
       // Any unhandled throw in this chain (most likely an offline edge case)
       // used to leave the page stuck on the bare shell forever, nothing ever
@@ -4710,9 +5204,7 @@
 
     const content = document.createElement('textarea');
     content.className = 'center-content' + (contentCached ? '' : ' offline-unavailable');
-    content.value = contentCached
-      ? currentNote.content
-      : 'Not available offline — open this note once online to load and edit it.';
+    content.value = contentCached ? currentNote.content : contentUnavailableMessage(false);
     content.placeholder = 'Write here…';
     content.readOnly = !contentCached;
 
@@ -5104,10 +5596,11 @@
         });
       paint();
     } else if (currentNote.content == null) {
-      // Not truly empty — this note's full row was just never cached, so
-      // there's nothing to show. Distinct from the "Write here…" invitation
-      // below, which would otherwise wrongly suggest an empty note.
-      content.textContent = 'Not available offline';
+      // Not truly empty — either never cached offline, or (see
+      // contentUnavailableMessage) this device hasn't unlocked encryption.
+      // Distinct from the "Write here…" invitation below, which would
+      // otherwise wrongly suggest an empty note.
+      content.textContent = contentUnavailableMessage(true);
     } else {
       content.textContent = 'Write here…';
     }
@@ -6039,6 +6532,49 @@
     return row;
   }
 
+  // Once this account's content is encrypted (docs/plan/08-offline-privacy.md
+  // §3.5), server/agenda.js can no longer scan notes.content for open
+  // `- [ ]` tasks or todo @tags — it only ever reads reminders (plaintext by
+  // design) now. Recompute both from the local mirror instead, which already
+  // holds decrypted plaintext (see decryptIncoming) — an additive override
+  // in openAgenda below, not a server contract change; GET /api/agenda's
+  // shape stays the same either way.
+  const CLIENT_TAG_RE = /(?:^|\s)@([a-zA-Z][\w-]*)/g; // keep in sync with server/tags.js
+  function clientExtractTags(text) {
+    if (!text) return [];
+    const out = new Set();
+    for (const m of String(text).matchAll(CLIENT_TAG_RE)) out.add(m[1].toLowerCase());
+    return [...out];
+  }
+  // Same grammar as server/agenda.js's OPEN_TASK_RE / toggleTaskInSource above.
+  const CLIENT_OPEN_TASK_RE = /^[ \t]*(?:[-*+]|\d+\.)[ \t]+\[ \][ \t]*\S/gm;
+  const CLIENT_OPEN_TASKS_LIMIT = 20;
+
+  async function localOpenTasksAndTodos() {
+    const notesArr = await cache.cachedList();
+    const openTasks = [];
+    for (const n of notesArr) {
+      if (n.content == null) continue; // not cached, or locked — can't scan it
+      const open = (n.content.match(CLIENT_OPEN_TASK_RE) || []).length;
+      if (open > 0) openTasks.push({ noteId: n.id, title: n.title, open, updatedAt: n.updated_at });
+    }
+    openTasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+
+    const todos = notesArr
+      .filter((n) => n.status === 'todo')
+      .map((n) => ({
+        noteId: n.id,
+        title: n.title,
+        updatedAt: n.updated_at,
+        tags:
+          n.content == null
+            ? []
+            : [...new Set([...clientExtractTags(n.title), ...clientExtractTags(n.content)])],
+      }));
+
+    return { openTasks: openTasks.slice(0, CLIENT_OPEN_TASKS_LIMIT), todos };
+  }
+
   async function openAgenda() {
     agendaOverlay.classList.remove('hidden');
     agendaBody.textContent = 'Loading…';
@@ -6098,8 +6634,15 @@
     }
 
     // Secondary lists (server-computed): notes flagged to-do, then notes
-    // carrying open `- [ ]` tasks in their body.
+    // carrying open `- [ ]` tasks in their body. Once this account's content
+    // is encrypted, the server can't compute these any more — recompute
+    // locally instead (see localOpenTasksAndTodos above).
     const extra = await api.agenda();
+    if (extra && encryptionActive()) {
+      const local = await localOpenTasksAndTodos();
+      extra.openTasks = local.openTasks;
+      extra.todos = local.todos;
+    }
     const todos = (extra && extra.todos) || [];
     if (todos.length) {
       any = true;
@@ -7220,8 +7763,19 @@
   const mapOverlayClose = document.getElementById('map-overlay-close');
   const mapStatusEl = document.getElementById('map-status');
   const mapModesEl = document.getElementById('map-modes');
+  const mapNotesBtn = document.getElementById('map-notes-btn');
   const mapTrailBtn = document.getElementById('map-trail-btn');
   const mapEl = document.getElementById('map');
+  const mapDateSliderEl = document.getElementById('map-date-slider');
+  const mapDateSelectionEl = document.getElementById('map-date-selection');
+  const mapDateFromThumb = document.getElementById('map-date-from');
+  const mapDateToThumb = document.getElementById('map-date-to');
+  const mapDateLabelEl = document.getElementById('map-date-label');
+  const mapDateTicksEl = document.getElementById('map-date-ticks');
+  [mapDateFromThumb, mapDateToThumb].forEach((el) => {
+    el.setAttribute('aria-valuemin', '0');
+    el.setAttribute('aria-valuemax', '100');
+  });
 
   let leafletMap = null;
   let mapMarkers = null;
@@ -7232,6 +7786,197 @@
   let trailVisible = localStorage.getItem('nico-map-trail-visible') === '1';
   let trailPoints = null; // cached fetch — null = not loaded yet this session
   let mapTrailLayer = null;
+
+  // Note pins on/off — a plain visibility toggle like Trail's, replacing the
+  // old Plain/Heat colour-mode buttons (that just duplicated the header's 🎨
+  // colour-coding toggle without doing anything map-specific). Colour mode
+  // itself is still whatever 🎨 is set to app-wide; this only shows/hides
+  // the pins. Defaults on.
+  let notesVisible = localStorage.getItem('nico-map-notes-visible') !== '0';
+
+  // Map date-range slider: a "today - forever" filter over note pins/trail
+  // points, on an exponential scale (recent time gets most of the track,
+  // everything past a few years compresses toward "forever" = no lower bound).
+  // Stops are (percent along the track, age in days-ago) checkpoints;
+  // log-space interpolation between them gives the exponential feel while
+  // still landing exactly on "a week", "a month", etc. Past the last stop the
+  // age climbs asymptotically to Infinity as percent -> 100.
+  const DATE_SLIDER_STOPS = [
+    { pct: 0, days: 0 }, // now
+    { pct: 14, days: 1 }, // yesterday
+    { pct: 28, days: 7 }, // a week ago
+    { pct: 46, days: 30 }, // a month ago
+    { pct: 66, days: 365 }, // a year ago
+    { pct: 84, days: 365 * 5 }, // five years ago
+  ];
+
+  function sliderPercentToAgeDays(pct) {
+    pct = clamp(pct, 0, 100);
+    const stops = DATE_SLIDER_STOPS;
+    for (let i = 1; i < stops.length; i++) {
+      if (pct <= stops[i].pct) {
+        const a = stops[i - 1];
+        const b = stops[i];
+        const t = (pct - a.pct) / (b.pct - a.pct);
+        const la = Math.log(a.days + 1);
+        const lb = Math.log(b.days + 1);
+        return Math.exp(la + (lb - la) * t) - 1;
+      }
+    }
+    const last = stops[stops.length - 1];
+    if (pct >= 100) return Infinity;
+    const t = (pct - last.pct) / (100 - last.pct); // 0..1, ->1 as pct->100
+    return last.days / (1 - t);
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
+  // Percent positions of the two thumbs — 0 = now, 100 = forever. Persisted so
+  // reopening the map keeps whatever window you last looked at.
+  let mapDateFromPct = clamp(Number(localStorage.getItem('nico-map-date-from')) || 0, 0, 100);
+  let mapDateToPct = clamp(
+    localStorage.getItem('nico-map-date-to') == null
+      ? 100
+      : Number(localStorage.getItem('nico-map-date-to')),
+    0,
+    100
+  );
+  if (mapDateFromPct > mapDateToPct) mapDateToPct = mapDateFromPct;
+
+  function isMapDateRangeFull() {
+    return mapDateFromPct <= 0.01 && mapDateToPct >= 99.99;
+  }
+
+  // Resolved millisecond bounds for the current slider selection. `newestMs`
+  // is the more-recent edge (from the "from" thumb, closer to now), `oldestMs`
+  // is the older edge (from the "to" thumb; -Infinity once it's at "forever").
+  function mapDateRangeMs() {
+    const now = Date.now();
+    const newestAgeDays = sliderPercentToAgeDays(mapDateFromPct);
+    const oldestAgeDays = sliderPercentToAgeDays(mapDateToPct);
+    return {
+      newestMs: now - newestAgeDays * 86400000,
+      oldestMs: Number.isFinite(oldestAgeDays) ? now - oldestAgeDays * 86400000 : -Infinity,
+    };
+  }
+
+  function fmtSliderBound(pct) {
+    if (pct <= 0.01) return 'now';
+    const ageDays = sliderPercentToAgeDays(pct);
+    if (!Number.isFinite(ageDays)) return 'forever';
+    const ms = Date.now() - ageDays * 86400000;
+    return new Date(ms).toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  }
+
+  function renderMapDateSlider() {
+    mapDateFromThumb.style.left = `${mapDateFromPct}%`;
+    mapDateToThumb.style.left = `${mapDateToPct}%`;
+    mapDateSelectionEl.style.left = `${mapDateFromPct}%`;
+    mapDateSelectionEl.style.width = `${mapDateToPct - mapDateFromPct}%`;
+    mapDateFromThumb.setAttribute('aria-valuenow', String(Math.round(mapDateFromPct)));
+    mapDateToThumb.setAttribute('aria-valuenow', String(Math.round(mapDateToPct)));
+    mapDateLabelEl.innerHTML = isMapDateRangeFull()
+      ? '<span>All time</span>'
+      : `<span>${fmtSliderBound(mapDateFromPct)} &ndash; ${fmtSliderBound(mapDateToPct)}</span>`;
+  }
+
+  function buildMapDateTicks() {
+    if (mapDateTicksEl.childElementCount) return; // built once, geometry never changes
+    [
+      { pct: 0, label: 'Now' },
+      { pct: 28, label: 'Week' },
+      { pct: 46, label: 'Month' },
+      { pct: 66, label: 'Year' },
+      { pct: 100, label: 'Forever' },
+    ].forEach(({ pct, label }) => {
+      const span = document.createElement('span');
+      span.textContent = label;
+      span.style.left = `${pct}%`;
+      if (pct === 0) span.style.transform = 'translateX(0)';
+      if (pct === 100) span.style.transform = 'translateX(-100%)';
+      mapDateTicksEl.appendChild(span);
+    });
+  }
+
+  // Persisted only on release (not every drag tick) — matches trailVisible's
+  // "commit on toggle" pattern rather than hammering localStorage mid-drag.
+  function persistMapDateRange() {
+    localStorage.setItem('nico-map-date-from', String(mapDateFromPct));
+    localStorage.setItem('nico-map-date-to', String(mapDateToPct));
+  }
+
+  function mapDateSliderPosition(event) {
+    const rect = mapDateSliderEl.getBoundingClientRect();
+    return clamp(((event.clientX - rect.left) / rect.width) * 100, 0, 100);
+  }
+
+  // Shared by drawMapMarkers and the drag-time "did anything actually change"
+  // check below — one filter definition, so the two can never disagree.
+  function visibleGeoNotes() {
+    const located = allNotesCache.filter(
+      (n) => Number.isFinite(n.lat) && Number.isFinite(n.lon)
+    );
+    if (isMapDateRangeFull()) return { located, geo: located };
+    const { oldestMs, newestMs } = mapDateRangeMs();
+    const geo = located.filter((n) => {
+      const ms = Date.parse(n.created_at || n.updated_at);
+      if (!Number.isFinite(ms)) return true; // no date to judge by — never hide it
+      return ms >= oldestMs && ms <= newestMs;
+    });
+    return { located, geo };
+  }
+
+  let mapDateDrag = null;
+
+  mapDateSliderEl.addEventListener('pointerdown', (event) => {
+    const at = mapDateSliderPosition(event);
+    if (event.target === mapDateSelectionEl) {
+      mapDateDrag = { type: 'selection', start: at, from: mapDateFromPct, to: mapDateToPct };
+    } else if (event.target === mapDateFromThumb) {
+      mapDateDrag = { type: 'from' };
+    } else if (event.target === mapDateToThumb) {
+      mapDateDrag = { type: 'to' };
+    } else {
+      mapDateDrag = {
+        type: Math.abs(at - mapDateFromPct) <= Math.abs(at - mapDateToPct) ? 'from' : 'to',
+      };
+    }
+    mapDateSliderEl.setPointerCapture(event.pointerId);
+    moveMapDateSlider(event);
+  });
+
+  function moveMapDateSlider(event) {
+    if (!mapDateDrag) return;
+    const at = mapDateSliderPosition(event);
+    if (mapDateDrag.type === 'from') mapDateFromPct = clamp(at, 0, mapDateToPct);
+    if (mapDateDrag.type === 'to') mapDateToPct = clamp(at, mapDateFromPct, 100);
+    if (mapDateDrag.type === 'selection') {
+      const width = mapDateDrag.to - mapDateDrag.from;
+      mapDateFromPct = clamp(mapDateDrag.from + (at - mapDateDrag.start), 0, 100 - width);
+      mapDateToPct = mapDateFromPct + width;
+    }
+    renderMapDateSlider();
+    // Real-time — drawMapMarkers/drawMapTrail are themselves incremental now
+    // (they only touch what actually changed), so no outer gate is needed.
+    drawMapMarkers();
+    drawMapTrail();
+  }
+
+  mapDateSliderEl.addEventListener('pointermove', moveMapDateSlider);
+  mapDateSliderEl.addEventListener('pointerup', () => {
+    mapDateDrag = null;
+    persistMapDateRange();
+  });
+  mapDateSliderEl.addEventListener('pointercancel', () => {
+    mapDateDrag = null;
+    persistMapDateRange();
+  });
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
@@ -7256,14 +8001,28 @@
     return '#4f6df5';
   }
 
-  async function drawMapMarkers() {
-    const geo = allNotesCache.filter(
-      (n) => Number.isFinite(n.lat) && Number.isFinite(n.lon)
-    );
-    mapStatusEl.textContent =
-      `${geo.length} mapped · ${allNotesCache.length - geo.length} without location`;
+  // Persistent per-bucket layer state, so a date-slider tick that doesn't
+  // change what's at a given map spot never has to touch that spot's marker
+  // (that clear-and-rebuild-everything was the flicker). Keyed by the same
+  // lat/lon grid cell as the bucketing below, which stays stable across
+  // redraws at a fixed zoom — only the notes *inside* a cell change as the
+  // date range moves. `sig` captures everything that would change how a
+  // bucket is drawn even with the same notes in it (title/type edits via
+  // updated_at, colour mode, note-heat refreshes).
+  let mapMarkerLayers = new Map(); // bucketKey -> { layer, isSingle, sig }
+  let mapMarkerGroupCellDeg = null; // the latCellDeg the current layers were bucketed at
 
-    mapMarkers.clearLayers();
+  async function drawMapMarkers() {
+    if (!notesVisible) {
+      mapMarkerLayers.forEach(({ layer }) => mapMarkers.removeLayer(layer));
+      mapMarkerLayers.clear();
+      mapMarkerGroupCellDeg = null; // force a full re-bucket next time notes come back on
+      mapStatusEl.textContent = 'Notes hidden';
+      return;
+    }
+
+    const { geo } = visibleGeoNotes();
+    mapStatusEl.textContent = `${geo.length} mapped`;
 
     // Notes captured at (nearly) the same spot stack invisibly — one pin hides
     // the rest. Bucket by a lat/lon grid and draw a stack as a single counted
@@ -7272,6 +8031,15 @@
     // shrinks the buckets and stacks split back into individual pins.
     const groupM = Math.max(50, 40 * mapMetersPerPixel());
     const latCellDeg = groupM / 111320;
+
+    // A zoom change redefines every bucket's geometry — the old layer
+    // identities aren't meaningful any more, so start clean rather than try
+    // to diff across it (only happens on an actual zoom gesture, not a drag).
+    if (mapMarkerGroupCellDeg !== latCellDeg) {
+      mapMarkerLayers.forEach(({ layer }) => mapMarkers.removeLayer(layer));
+      mapMarkerLayers.clear();
+      mapMarkerGroupCellDeg = latCellDeg;
+    }
 
     const noteLink = (note) => {
       const icon = TYPE_ICON[note.type] ? `${TYPE_ICON[note.type]} ` : '';
@@ -7291,57 +8059,114 @@
       groups.get(key).push(note);
     });
 
-    groups.forEach((notes) => {
-      const lead = notes[0];
-      if (notes.length === 1) {
-        const icon = TYPE_ICON[lead.type] ? `${TYPE_ICON[lead.type]} ` : '';
-        L.circleMarker([lead.lat, lead.lon], {
+    const sigOf = (notes) =>
+      notes
+        .map((n) => `${n.id}:${n.updated_at || ''}`)
+        .sort()
+        .join(',') + `|${colorMode}|${noteHeatVersion}`;
+
+    const stackPopup = (notes) =>
+      `<b>${notes.length} notes here</b>` +
+      `<ul class="map-stack-list">` +
+      notes.map((n) => `<li>${noteLink(n)}</li>`).join('') +
+      `</ul>`;
+    const stackIcon = (lead, count) =>
+      L.divIcon({
+        className: 'map-stack-icon',
+        html: `<span style="background:${mapColorFor(lead)}">${count}</span>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        popupAnchor: [0, -14],
+      });
+    const singlePopup = (lead) => {
+      const icon = TYPE_ICON[lead.type] ? `${TYPE_ICON[lead.type]} ` : '';
+      return (
+        `<b>${icon}${escapeHtml(lead.title || 'Untitled')}</b><br />` +
+        `<a href="#${lead.id}" data-note-id="${lead.id}">Open note</a>`
+      );
+    };
+    const centroid = (notes) => [
+      notes.reduce((s, n) => s + n.lat, 0) / notes.length,
+      notes.reduce((s, n) => s + n.lon, 0) / notes.length,
+    ];
+
+    // Drop buckets that no longer have any note in range.
+    for (const [key, entry] of mapMarkerLayers) {
+      if (!groups.has(key)) {
+        mapMarkers.removeLayer(entry.layer);
+        mapMarkerLayers.delete(key);
+      }
+    }
+
+    groups.forEach((notes, key) => {
+      const isSingle = notes.length === 1;
+      const sig = sigOf(notes);
+      const existing = mapMarkerLayers.get(key);
+      if (existing && existing.sig === sig) return; // nothing about this pin changed
+
+      if (existing && existing.isSingle === isSingle) {
+        // Same kind of marker as before — update it in place rather than
+        // tearing it down and recreating it.
+        if (isSingle) {
+          const lead = notes[0];
+          existing.layer
+            .setLatLng([lead.lat, lead.lon])
+            .setStyle({ fillColor: mapColorFor(lead) })
+            .setPopupContent(singlePopup(lead));
+        } else {
+          const lead = notes[0];
+          existing.layer
+            .setLatLng(centroid(notes))
+            .setIcon(stackIcon(lead, notes.length))
+            .setPopupContent(stackPopup(notes));
+        }
+        existing.sig = sig;
+        return;
+      }
+
+      // New bucket, or it flipped between a single pin and a stack — those
+      // are different Leaflet layer types, so this one spot does need replacing.
+      if (existing) mapMarkers.removeLayer(existing.layer);
+
+      let layer;
+      if (isSingle) {
+        const lead = notes[0];
+        layer = L.circleMarker([lead.lat, lead.lon], {
           radius: 8,
           color: '#fff',
           weight: 2,
           fillColor: mapColorFor(lead),
           fillOpacity: 0.95,
-        })
-          .bindPopup(
-            `<b>${icon}${escapeHtml(lead.title || 'Untitled')}</b><br />` +
-              `<a href="#${lead.id}" data-note-id="${lead.id}">Open note</a>`
-          )
-          .addTo(mapMarkers);
-        return;
+        }).bindPopup(singlePopup(lead));
+      } else {
+        const lead = notes[0];
+        layer = L.marker(centroid(notes), { icon: stackIcon(lead, notes.length) }).bindPopup(
+          stackPopup(notes)
+        );
       }
-
-      // Sit the counted marker at the bucket's centroid.
-      const lat = notes.reduce((s, n) => s + n.lat, 0) / notes.length;
-      const lon = notes.reduce((s, n) => s + n.lon, 0) / notes.length;
-      L.marker([lat, lon], {
-        icon: L.divIcon({
-          className: 'map-stack-icon',
-          html: `<span style="background:${mapColorFor(lead)}">${notes.length}</span>`,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14],
-          popupAnchor: [0, -14],
-        }),
-      })
-        .bindPopup(
-          `<b>${notes.length} notes here</b>` +
-            `<ul class="map-stack-list">` +
-            notes.map((n) => `<li>${noteLink(n)}</li>`).join('') +
-            `</ul>`
-        )
-        .addTo(mapMarkers);
+      layer.addTo(mapMarkers);
+      mapMarkerLayers.set(key, { layer, isSingle, sig });
     });
-
-    drawReminderMarkers(latCellDeg);
   }
 
-  // Location reminders on the map: an amber radius circle per reminder plus a
-  // 🔔 marker, bucketed like note pins so several at one spot become one marker
-  // whose popup lists them.
-  function drawReminderMarkers(latCellDeg) {
+  // Location reminders: their own layer group, entirely separate from note
+  // pins — reminders aren't affected by the date-range slider at all, so
+  // they used to get needlessly torn down and rebuilt on every drag tick as
+  // a side effect of sharing drawMapMarkers's layer group. Redrawn on open
+  // and on zoom (bucket geometry is zoom-dependent, same as notes); reminders
+  // rarely change while the map is sitting open, so a plain rebuild here
+  // (not the incremental diffing above) is fine.
+  let reminderMarkerLayer = null;
+
+  function drawReminderMarkers() {
+    reminderMarkerLayer.clearLayers();
     const rems = (alarms || []).filter(
       (a) => a.kind === 'location' && Number.isFinite(a.lat) && Number.isFinite(a.lon)
     );
     if (!rems.length) return;
+
+    const groupM = Math.max(50, 40 * mapMetersPerPixel());
+    const latCellDeg = groupM / 111320;
 
     const groups = new Map();
     rems.forEach((r) => {
@@ -7359,7 +8184,7 @@
           weight: 1,
           fillColor: '#e8590c',
           fillOpacity: 0.12,
-        }).addTo(mapMarkers);
+        }).addTo(reminderMarkerLayer);
       });
       const lat = list.reduce((s, r) => s + r.lat, 0) / list.length;
       const lon = list.reduce((s, r) => s + r.lon, 0) / list.length;
@@ -7388,11 +8213,14 @@
         }),
       })
         .bindPopup(popup)
-        .addTo(mapMarkers);
+        .addTo(reminderMarkerLayer);
     });
   }
 
-  const TRAIL_DAYS = 14;
+  // Fetch the full 90-day retention window once (server/routes/location.js
+  // clamps to this anyway) and let the date-range slider narrow what's drawn
+  // client-side, rather than re-fetching every time the slider moves.
+  const TRAIL_FETCH_DAYS = 90;
 
   // The periodic location trail: connects the logged points oldest-to-newest,
   // colouring both the points and the connecting segments by age — lighter
@@ -7403,50 +8231,147 @@
   const TRAIL_NEW_HEX = '7dd3fc'; // light sky blue — most recent point
   const TRAIL_OLD_HEX = '0c4a6e'; // dark navy — oldest point in range
 
-  async function drawMapTrail() {
-    if (mapTrailLayer) {
-      mapTrailLayer.remove();
-      mapTrailLayer = null;
+  // The render set has to stay cheap even at "now - forever" (up to
+  // location.js's MAX_POINTS=3000 over the full 90-day window). Thin to an
+  // evenly-spaced subset rather than shrink the fetch: index-spaced sampling
+  // always keeps the first/last point, so the oldest/newest bounds stay
+  // exact — only the shape in between gets coarser.
+  const TRAIL_MAX_RENDER_POINTS = 400;
+
+  function decimateTrailPoints(points) {
+    if (points.length <= TRAIL_MAX_RENDER_POINTS) return points;
+    const stride = (points.length - 1) / (TRAIL_MAX_RENDER_POINTS - 1);
+    const out = [];
+    for (let i = 0; i < TRAIL_MAX_RENDER_POINTS; i++) {
+      out.push(points[Math.round(i * stride)]);
     }
-    if (!trailVisible) return;
+    return out;
+  }
+
+  // trailRenderPoints is a fixed, time-sorted, decimated view of the fetched
+  // trail — built once per fetch, index-stable for as long as it lives.
+  // trailPointLayers holds one pre-built {marker, segment} per index (segment
+  // connects it to the *previous* index; null for index 0), created once and
+  // never rebuilt — the date slider only ever toggles which contiguous
+  // [trailWindowStart, trailWindowEnd) slice of them is actually on the map,
+  // so a drag that doesn't cross a point's boundary touches nothing at all.
+  // Colour is fixed at creation from this set's own oldest/newest span (not
+  // whatever's currently in view), which is what lets it stay untouched too.
+  let trailRenderPoints = null;
+  let trailPointLayers = [];
+  let trailWindowStart = 0;
+  let trailWindowEnd = 0;
+
+  function setSegmentVisible(i, visible) {
+    const entry = trailPointLayers[i];
+    if (!entry || !entry.segment) return;
+    if (visible) mapTrailLayer.addLayer(entry.segment);
+    else mapTrailLayer.removeLayer(entry.segment);
+  }
+
+  function addTrailPoint(i) {
+    const entry = trailPointLayers[i];
+    if (!entry) return;
+    mapTrailLayer.addLayer(entry.marker);
+    if (entry.segment) mapTrailLayer.addLayer(entry.segment); // boundary fixed up by the caller
+  }
+
+  function removeTrailPoint(i) {
+    const entry = trailPointLayers[i];
+    if (!entry) return;
+    mapTrailLayer.removeLayer(entry.marker);
+    if (entry.segment) mapTrailLayer.removeLayer(entry.segment);
+  }
+
+  function resetTrailRenderState() {
+    if (mapTrailLayer) mapTrailLayer.remove();
+    mapTrailLayer = null;
+    trailRenderPoints = null;
+    trailPointLayers = [];
+    trailWindowStart = 0;
+    trailWindowEnd = 0;
+  }
+
+  async function drawMapTrail() {
+    if (!trailVisible) {
+      resetTrailRenderState();
+      return;
+    }
 
     if (!trailPoints) {
-      const { points } = await api.getLocationTrail(TRAIL_DAYS);
+      const { points } = await api.getLocationTrail(TRAIL_FETCH_DAYS);
       trailPoints = points || [];
+      trailRenderPoints = null; // fresh fetch — rebuild the stable render set below
     }
     if (!trailPoints.length) return;
 
-    const oldestMs = Date.parse(trailPoints[0].recordedAt);
-    const newestMs = Date.parse(trailPoints[trailPoints.length - 1].recordedAt);
-    const span = Math.max(newestMs - oldestMs, 1);
-    const colorAt = (iso) => {
-      const frac = (Date.parse(iso) - oldestMs) / span; // 0 = oldest, 1 = newest
-      return lerpHex(TRAIL_OLD_HEX, TRAIL_NEW_HEX, frac);
-    };
+    if (!trailRenderPoints) {
+      trailRenderPoints = decimateTrailPoints(trailPoints);
+      const oldestMs = Date.parse(trailRenderPoints[0].recordedAt);
+      const newestMs = Date.parse(trailRenderPoints[trailRenderPoints.length - 1].recordedAt);
+      const span = Math.max(newestMs - oldestMs, 1);
+      const colorAt = (iso) =>
+        lerpHex(TRAIL_OLD_HEX, TRAIL_NEW_HEX, (Date.parse(iso) - oldestMs) / span);
 
-    mapTrailLayer = L.layerGroup().addTo(leafletMap);
-
-    for (let i = 1; i < trailPoints.length; i++) {
-      const a = trailPoints[i - 1];
-      const b = trailPoints[i];
-      L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-        color: colorAt(b.recordedAt),
-        weight: 3,
-        opacity: 0.75,
-      }).addTo(mapTrailLayer);
+      if (mapTrailLayer) mapTrailLayer.remove();
+      mapTrailLayer = L.layerGroup().addTo(leafletMap);
+      trailPointLayers = trailRenderPoints.map((p, i) => {
+        const marker = L.circleMarker([p.lat, p.lon], {
+          radius: 3,
+          color: '#fff',
+          weight: 1,
+          fillColor: colorAt(p.recordedAt),
+          fillOpacity: 0.9,
+        }).bindTooltip(relTime(p.recordedAt));
+        let segment = null;
+        if (i > 0) {
+          const prev = trailRenderPoints[i - 1];
+          segment = L.polyline(
+            [[prev.lat, prev.lon], [p.lat, p.lon]],
+            { color: colorAt(p.recordedAt), weight: 3, opacity: 0.75 }
+          );
+        }
+        return { marker, segment };
+      });
+      trailWindowStart = 0;
+      trailWindowEnd = 0; // nothing actually on the map yet
     }
 
-    trailPoints.forEach((p) => {
-      L.circleMarker([p.lat, p.lon], {
-        radius: 3,
-        color: '#fff',
-        weight: 1,
-        fillColor: colorAt(p.recordedAt),
-        fillOpacity: 0.9,
-      })
-        .bindTooltip(relTime(p.recordedAt))
-        .addTo(mapTrailLayer);
-    });
+    // The contiguous [start, end) slice of the fixed, time-sorted render set
+    // that falls in the current date range — a linear scan is plenty for
+    // <=400 points.
+    let newStart = 0;
+    let newEnd = trailRenderPoints.length;
+    if (!isMapDateRangeFull()) {
+      const { oldestMs, newestMs } = mapDateRangeMs();
+      newStart = trailRenderPoints.findIndex((p) => Date.parse(p.recordedAt) >= oldestMs);
+      if (newStart === -1) newStart = trailRenderPoints.length;
+      while (
+        newEnd > newStart &&
+        Date.parse(trailRenderPoints[newEnd - 1].recordedAt) > newestMs
+      ) {
+        newEnd--;
+      }
+    }
+
+    const oldStart = trailWindowStart;
+    const oldEnd = trailWindowEnd;
+    // Four-way clamp so only the actual difference between the old and new
+    // windows is touched — a stable middle is never removed or re-added.
+    for (let i = oldStart; i < Math.min(newStart, oldEnd); i++) removeTrailPoint(i);
+    for (let i = Math.max(newEnd, oldStart); i < oldEnd; i++) removeTrailPoint(i);
+    for (let i = newStart; i < Math.min(oldStart, newEnd); i++) addTrailPoint(i);
+    for (let i = Math.max(oldEnd, newStart); i < newEnd; i++) addTrailPoint(i);
+
+    // The window's left edge never shows a connecting segment (nothing
+    // visible to its left) — fix up whichever index holds that role now.
+    if (newStart !== oldStart) {
+      if (oldStart >= newStart && oldStart < newEnd) setSegmentVisible(oldStart, true);
+      if (newStart < newEnd) setSegmentVisible(newStart, false);
+    }
+
+    trailWindowStart = newStart;
+    trailWindowEnd = newEnd;
   }
 
   // Metres per screen pixel at the map's current zoom and centre latitude.
@@ -7481,15 +8406,6 @@
     }
   }
 
-  function syncMapModes() {
-    // Scoped to [data-mode] so the Trail toggle (no data-mode — its active
-    // state is a separate, independent axis, not a colour mode) isn't
-    // clobbered back to inactive every time a colour mode is picked.
-    mapModesEl.querySelectorAll('button[data-mode]').forEach((b) => {
-      b.classList.toggle('active', b.dataset.mode === colorMode);
-    });
-  }
-
   // While set, the next map background click is captured as a location pick
   // (for the alarm editor's "Pick on map") instead of doing nothing.
   let mapPick = null;
@@ -7507,10 +8423,14 @@
       }).addTo(leafletMap);
       leafletMap.setView([20, 0], 2);
       mapMarkers = L.layerGroup().addTo(leafletMap);
+      reminderMarkerLayer = L.layerGroup().addTo(leafletMap);
 
       // Re-bucket the stacks for the new zoom (fires once per zoom gesture,
       // after the animation settles).
-      leafletMap.on('zoomend', () => { drawMapMarkers(); });
+      leafletMap.on('zoomend', () => {
+        drawMapMarkers();
+        drawReminderMarkers();
+      });
 
       // Pick mode: a tap on the map hands its coords back and closes.
       leafletMap.on('click', (e) => {
@@ -7532,10 +8452,13 @@
     // The container had zero size while hidden; Leaflet must re-measure it.
     requestAnimationFrame(() => leafletMap.invalidateSize());
 
-    syncMapModes();
+    mapNotesBtn.classList.toggle('active', notesVisible);
     mapTrailBtn.classList.toggle('active', trailVisible);
+    buildMapDateTicks();
+    renderMapDateSlider();
     await refreshColorData();
     await drawMapMarkers();
+    drawReminderMarkers();
     await drawMapTrail();
     await centerMapOnNotes();
   }
@@ -7587,15 +8510,706 @@
       await drawMapTrail();
       return;
     }
-    colorMode = btn.dataset.mode;
-    applyColorModeButton();
-    syncMapModes();
-    await refreshColorData();
-    await drawMapMarkers();
-    if (currentId) await render();
+    if (btn === mapNotesBtn) {
+      notesVisible = !notesVisible;
+      localStorage.setItem('nico-map-notes-visible', notesVisible ? '1' : '0');
+      mapNotesBtn.classList.toggle('active', notesVisible);
+      await drawMapMarkers();
+      return;
+    }
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && !mapOverlay.classList.contains('hidden')) closeMap();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Graph view: a 2D visual map of the link graph, separate from the geo map
+  // above and from the 3x3 grid's "one note + ranked neighbours" navigation —
+  // a global overview/orientation tool, not a navigation replacement. Purely
+  // client-side: it walks the (online or offline-mirrored) link graph and the
+  // already-cached note-heat stat, so it works offline the same as the grid.
+  //
+  // Browsing here — recentring on a tapped node — never calls api.logNav, so
+  // it doesn't skew the grid's nav_events-based neighbour ranking elsewhere;
+  // only actually opening a note (tapping the already-centred node a second
+  // time) does, the same as any other way of opening one (search, a neighbor
+  // card, …).
+  //
+  // Two layouts, kept both rather than picking one up front (radial = rings
+  // by hop-distance from the centred note, deterministic, no settling force =
+  // an organic spring layout, needs to settle but groups clusters visually).
+  // ---------------------------------------------------------------------------
+
+  let graphState = null; // { centerId, nodes, edges, pos, camera:{x,y,scale} }
+  let graphLayoutMode = localStorage.getItem('nico-graph-layout') || 'radial';
+  let graphLevel = parseInt(localStorage.getItem('nico-graph-level'), 10) || 20;
+  let graphShowDone = localStorage.getItem('nico-graph-show-done') === '1'; // default off
+  // 'heat' = the existing usage/proximity blend (weight grows with level);
+  // 'link' = ranked purely by link-hop distance from the centred note,
+  // ignoring usage entirely, regardless of the level slider.
+  let graphScoreMode = localStorage.getItem('nico-graph-score-mode') || 'heat';
+  const graphPointers = new Map(); // pointerId -> last-seen {x,y} in client coords
+  let graphPanStart = null; // {x,y, camX, camY} while exactly one pointer is down
+  let graphPinchStartDist = null;
+  let graphPinchStartScale = 1;
+  let graphPinchMid = null; // {x,y,camX,camY} anchor for two-pointer pinch/pan
+  let graphTapCandidate = null; // {x,y} — cleared once movement exceeds the tap slop
+  let graphLevelDebounce = null;
+  const GRAPH_TAP_SLOP = 8; // px of movement still counted as a tap, not a drag
+
+  // Animated transitions between rebuilds (recentring, level change, layout
+  // switch): graphVisual is what actually gets drawn — positions/opacity
+  // eased from graphAnimFrom toward graphAnimTo over GRAPH_TRANSITION_MS.
+  // graphState.nodes/edges stay the logical *target* (used for hit-testing —
+  // an exiting node fading out is no longer tappable); graphAnimNodesById
+  // additionally carries exiting nodes purely so drawGraph can fade them out
+  // in place before dropping them.
+  const GRAPH_TRANSITION_MS = 380;
+  let graphVisual = new Map(); // id -> {x,y,opacity}
+  let graphAnimNodesById = new Map(); // id -> node (current + exiting)
+  let graphAnimEdges = [];
+  let graphAnimFrom = new Map();
+  let graphAnimTo = new Map();
+  let graphAnimHandle = null;
+  let graphAnimStartTime = 0;
+
+  function easeOutCubic(t) {
+    return 1 - Math.pow(1 - t, 3);
+  }
+
+  function graphActiveNotes() {
+    return allNotesCache.filter((n) => n.status !== 'deleted');
+  }
+
+  // Notes actually eligible to be shown — excludes done ones while the Done
+  // toggle is off, so the slider's ceiling (and the weight blend below,
+  // which divides by it) reflect what's really selectable, not the whole
+  // graph including notes the toggle is hiding.
+  function graphVisibleNotes() {
+    return graphActiveNotes().filter((n) => graphShowDone || n.status !== 'done');
+  }
+
+  // The node-count slider's ceiling — generous enough to show the whole
+  // visible graph for the vast majority of accounts without ever laying out
+  // an unbounded set.
+  function graphMaxLevel() {
+    return Math.max(6, Math.min(graphVisibleNotes().length, 150));
+  }
+
+  // Undirected adjacency over the (online or offline-mirrored) link graph —
+  // same source cache.localNeighbors draws on for one note, walked globally.
+  async function buildGraphAdjacency() {
+    const links = await cache.cachedLinks();
+    const adj = new Map();
+    const add = (a, b) => {
+      if (!adj.has(a)) adj.set(a, new Set());
+      adj.get(a).add(b);
+    };
+    for (const l of links) {
+      if (l._deleted) continue;
+      add(l.a, l.b);
+      add(l.b, l.a);
+    }
+    return adj;
+  }
+
+  // BFS out from `centerId` for hop-distance, then keep the `level` best-
+  // scoring notes. In 'heat' mode, score blends usage (note-heat) and
+  // closeness, and the blend shifts toward closeness as `level` grows: at a
+  // small level you see what you actually use near here; at a large one,
+  // even unused-but-close notes eventually outrank a heavily-used note
+  // several hops away. In 'link' mode usage is ignored outright — the
+  // weight is pinned to 1 (pure closeness) regardless of `level`, so it's
+  // always just the closest notes by link hops.
+  async function computeGraphData(centerId, level, showDone, scoreMode) {
+    const notesById = new Map(graphActiveNotes().map((n) => [n.id, n]));
+    if (!notesById.has(centerId)) return { nodes: [], edges: [] };
+    const adj = await buildGraphAdjacency();
+    const heat = (await api.getNoteHeat()) || {};
+
+    // BFS distance walks through every active note (including done ones) so
+    // hiding done notes below only drops them from what's *shown*, never
+    // disconnects the graph structurally — a done note doesn't have to be
+    // displayed to still count as a hop on the way to something past it.
+    const dist = new Map([[centerId, 0]]);
+    const queue = [centerId];
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const nb of adj.get(cur) || []) {
+        if (dist.has(nb) || !notesById.has(nb)) continue;
+        dist.set(nb, dist.get(cur) + 1);
+        queue.push(nb);
+      }
+    }
+
+    const weight = scoreMode === 'link' ? 1 : Math.min(1, level / graphMaxLevel());
+    const scored = [];
+    for (const [id, d] of dist) {
+      if (id === centerId) continue;
+      const note = notesById.get(id);
+      if (!showDone && note.status === 'done') continue; // the centre itself is exempt — see below
+      const h = heat[id] || 0;
+      const proximity = 1 / (1 + d);
+      scored.push({ id, note, distance: d, heat: h, score: (1 - weight) * h + weight * proximity });
+    }
+    scored.sort((a, b) => b.score - a.score);
+
+    const chosen = [
+      { id: centerId, note: notesById.get(centerId), distance: 0, heat: heat[centerId] || 0, score: 1 },
+      ...scored.slice(0, Math.max(0, level - 1)),
+    ];
+
+    const chosenIds = new Set(chosen.map((c) => c.id));
+    const edges = [];
+    const seen = new Set();
+    for (const c of chosen) {
+      for (const nb of adj.get(c.id) || []) {
+        if (!chosenIds.has(nb)) continue;
+        const key = c.id < nb ? `${c.id}:${nb}` : `${nb}:${c.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        edges.push([c.id, nb]);
+      }
+    }
+    return { nodes: chosen, edges };
+  }
+
+  // Shared with layoutForce's ring-radius normalization below, so both
+  // layouts agree on how far out a given hop-distance should sit.
+  const GRAPH_RING_GAP = 110;
+
+  function graphNodesByDistance(nodes) {
+    const byDistance = new Map();
+    for (const node of nodes) {
+      if (node.distance === 0) continue;
+      if (!byDistance.has(node.distance)) byDistance.set(node.distance, []);
+      byDistance.get(node.distance).push(node);
+    }
+    return byDistance;
+  }
+
+  // Deterministic: concentric rings by hop-distance, evenly spread by angle
+  // within a ring (highest-scoring first). No settling, no jitter.
+  function layoutRadial(nodes) {
+    const pos = new Map();
+    const byDistance = graphNodesByDistance(nodes);
+    for (const node of nodes) {
+      if (node.distance === 0) pos.set(node.id, { x: 0, y: 0 });
+    }
+    for (const distance of [...byDistance.keys()].sort((a, b) => a - b)) {
+      const list = byDistance.get(distance).sort((a, b) => b.score - a.score);
+      const r = distance * GRAPH_RING_GAP;
+      list.forEach((node, i) => {
+        const angle = (i / list.length) * Math.PI * 2;
+        pos.set(node.id, { x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+      });
+    }
+    return pos;
+  }
+
+  // Organic: force-directed (all-pairs repulsion + spring edges), baked once
+  // per rebuild rather than animated — cheap enough at the node counts the
+  // level slider allows (≤150) to just settle synchronously.
+  function layoutForce(nodes, edges) {
+    const pos = new Map();
+    const n = nodes.length;
+    nodes.forEach((node, i) => {
+      if (node.distance === 0) {
+        pos.set(node.id, { x: 0, y: 0 });
+        return;
+      }
+      const angle = (i / n) * Math.PI * 2;
+      const r = 50 + node.distance * 55;
+      pos.set(node.id, { x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+    });
+    const idealLen = 90;
+    const repulsion = 6000;
+    const ITER = 220;
+    for (let iter = 0; iter < ITER; iter++) {
+      const disp = new Map(nodes.map((node) => [node.id, { x: 0, y: 0 }]));
+      for (let i = 0; i < n; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const a = pos.get(nodes[i].id);
+          const b = pos.get(nodes[j].id);
+          const dx = a.x - b.x || (Math.random() - 0.5) * 0.1;
+          const dy = a.y - b.y || (Math.random() - 0.5) * 0.1;
+          const distSq = dx * dx + dy * dy;
+          const dist = Math.sqrt(distSq);
+          const force = repulsion / distSq;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          disp.get(nodes[i].id).x += fx;
+          disp.get(nodes[i].id).y += fy;
+          disp.get(nodes[j].id).x -= fx;
+          disp.get(nodes[j].id).y -= fy;
+        }
+      }
+      for (const [a, b] of edges) {
+        const pa = pos.get(a);
+        const pb = pos.get(b);
+        if (!pa || !pb) continue;
+        const dx = pb.x - pa.x || 0.1;
+        const dy = pb.y - pa.y || 0.1;
+        const dist = Math.hypot(dx, dy);
+        const force = (dist - idealLen) * 0.02;
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        disp.get(a).x += fx;
+        disp.get(a).y += fy;
+        disp.get(b).x -= fx;
+        disp.get(b).y -= fy;
+      }
+      const cooling = Math.max(0.02, 1 - iter / ITER);
+      for (const node of nodes) {
+        if (node.distance === 0) continue; // keep the centred note pinned
+        const p = pos.get(node.id);
+        const d = disp.get(node.id);
+        p.x += d.x * cooling * 0.06;
+        p.y += d.y * cooling * 0.06;
+      }
+    }
+    // The settled spring layout's ring radii don't reliably match radial's
+    // fixed spacing (repulsion/idealLen settle wherever they settle, and a
+    // flat fudge factor drifts as the node count/mix changes) — normalize
+    // each hop-distance ring's *average* radius to radial's GRAPH_RING_GAP
+    // exactly, scaling that ring alone so relative spread within it (and its
+    // organic layout) is unchanged, only the overall size matches.
+    for (const [distance, list] of graphNodesByDistance(nodes)) {
+      let sum = 0;
+      for (const node of list) sum += Math.hypot(pos.get(node.id).x, pos.get(node.id).y);
+      const avgRadius = sum / list.length || 1;
+      const scale = (distance * GRAPH_RING_GAP) / avgRadius;
+      for (const node of list) {
+        const p = pos.get(node.id);
+        p.x *= scale;
+        p.y *= scale;
+      }
+    }
+    return pos;
+  }
+
+  function layoutFor(nodes, edges) {
+    return graphLayoutMode === 'force' ? layoutForce(nodes, edges) : layoutRadial(nodes);
+  }
+
+  // Animate from whatever's currently on screen (graphVisual) toward a new
+  // node/edge set + layout: nodes present in both fade nowhere and just ease
+  // to their new position; nodes only in the new set fade in in place; nodes
+  // only in the old set fade out in place, then get dropped once opacity
+  // reaches 0. Reused for a full rebuild (recentre/level change) and for a
+  // pure layout-mode switch (same nodes, new positions).
+  function transitionGraphTo(newState, newPos) {
+    const newIds = new Set(newState.nodes.map((n) => n.id));
+    const nodesById = new Map(newState.nodes.map((n) => [n.id, n]));
+    const from = new Map();
+    const to = new Map();
+
+    for (const node of newState.nodes) {
+      const target = newPos.get(node.id) || { x: 0, y: 0 };
+      const old = graphVisual.get(node.id);
+      from.set(node.id, old ? { x: old.x, y: old.y, opacity: old.opacity } : { x: target.x, y: target.y, opacity: 0 });
+      to.set(node.id, { x: target.x, y: target.y, opacity: 1 });
+    }
+    // Exiting nodes: keep drawing them at their last position while fading out.
+    for (const [id, vis] of graphVisual) {
+      if (newIds.has(id)) continue;
+      const oldNode = graphAnimNodesById.get(id);
+      if (!oldNode) continue;
+      nodesById.set(id, oldNode);
+      from.set(id, { x: vis.x, y: vis.y, opacity: vis.opacity });
+      to.set(id, { x: vis.x, y: vis.y, opacity: 0 });
+    }
+
+    graphAnimNodesById = nodesById;
+    graphAnimEdges = newState.edges;
+    graphAnimFrom = from;
+    graphAnimTo = to;
+    graphState = newState;
+    graphAnimStartTime = performance.now();
+    cancelAnimationFrame(graphAnimHandle);
+    graphAnimHandle = requestAnimationFrame(graphAnimStep);
+  }
+
+  function graphAnimStep(now) {
+    const t = Math.min(1, (now - graphAnimStartTime) / GRAPH_TRANSITION_MS);
+    const e = easeOutCubic(t);
+    const visual = new Map();
+    for (const [id, toV] of graphAnimTo) {
+      const fromV = graphAnimFrom.get(id) || toV;
+      visual.set(id, {
+        x: fromV.x + (toV.x - fromV.x) * e,
+        y: fromV.y + (toV.y - fromV.y) * e,
+        opacity: fromV.opacity + (toV.opacity - fromV.opacity) * e,
+      });
+    }
+    graphVisual = visual;
+    drawGraph();
+    if (t < 1) {
+      graphAnimHandle = requestAnimationFrame(graphAnimStep);
+      return;
+    }
+    graphAnimHandle = null;
+    // Drop fully faded-out exiting nodes now that the animation has settled.
+    const liveIds = new Set(graphState.nodes.map((n) => n.id));
+    for (const id of [...graphVisual.keys()]) {
+      if (!liveIds.has(id)) {
+        graphVisual.delete(id);
+        graphAnimNodesById.delete(id);
+      }
+    }
+  }
+
+  async function rebuildGraph(centerId) {
+    if (graphOverlay.classList.contains('hidden')) return;
+    const { nodes, edges } = await computeGraphData(centerId, graphLevel, graphShowDone, graphScoreMode);
+    if (nodes.length === 0) {
+      // Only happens if centerId itself no longer exists — the level slider
+      // already shows "notes shown" for the normal case, so this is the one
+      // case still worth a word.
+      toast('Nothing to show.');
+      graphState = null;
+      return;
+    }
+    const camera = graphState ? graphState.camera : { x: 0, y: 0, scale: 1 };
+    const newState = { centerId, nodes, edges, camera };
+    resizeGraphCanvas(); // sizes the canvas before the first animated frame draws
+    transitionGraphTo(newState, layoutFor(nodes, edges));
+  }
+
+  function graphCssVar(name, fallback) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+
+  function resizeGraphCanvas() {
+    const rect = graphCanvasWrap.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    graphCanvas.width = Math.max(1, Math.round(rect.width * dpr));
+    graphCanvas.height = Math.max(1, Math.round(rect.height * dpr));
+    graphCanvas._w = rect.width;
+    graphCanvas._h = rect.height;
+    graphCanvas.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawGraph();
+  }
+
+  function drawGraph() {
+    if (!graphState || !graphCanvas._w) return;
+    const ctx = graphCanvas.getContext('2d');
+    const w = graphCanvas._w;
+    const h = graphCanvas._h;
+    const cam = graphState.camera;
+    const border = graphCssVar('--border', '#ccc');
+    const accent = graphCssVar('--accent', '#4f6df5');
+    const text = graphCssVar('--text', '#222');
+    const surface = graphCssVar('--surface', '#fff');
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.save();
+    ctx.translate(w / 2 + cam.x, h / 2 + cam.y);
+    ctx.scale(cam.scale, cam.scale);
+
+    const posOf = (id) => graphVisual.get(id) || { x: 0, y: 0, opacity: 1 };
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1.2 / cam.scale;
+    for (const [a, b] of graphAnimEdges) {
+      const pa = posOf(a);
+      const pb = posOf(b);
+      ctx.globalAlpha = Math.min(pa.opacity, pb.opacity);
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+    }
+
+    for (const [id, vis] of graphVisual) {
+      const node = graphAnimNodesById.get(id);
+      if (!node || vis.opacity <= 0) continue;
+      const isCenter = id === graphState.centerId;
+      const radius = isCenter ? 15 : 7 + node.heat * 7;
+      ctx.globalAlpha = vis.opacity * (node.note.status === 'done' ? 0.45 : 1);
+      ctx.beginPath();
+      ctx.arc(vis.x, vis.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = isCenter ? accent : lerpHex('4f6df5', 'c9821a', node.heat);
+      ctx.fill();
+      if (isCenter) {
+        ctx.lineWidth = 2.5 / cam.scale;
+        ctx.strokeStyle = surface;
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Labels: drawn in screen space (outside the zoom transform) so text
+    // stays a constant, legible size regardless of zoom level. Anchored
+    // outward along each node's own direction from the centred note (which
+    // sits at the origin in both layouts) rather than uniformly to the
+    // right — a ring's nodes span every angle, so "always right" stacked
+    // unrelated nodes into the same rows; radiating out from centre spreads
+    // them around the circle instead.
+    ctx.textBaseline = 'middle';
+    for (const [id, vis] of graphVisual) {
+      const node = graphAnimNodesById.get(id);
+      if (!node || vis.opacity <= 0) continue;
+      const sx = w / 2 + cam.x + vis.x * cam.scale;
+      const sy = h / 2 + cam.y + vis.y * cam.scale;
+      if (sx < -60 || sx > w + 60 || sy < -20 || sy > h + 20) continue; // off-screen
+      const isCenter = id === graphState.centerId;
+      let title = (node.note && node.note.title) || 'Untitled';
+      if (title.length > 22) title = title.slice(0, 21) + '…';
+      ctx.font = isCenter ? 'bold 12px sans-serif' : '12px sans-serif';
+
+      const worldRadius = isCenter ? 15 : 7 + node.heat * 7;
+      const len = Math.hypot(vis.x, vis.y) || 1;
+      const dirX = isCenter ? 1 : vis.x / len;
+      const dirY = isCenter ? 0 : vis.y / len;
+      const clear = worldRadius * cam.scale + 6;
+      const anchorX = sx + dirX * clear;
+      const anchorY = sy + dirY * clear;
+
+      ctx.textAlign = dirX >= 0 ? 'left' : 'right';
+      const tw = ctx.measureText(title).width;
+      const boxX = dirX >= 0 ? anchorX - 2 : anchorX - tw - 2;
+      const dim = node.note.status === 'done' ? 0.55 : 1;
+      ctx.globalAlpha = vis.opacity * dim * 0.82;
+      ctx.fillStyle = surface;
+      ctx.fillRect(boxX, anchorY - 8, tw + 4, 16);
+      ctx.globalAlpha = vis.opacity * dim;
+      ctx.fillStyle = isCenter ? accent : text;
+      ctx.fillText(title, anchorX, anchorY);
+    }
+    ctx.textAlign = 'left';
+    ctx.globalAlpha = 1;
+  }
+
+  function graphScreenToWorld(clientX, clientY) {
+    const rect = graphCanvas.getBoundingClientRect();
+    const cam = graphState.camera;
+    return {
+      x: (clientX - rect.left - graphCanvas._w / 2 - cam.x) / cam.scale,
+      y: (clientY - rect.top - graphCanvas._h / 2 - cam.y) / cam.scale,
+    };
+  }
+
+  function graphHitTest(clientX, clientY) {
+    if (!graphState) return null;
+    const world = graphScreenToWorld(clientX, clientY);
+    let best = null;
+    let bestDist = 24 / graphState.camera.scale;
+    // Only the current logical node set is tappable — an exiting node still
+    // fading out in graphVisual shouldn't intercept a tap.
+    for (const node of graphState.nodes) {
+      const p = graphVisual.get(node.id);
+      if (!p) continue;
+      const d = Math.hypot(p.x - world.x, p.y - world.y);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = node;
+      }
+    }
+    return best;
+  }
+
+  // Tapping the already-centred node opens it for editing (same "open a note"
+  // path as everywhere else, so it does log a nav event); tapping any other
+  // visible node just recentres the map on it.
+  async function handleGraphTap(clientX, clientY) {
+    const hit = graphHitTest(clientX, clientY);
+    if (!hit) return;
+    if (hit.id === graphState.centerId) {
+      const id = hit.id;
+      closeGraph();
+      await goTo(id, 'graph');
+      await openNoteFullscreen('preview');
+    } else {
+      await rebuildGraph(hit.id);
+    }
+  }
+
+  function graphPointerDown(e) {
+    if (!graphState) return;
+    try {
+      graphCanvas.setPointerCapture(e.pointerId);
+    } catch {}
+    graphPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (graphPointers.size === 1) {
+      graphPanStart = { x: e.clientX, y: e.clientY, camX: graphState.camera.x, camY: graphState.camera.y };
+      graphTapCandidate = { x: e.clientX, y: e.clientY };
+    } else if (graphPointers.size === 2) {
+      graphTapCandidate = null;
+      const pts = [...graphPointers.values()];
+      graphPinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      graphPinchStartScale = graphState.camera.scale;
+      graphPinchMid = {
+        x: (pts[0].x + pts[1].x) / 2,
+        y: (pts[0].y + pts[1].y) / 2,
+        camX: graphState.camera.x,
+        camY: graphState.camera.y,
+      };
+    }
+  }
+
+  function graphPointerMove(e) {
+    if (!graphState || !graphPointers.has(e.pointerId)) return;
+    graphPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (graphPointers.size === 2 && graphPinchMid) {
+      const pts = [...graphPointers.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+      graphState.camera.scale = Math.min(4, Math.max(0.2, graphPinchStartScale * (dist / graphPinchStartDist)));
+      graphState.camera.x = graphPinchMid.camX + (mid.x - graphPinchMid.x);
+      graphState.camera.y = graphPinchMid.camY + (mid.y - graphPinchMid.y);
+      drawGraph();
+      return;
+    }
+
+    if (graphPointers.size === 1 && graphPanStart) {
+      if (graphTapCandidate && Math.hypot(e.clientX - graphTapCandidate.x, e.clientY - graphTapCandidate.y) > GRAPH_TAP_SLOP) {
+        graphTapCandidate = null;
+      }
+      graphState.camera.x = graphPanStart.camX + (e.clientX - graphPanStart.x);
+      graphState.camera.y = graphPanStart.camY + (e.clientY - graphPanStart.y);
+      drawGraph();
+    }
+  }
+
+  function graphPointerUp(e) {
+    const wasTap = graphPointers.size === 1 && graphTapCandidate;
+    const tap = graphTapCandidate;
+    graphPointers.delete(e.pointerId);
+    try {
+      graphCanvas.releasePointerCapture(e.pointerId);
+    } catch {}
+    if (graphPointers.size < 2) {
+      graphPinchStartDist = null;
+      graphPinchMid = null;
+    }
+    if (graphPointers.size === 0) graphPanStart = null;
+    graphTapCandidate = null;
+    if (wasTap) handleGraphTap(tap.x, tap.y);
+  }
+
+  function graphWheel(e) {
+    if (!graphState) return;
+    e.preventDefault();
+    const rect = graphCanvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const cam = graphState.camera;
+    const newScale = Math.min(4, Math.max(0.2, cam.scale * (e.deltaY < 0 ? 1.1 : 0.9)));
+    // Zoom around the cursor rather than the canvas centre.
+    const wx = (cx - graphCanvas._w / 2 - cam.x) / cam.scale;
+    const wy = (cy - graphCanvas._h / 2 - cam.y) / cam.scale;
+    cam.scale = newScale;
+    cam.x = cx - graphCanvas._w / 2 - wx * newScale;
+    cam.y = cy - graphCanvas._h / 2 - wy * newScale;
+    drawGraph();
+  }
+
+  // Keeps the slider's bounds (and the clamped current level) in sync with
+  // graphMaxLevel() — needed on open and again whenever the Done toggle
+  // changes what's eligible to be counted.
+  function syncGraphLevelBounds() {
+    const min = Math.min(6, graphMaxLevel());
+    const max = graphMaxLevel();
+    graphLevelInput.min = String(min);
+    graphLevelInput.max = String(max);
+    graphLevel = Math.min(max, Math.max(min, graphLevel));
+    graphLevelInput.value = String(graphLevel);
+    graphLevelLabel.textContent = String(graphLevel);
+  }
+
+  async function openGraph() {
+    const startId = currentId != null ? currentId : allNotesCache[0] && allNotesCache[0].id;
+    if (startId == null) {
+      toast('No notes to map yet.');
+      return;
+    }
+    graphOverlay.classList.remove('hidden');
+    syncGraphLevelBounds();
+    graphLayoutToggleBtn.textContent = graphLayoutMode === 'force' ? '🌀 Force' : '🎯 Radial';
+    graphLayoutToggleBtn.title = graphLayoutMode === 'force' ? 'Switch to radial layout' : 'Switch to force layout';
+    graphScoreToggleBtn.textContent = graphScoreMode === 'link' ? '📏 Link' : '🔥 Heat';
+    graphScoreToggleBtn.title =
+      graphScoreMode === 'link' ? 'Switch to usage-based ranking' : 'Switch to link-distance-only ranking';
+    graphDoneToggleBtn.classList.toggle('active', graphShowDone);
+    await rebuildGraph(startId);
+  }
+
+  function closeGraph() {
+    graphOverlay.classList.add('hidden');
+    cancelAnimationFrame(graphAnimHandle);
+    graphAnimHandle = null;
+    graphState = null;
+    graphVisual = new Map();
+    graphAnimNodesById = new Map();
+    graphAnimEdges = [];
+    graphPointers.clear();
+    graphPanStart = null;
+    graphPinchStartDist = null;
+    graphPinchMid = null;
+  }
+
+  graphBtn.addEventListener('click', openGraph);
+  graphOverlayClose.addEventListener('click', closeGraph);
+  graphOverlay.addEventListener('click', (e) => {
+    if (e.target === graphOverlay) closeGraph();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !graphOverlay.classList.contains('hidden')) closeGraph();
+  });
+  window.addEventListener('resize', () => {
+    if (!graphOverlay.classList.contains('hidden')) resizeGraphCanvas();
+  });
+
+  graphCanvas.addEventListener('pointerdown', graphPointerDown);
+  graphCanvas.addEventListener('pointermove', graphPointerMove);
+  graphCanvas.addEventListener('pointerup', graphPointerUp);
+  graphCanvas.addEventListener('pointercancel', graphPointerUp);
+  graphCanvas.addEventListener('wheel', graphWheel, { passive: false });
+
+  graphLevelInput.addEventListener('input', () => {
+    graphLevel = Number(graphLevelInput.value);
+    graphLevelLabel.textContent = String(graphLevel);
+    localStorage.setItem('nico-graph-level', String(graphLevel));
+    clearTimeout(graphLevelDebounce);
+    graphLevelDebounce = setTimeout(() => {
+      if (graphState) rebuildGraph(graphState.centerId);
+    }, 150);
+  });
+
+  function setGraphLayoutMode(mode) {
+    graphLayoutMode = mode;
+    localStorage.setItem('nico-graph-layout', mode);
+    graphLayoutToggleBtn.textContent = mode === 'force' ? '🌀 Force' : '🎯 Radial';
+    graphLayoutToggleBtn.title = mode === 'force' ? 'Switch to radial layout' : 'Switch to force layout';
+    // Same node/edge set, new positions — transitionGraphTo eases every node
+    // from where it's currently drawn to its new spot instead of snapping.
+    if (graphState) transitionGraphTo(graphState, layoutFor(graphState.nodes, graphState.edges));
+  }
+  graphLayoutToggleBtn.addEventListener('click', () =>
+    setGraphLayoutMode(graphLayoutMode === 'force' ? 'radial' : 'force')
+  );
+
+  // Unlike layout mode, this changes *which* notes get selected (not just
+  // where they're drawn), so it has to rebuild rather than just relayout.
+  function setGraphScoreMode(mode) {
+    graphScoreMode = mode;
+    localStorage.setItem('nico-graph-score-mode', mode);
+    graphScoreToggleBtn.textContent = mode === 'link' ? '📏 Link' : '🔥 Heat';
+    graphScoreToggleBtn.title = mode === 'link' ? 'Switch to usage-based ranking' : 'Switch to link-distance-only ranking';
+    if (graphState) rebuildGraph(graphState.centerId);
+  }
+  graphScoreToggleBtn.addEventListener('click', () =>
+    setGraphScoreMode(graphScoreMode === 'link' ? 'heat' : 'link')
+  );
+
+  graphDoneToggleBtn.addEventListener('click', () => {
+    graphShowDone = !graphShowDone;
+    localStorage.setItem('nico-graph-show-done', graphShowDone ? '1' : '0');
+    graphDoneToggleBtn.classList.toggle('active', graphShowDone);
+    syncGraphLevelBounds();
+    if (graphState) rebuildGraph(graphState.centerId);
   });
 
   insightsBtn.addEventListener('click', openInsights);
@@ -7804,6 +9418,7 @@
     showSettingsSection('account');
     loadDigestPrefs();
     renderSessions();
+    renderEncryptionPanel();
     accountOverlay.classList.remove('hidden');
   });
 
@@ -8035,10 +9650,40 @@
       importStatus.textContent = 'Choose a .zip or .md file first.';
       return;
     }
+
+    // server/importer.js writes note content straight into the DB
+    // server-side and has no way to encrypt on the way in — see
+    // decryptAllNotes/encryptAllNotes above. Temporarily revert to
+    // plaintext, import, then re-encrypt with the same (already-cached) key.
+    const wasEncrypted = Boolean(encPrefs && encPrefs.enabled);
+    if (wasEncrypted && !encKey) {
+      importStatus.textContent =
+        'This device needs to unlock encryption first — Settings → Privacy → Unlock this device.';
+      return;
+    }
+    if (wasEncrypted) {
+      const ok = await confirmDialog(
+        'Importing needs your notes temporarily decrypted on the server, then re-encrypts ' +
+          'everything automatically when it\'s done (including whatever was just imported). ' +
+          'If this is interrupted partway through, your account is left unencrypted until you ' +
+          'click "Encrypt my notes now" again in Settings → Privacy.',
+        { confirmLabel: 'Import' }
+      );
+      if (!ok) return;
+    }
+
     importBusy = true;
     importRunBtn.disabled = true;
-    importStatus.textContent = 'Uploading…';
+    let reverted = false;
     try {
+      if (wasEncrypted) {
+        importStatus.textContent = 'Decrypting your notes…';
+        await decryptAllNotes();
+        reverted = true;
+        renderEncryptionPanel();
+      }
+
+      importStatus.textContent = 'Uploading…';
       const fd = new FormData();
       fd.set('format', importFormat.value);
       fd.set('file', file);
@@ -8049,6 +9694,20 @@
     } catch (e) {
       importStatus.textContent = `Import failed: ${e.message}`;
     } finally {
+      if (reverted) {
+        const prevMsg = importStatus.textContent;
+        try {
+          importStatus.textContent = `${prevMsg} Re-encrypting…`;
+          await encryptAllNotes();
+          renderEncryptionPanel();
+          importStatus.textContent = `${prevMsg} Re-encrypted.`;
+        } catch {
+          importStatus.textContent =
+            `${prevMsg} ⚠️ Could not re-encrypt — your account is NOT encrypted right now. ` +
+            'Open Settings → Privacy and click "Encrypt my notes now".';
+          toast('Re-encryption failed — your notes are temporarily unencrypted.', { duration: 6000 });
+        }
+      }
       importBusy = false;
       importRunBtn.disabled = false;
     }
@@ -8133,6 +9792,192 @@
       }
     } finally {
       digestTestBtn.disabled = false;
+    }
+  });
+
+  // --- Privacy: encryption ceremony (docs/plan/08-offline-privacy.md §3.3/§3.4) ---
+
+  const ENC_ITERATIONS = 600000; // PBKDF2-SHA256; within server/encryption.js's sanity bounds
+
+  function renderEncryptionPanel() {
+    const enabled = Boolean(encPrefs && encPrefs.enabled);
+    const setupOnly = Boolean(encPrefs && encPrefs.salt && !enabled);
+    encPanelOff.classList.toggle('hidden', enabled || setupOnly);
+    encPanelSetup.classList.toggle('hidden', !setupOnly);
+    encPanelOn.classList.toggle('hidden', !enabled);
+    encUnlockBtn.classList.toggle('hidden', !encryptionLocked());
+    encSetupPanelStatus.textContent = '';
+  }
+
+  encSetupBtn.addEventListener('click', () => {
+    const key = window.NicoCrypto.generateRecoveryKey();
+    encRecoveryKeyEl.textContent = key;
+    encRecoveryKeyEl.dataset.key = key;
+    encConfirmSaved.checked = false;
+    encSetupContinueBtn.disabled = true;
+    encSetupStatus.textContent = '';
+    encSetupOverlay.classList.remove('hidden');
+  });
+
+  encConfirmSaved.addEventListener('change', () => {
+    encSetupContinueBtn.disabled = !encConfirmSaved.checked;
+  });
+
+  function closeEncSetup() {
+    encSetupOverlay.classList.add('hidden');
+    delete encRecoveryKeyEl.dataset.key;
+  }
+  encSetupCancelBtn.addEventListener('click', closeEncSetup);
+  encSetupOverlay.addEventListener('click', (e) => {
+    if (e.target === encSetupOverlay) closeEncSetup();
+  });
+
+  encSetupContinueBtn.addEventListener('click', async () => {
+    const key = encRecoveryKeyEl.dataset.key;
+    if (!key || !encConfirmSaved.checked) return;
+    encSetupContinueBtn.disabled = true;
+    encSetupStatus.textContent = 'Setting up…';
+    try {
+      const salt = window.NicoCrypto.randomSalt();
+      const derived = await window.NicoCrypto.deriveKey(key, salt, ENC_ITERATIONS);
+      const prefs = await api.setupEncryption(salt, ENC_ITERATIONS);
+      encPrefs = prefs;
+      await saveEncKeyToStore(derived);
+      closeEncSetup();
+      renderEncryptionPanel();
+      toast('Encryption set up on this device.');
+    } catch (err) {
+      encSetupStatus.textContent = err.message || 'Could not set up encryption.';
+      encSetupContinueBtn.disabled = false;
+    }
+  });
+
+  encCancelSetupBtn.addEventListener('click', async () => {
+    if (
+      !(await confirmDialog(
+        'Cancel encryption setup? Nothing has been encrypted yet — this just forgets the recovery key.',
+        { confirmLabel: 'Cancel setup' }
+      ))
+    ) {
+      return;
+    }
+    try {
+      await api.cancelEncryptionSetup();
+    } catch {
+      /* best effort */
+    }
+    encPrefs = await api.getEncryptionPrefs().catch(() => encPrefs);
+    encKey = null;
+    if (store && currentUser) store.setMeta(ENC_KEY_META(), null).catch(() => {});
+    renderEncryptionPanel();
+    toast('Encryption setup cancelled.');
+  });
+
+  // Fetches every note's plaintext, encrypts each with this device's key, and
+  // migrates the account — the one-time "Encrypt my notes now" action
+  // (§3.4), also reused verbatim after a temporary revert (see
+  // reencryptAllNotes's caller in the import wiring below). Throws on
+  // failure; updates encPrefs on success. Requires encKey.
+  async function encryptAllNotes() {
+    if (!encKey) throw new Error('this device is missing its key');
+    const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : []));
+    const items = await Promise.all(
+      rows.map(async (r) => ({
+        id: r.id,
+        content: await window.NicoCrypto.encryptText(encKey, r.content || ''),
+      }))
+    );
+    await api.migrateEncryption(items);
+    encPrefs = await api.getEncryptionPrefs();
+  }
+
+  // The inverse — fetches every note's ciphertext, decrypts each with this
+  // device's key, and reverts the account back to plaintext server-side
+  // (keeping the salt/iterations, so encryptAllNotes can re-run with the
+  // same key afterwards — see server/encryption.js's revert()). Used only
+  // around the Obsidian/Markdown importer, which writes content directly and
+  // has no way to encrypt on the way in.
+  async function decryptAllNotes() {
+    if (!encKey) throw new Error('this device is missing its key');
+    const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : []));
+    const items = await Promise.all(
+      rows.map(async (r) => ({ id: r.id, content: await decryptIncoming(r.content) }))
+    );
+    if (items.some((it) => it.content == null)) {
+      throw new Error('could not decrypt every note — aborting rather than risk data loss');
+    }
+    await api.revertEncryption(items);
+    encPrefs = await api.getEncryptionPrefs();
+  }
+
+  encEnableBtn.addEventListener('click', async () => {
+    if (!encKey) {
+      toast('This device is missing its key — reopen "Set up encryption".');
+      return;
+    }
+    const ok = await confirmDialog(
+      'Encrypt every existing note now? This re-encrypts all your note text so the server can no longer read it. There is no way to undo this without your recovery key.',
+      { confirmLabel: 'Encrypt my notes' }
+    );
+    if (!ok) return;
+    encEnableBtn.disabled = true;
+    encSetupPanelStatus.textContent = 'Encrypting your notes…';
+    try {
+      await encryptAllNotes();
+      renderEncryptionPanel();
+      toast('Your notes are now encrypted.');
+      sweepGeoEncryption(); // background; picks up any existing note/reminder/trail locations too
+    } catch (err) {
+      encSetupPanelStatus.textContent = err.message || 'Could not encrypt your notes.';
+    } finally {
+      encEnableBtn.disabled = false;
+    }
+  });
+
+  function closeEncUnlock() {
+    encUnlockOverlay.classList.add('hidden');
+    encUnlockInput.value = '';
+    encUnlockStatus.textContent = '';
+  }
+  encUnlockBtn.addEventListener('click', () => {
+    encUnlockStatus.textContent = '';
+    encUnlockInput.value = '';
+    encUnlockOverlay.classList.remove('hidden');
+    encUnlockInput.focus();
+  });
+  encUnlockCancelBtn.addEventListener('click', closeEncUnlock);
+  encUnlockOverlay.addEventListener('click', (e) => {
+    if (e.target === encUnlockOverlay) closeEncUnlock();
+  });
+
+  encUnlockSubmitBtn.addEventListener('click', async () => {
+    const typed = encUnlockInput.value.trim();
+    if (!typed || !encPrefs || !encPrefs.salt) return;
+    encUnlockSubmitBtn.disabled = true;
+    encUnlockStatus.textContent = 'Unlocking…';
+    try {
+      const derived = await window.NicoCrypto.deriveKey(typed, encPrefs.salt, encPrefs.iterations);
+      // Verify against a real note rather than trusting the derivation
+      // blindly — a wrong recovery key still produces *a* key, just one that
+      // can't decrypt anything real. Nothing to verify against yet (no notes)
+      // just accepts it.
+      const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : []));
+      if (rows.length) await window.NicoCrypto.decryptText(derived, rows[0].content);
+      await saveEncKeyToStore(derived);
+      closeEncUnlock();
+      renderEncryptionPanel();
+      toast('Unlocked. Refreshing your notes…');
+      allNotesCache = await api.listNotes();
+      warmCache();
+      sweepGeoEncryption(); // this device can now read (and so encrypt) whatever was pending
+      if (currentId != null) {
+        currentNote = await api.getNote(currentId);
+        await render();
+      }
+    } catch {
+      encUnlockStatus.textContent = 'That recovery key could not unlock your notes.';
+    } finally {
+      encUnlockSubmitBtn.disabled = false;
     }
   });
 

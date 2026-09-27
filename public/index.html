@@ -39,6 +39,7 @@
       <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🎨</button>
       <button id="theme-btn" class="icon-btn" title="Themes — colours, fonts, backgrounds" aria-label="Open theme settings">🖌️</button>
       <button id="map-btn" class="icon-btn" title="Map of notes" aria-label="Open map of notes">🗺️</button>
+      <button id="graph-btn" class="icon-btn" title="Graph view — explore the note graph visually" aria-label="Open graph view">🌐</button>
       <button id="agenda-btn" class="icon-btn" title="Agenda — what's due" aria-label="Open agenda">🔔<span id="agenda-badge" class="agenda-badge hidden"></span></button>
       <button id="insights-btn" class="icon-btn" title="Insights" aria-label="Open insights">📊</button>
       <button id="history-btn" class="icon-btn" title="History &amp; undo" aria-label="Open history">↩️</button>
@@ -139,11 +140,41 @@
       <div id="map-pick-banner" class="map-pick-banner hidden">Tap the map to set the reminder location</div>
       <div id="map-status" class="map-status"></div>
       <div class="map-modes" id="map-modes">
-        <button data-mode="off">Plain</button>
-        <button data-mode="note">Heat</button>
+        <button id="map-notes-btn" title="Toggle note pins on/off">📍 Notes</button>
         <button id="map-trail-btn" title="Toggle a trail of your periodically logged locations (from the Android widget app's location-trail setting)">🛰 Trail</button>
       </div>
       <div id="map"></div>
+      <div id="map-date-label" class="map-date-label"></div>
+      <div id="map-date-slider" class="map-date-slider" aria-label="Date range">
+        <div class="map-date-slider-track"></div>
+        <div class="map-date-slider-selection" id="map-date-selection"></div>
+        <div class="map-date-slider-thumb" id="map-date-from" role="slider" aria-label="From date" tabindex="0"></div>
+        <div class="map-date-slider-thumb" id="map-date-to" role="slider" aria-label="To date" tabindex="0"></div>
+      </div>
+      <div id="map-date-ticks" class="map-date-ticks"></div>
+    </div>
+  </div>
+
+  <!-- 2D visual map of the link graph — separate from the geo map above.
+       Orientation/overview only: recentring here never logs a nav_event
+       (see openGraph/rebuildGraph in app.js); only actually opening a note
+       (tapping the already-centred one) does, same as any other open. -->
+  <div id="graph-overlay" class="overlay hidden">
+    <div class="graph-fullscreen">
+      <button id="graph-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <div class="map-modes" id="graph-layout-modes">
+        <button id="graph-layout-toggle" title="Switch to force layout">🎯 Radial</button>
+        <button id="graph-score-toggle" title="Switch to link-distance-only ranking">🔥 Heat</button>
+        <button id="graph-done-toggle" title="Show/hide done notes">✅ Done</button>
+      </div>
+      <div class="graph-level-row">
+        <label for="graph-level">Notes shown</label>
+        <input type="range" id="graph-level" min="6" max="60" value="20" />
+        <span id="graph-level-label">20</span>
+      </div>
+      <div id="graph-canvas-wrap" class="graph-canvas-wrap">
+        <canvas id="graph-canvas"></canvas>
+      </div>
     </div>
   </div>
 
@@ -261,6 +292,39 @@
     </div>
   </div>
 
+  <div id="enc-setup-overlay" class="overlay hidden">
+    <div class="picker enc-modal">
+      <h2>Set up encryption</h2>
+      <p class="settings-desc">Save this recovery key somewhere safe — a password manager, printed, or written down. It unlocks your notes on any other device, and <strong>there is no way to get it back if it's lost.</strong></p>
+      <p id="enc-recovery-key" class="enc-key-display"></p>
+      <label class="settings-toggle">
+        <span class="settings-toggle-text">
+          <span class="settings-toggle-title">I've saved this key somewhere safe</span>
+        </span>
+        <input type="checkbox" id="enc-confirm-saved" />
+        <span class="settings-switch" aria-hidden="true"></span>
+      </label>
+      <div class="settings-btn-row">
+        <button id="enc-setup-cancel-btn" class="secondary">Cancel</button>
+        <button id="enc-setup-continue-btn" class="secondary" disabled>Continue</button>
+      </div>
+      <p class="settings-desc" id="enc-setup-status"></p>
+    </div>
+  </div>
+
+  <div id="enc-unlock-overlay" class="overlay hidden">
+    <div class="picker enc-modal">
+      <h2>Enter your recovery key</h2>
+      <p class="settings-desc">This account's note content is encrypted. Enter the recovery key you saved at setup to unlock it on this device.</p>
+      <input type="text" id="enc-unlock-input" class="enc-key-input" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" autocapitalize="characters" autocomplete="off" spellcheck="false" />
+      <div class="settings-btn-row">
+        <button id="enc-unlock-cancel-btn" class="secondary">Not now</button>
+        <button id="enc-unlock-submit-btn" class="secondary">Unlock</button>
+      </div>
+      <p class="settings-desc" id="enc-unlock-status"></p>
+    </div>
+  </div>
+
   <div id="account-overlay" class="overlay hidden">
     <div class="settings-modal" role="dialog" aria-modal="true" aria-label="Settings">
       <div class="settings-head">
@@ -273,6 +337,7 @@
           <button type="button" class="settings-nav-item active" data-section="account">Account</button>
           <button type="button" class="settings-nav-item" data-section="layout">Header rows</button>
           <button type="button" class="settings-nav-item" data-section="integrate">Integrate</button>
+          <button type="button" class="settings-nav-item" data-section="privacy">Privacy</button>
           <button type="button" class="settings-nav-item" data-section="portability">Import &amp; export</button>
         </nav>
 
@@ -394,6 +459,33 @@
             </div>
           </section>
 
+          <section class="settings-section" data-section="privacy">
+            <h3>Privacy</h3>
+            <p class="settings-desc">Encrypt your note text so the server only ever stores and syncs unreadable ciphertext. Titles and reminder times stay plain — that's what keeps push, the agenda and search-by-title working. <strong>There is no password reset:</strong> if the recovery key below is lost, that content is gone for good, by design.</p>
+
+            <div id="enc-panel-off">
+              <div class="settings-btn-row">
+                <button id="enc-setup-btn" class="secondary">Set up encryption…</button>
+              </div>
+            </div>
+
+            <div id="enc-panel-setup" class="hidden">
+              <p class="settings-desc">This device holds a recovery key, but your existing notes are still stored as plain text.</p>
+              <div class="settings-btn-row">
+                <button id="enc-enable-btn" class="secondary">Encrypt my notes now</button>
+                <button id="enc-cancel-setup-btn" class="secondary danger">Cancel setup</button>
+              </div>
+              <p class="settings-desc" id="enc-setup-panel-status"></p>
+            </div>
+
+            <div id="enc-panel-on" class="hidden">
+              <p class="settings-desc">🔒 This account's note content is encrypted.</p>
+              <div class="settings-btn-row">
+                <button id="enc-unlock-btn" class="secondary hidden">Unlock this device…</button>
+              </div>
+            </div>
+          </section>
+
           <section class="settings-section" data-section="portability">
             <h3>Import &amp; export</h3>
 
@@ -428,6 +520,7 @@
   <script src="vendor/leaflet.min.js"></script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
+  <script src="crypto.js"></script>
   <script src="store.js"></script>
   <script src="app.js"></script>
   <script>

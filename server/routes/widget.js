@@ -4,6 +4,7 @@ const { buildAgenda, dayIndexInZone, pickZone } = require('../agenda');
 const { computeNeighbors } = require('../neighbors');
 const themes = require('../../public/themes.js');
 const { cleanPrefs } = require('./theme');
+const location = require('../location');
 
 const router = express.Router();
 
@@ -11,7 +12,9 @@ const SNIPPET_LEN = 280;
 
 function userForToken(token) {
   if (typeof token !== 'string' || token.length < 16) return null;
-  return db.prepare('SELECT id FROM users WHERE widget_token = ?').get(token) || null;
+  return (
+    db.prepare('SELECT id, enc_enabled_at FROM users WHERE widget_token = ?').get(token) || null
+  );
 }
 
 // The account's *app* theme (not any per-note override — a widget has no
@@ -192,7 +195,13 @@ router.get('/', (req, res) => {
   const result = computeNeighbors(user.id, center.id) || { parent: null, neighbors: [] };
   const withUrl = (n) => ({ id: n.id, title: n.title, type: n.type, url: `${origin}/#${n.id}` });
 
-  const snippet = (center.content || '').replace(/\s+/g, ' ').trim().slice(0, SNIPPET_LEN);
+  // Once the account has opted into content encryption, `center.content` is
+  // ciphertext — this native RemoteViews widget has no crypto of its own (see
+  // docs/plan/08-offline-privacy.md's widget risk note), so drop the snippet
+  // to title-only rather than show garbled bytes.
+  const snippet = user.enc_enabled_at
+    ? ''
+    : (center.content || '').replace(/\s+/g, ' ').trim().slice(0, SNIPPET_LEN);
 
   res.json({
     generated_at: new Date().toISOString(),
@@ -231,17 +240,6 @@ router.post('/location', (req, res) => {
   const user = userForToken(req.query.token);
   if (!user) return res.status(401).json({ error: 'invalid or missing widget token' });
 
-  const lat = Number(req.body.lat);
-  const lon = Number(req.body.lon);
-  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
-    return res.status(400).json({ error: 'lat must be between -90 and 90' });
-  }
-  if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
-    return res.status(400).json({ error: 'lon must be between -180 and 180' });
-  }
-  let accuracy = req.body.accuracy != null ? Number(req.body.accuracy) : null;
-  if (!Number.isFinite(accuracy) || accuracy < 0) accuracy = null;
-
   const recordedAt = new Date(req.body.recordedAt);
   const recordedIso = Number.isFinite(recordedAt.getTime())
     ? recordedAt.toISOString()
@@ -254,9 +252,28 @@ router.post('/location', (req, res) => {
     return res.json({ ok: true, skipped: 'too soon since last sample' });
   }
 
-  db.prepare(
-    'INSERT INTO location_log (user_id, lat, lon, accuracy_m, recorded_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(user.id, lat, lon, accuracy, recordedIso);
+  // `geo`, when present, is already encrypted client-side — only the web
+  // app's own opportunistic sampling (public/app.js's maybeLogTrailPoint)
+  // can ever send it; the Android widget has no crypto of its own and
+  // always sends plain lat/lon (left "pending" for the catch-up sweep to
+  // encrypt later — see server/location.js's encryptGeo).
+  if (typeof req.body.geo === 'string' && req.body.geo) {
+    location.insert(db, user.id, { recordedAt: recordedIso, geo: req.body.geo });
+    return res.json({ ok: true });
+  }
+
+  const lat = Number(req.body.lat);
+  const lon = Number(req.body.lon);
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+    return res.status(400).json({ error: 'lat must be between -90 and 90' });
+  }
+  if (!Number.isFinite(lon) || lon < -180 || lon > 180) {
+    return res.status(400).json({ error: 'lon must be between -180 and 180' });
+  }
+  let accuracy = req.body.accuracy != null ? Number(req.body.accuracy) : null;
+  if (!Number.isFinite(accuracy) || accuracy < 0) accuracy = null;
+
+  location.insert(db, user.id, { lat, lon, accuracy, recordedAt: recordedIso });
 
   res.json({ ok: true });
 });
