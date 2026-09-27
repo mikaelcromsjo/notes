@@ -253,9 +253,16 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
             applyNudgeRotation(context, theme, views, widgetId, flags, baseUrl, nudges);
 
         } catch (Exception e) {
+            // No network (DNS/timeout/connection refused, as opposed to a real
+            // HTTP response like 401/500 above) — retry silently rather than
+            // overwriting the tile with a "retrying…" warning, same as the
+            // other two widgets. Once retries are exhausted, keep cycling
+            // whatever was last successfully fetched (loadCache) rather than
+            // replacing it with an error tile; when there's truly nothing
+            // cached yet (fresh install, first fetch ever failed), leave the
+            // tile exactly as it already is instead of pushing an error
+            // message onto it.
             if (attempt < MAX_NETWORK_RETRIES) {
-                showStatic(context, fallbackTheme, views, widgetId, "Couldn't reach server — retrying…", null, false);
-                appWidgetManager.updateAppWidget(widgetId, views);
                 try {
                     Thread.sleep(RETRY_DELAYS_MS[attempt]);
                 } catch (InterruptedException ignored) {
@@ -264,14 +271,11 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
                 fetchAndApply(context, appWidgetManager, widgetId, token, flags, attempt + 1);
                 return;
             }
-            // Retries exhausted — keep cycling whatever we last successfully
-            // fetched rather than replacing it with an error tile; only fall
-            // back to the error message if there's truly nothing cached yet.
             JSONArray cached = loadCache(context);
             if (cached != null && cached.length() > 0) {
                 applyNudgeRotation(context, fallbackTheme, views, widgetId, flags, baseUrl, cached);
             } else {
-                showStatic(context, fallbackTheme, views, widgetId, "Couldn't reach server", null, false);
+                return;
             }
         }
 

@@ -268,20 +268,23 @@ public class GridWidgetProvider extends AppWidgetProvider {
             }
 
         } catch (Exception e) {
+            // No network (DNS/timeout/connection refused, as opposed to a real
+            // HTTP response like 401/500 above) — retry silently rather than
+            // overwriting the grid with a "retrying…" cell, and once retries
+            // are exhausted, leave whatever's already on screen (the last
+            // successful fetch) alone instead of blanking it to an error: a
+            // widget with perfectly good last-known data shouldn't flash a
+            // warning over a connectivity blip the next poll will likely
+            // resolve on its own.
             if (attempt < MAX_NETWORK_RETRIES) {
-                fallbackTheme.applyToCell(views, R.id.cell_4, true);
-                views.setTextViewText(R.id.cell_4, "Couldn't reach server — retrying…");
-                appWidgetManager.updateAppWidget(widgetId, views);
                 try {
                     Thread.sleep(RETRY_DELAYS_MS[attempt]);
                 } catch (InterruptedException ignored) {
                     return;
                 }
                 fetchAndApply(context, appWidgetManager, widgetId, token, centerOverride, flags, attempt + 1);
-                return;
             }
-            fallbackTheme.applyToCell(views, R.id.cell_4, true);
-            views.setTextViewText(R.id.cell_4, "Couldn't reach server");
+            return;
         }
 
         appWidgetManager.updateAppWidget(widgetId, views);

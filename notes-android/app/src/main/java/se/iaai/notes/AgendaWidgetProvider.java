@@ -97,8 +97,18 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
         // One shared template for every row's tap — a collection view can't
         // give each row its own full PendingIntent, only a template plus
         // each row's own "fill in the blanks" Intent (AgendaRemoteViewsFactory).
+        // Deliberately NOT `flags` (FLAG_IMMUTABLE): an immutable PendingIntent
+        // can't be filled in at all, so the OS was silently dropping each
+        // row's data (the note URL) and launching a bare ACTION_VIEW with no
+        // data — which every app that declares ACTION_VIEW at all matches,
+        // hence the huge unrelated "select app" list instead of a note/browser
+        // actually opening. The template itself needs FLAG_MUTABLE; every
+        // other PendingIntent in this file bakes its full Intent (including
+        // data) in upfront and stays immutable.
+        int templateFlags = PendingIntent.FLAG_UPDATE_CURRENT
+                | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_MUTABLE : 0);
         views.setPendingIntentTemplate(R.id.agenda_list, PendingIntent.getActivity(
-                context, widgetId * 10 + 1, new Intent(Intent.ACTION_VIEW), flags));
+                context, widgetId * 10 + 1, new Intent(Intent.ACTION_VIEW), templateFlags));
     }
 
     private static void finish(Context context, AppWidgetManager appWidgetManager, RemoteViews views, int widgetId, int flags) {
@@ -210,19 +220,22 @@ public class AgendaWidgetProvider extends AppWidgetProvider {
             saveItems(context, allItems);
 
         } catch (Exception e) {
+            // No network (DNS/timeout/connection refused, as opposed to a real
+            // HTTP response like 401/500 above) — retry silently rather than
+            // overwriting the summary with a "retrying…" warning, and once
+            // retries are exhausted, leave whatever's already on screen (the
+            // last successful fetch's summary + list, from loadCachedItems)
+            // alone instead of blanking it to an error: a widget with
+            // perfectly good last-known data shouldn't flash a warning over a
+            // connectivity blip the next poll will likely resolve on its own.
             if (attempt < MAX_NETWORK_RETRIES) {
-                views.setTextViewText(R.id.widget_summary, "Couldn't reach server — retrying…");
-                finish(context, appWidgetManager, views, widgetId, pendingFlags);
                 try {
                     Thread.sleep(RETRY_DELAYS_MS[attempt]);
                 } catch (InterruptedException ignored) {
                     return;
                 }
                 fetchAndApply(context, appWidgetManager, widgetId, token, pendingFlags, attempt + 1);
-                return;
             }
-            views.setTextViewText(R.id.widget_summary, "Couldn't reach server");
-            finish(context, appWidgetManager, views, widgetId, pendingFlags);
             return;
         }
 

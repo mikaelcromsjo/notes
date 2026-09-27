@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- minHeight (the initial-placement size) stays 2 cells, but without an
+     explicit minResizeHeight the drag handles floor at minHeight too — this
+     tile's layout (widget_nudge*.xml) is match_parent all the way down, so it
+     shrinks to a single text line just fine; 40dp is the standard 1-cell
+     height (70*cells-30dp). -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="110dp"
     android:minHeight="110dp"
+    android:minResizeHeight="40dp"
     android:targetCellWidth="2"
     android:targetCellHeight="2"
     android:updatePeriodMillis="1800000"
