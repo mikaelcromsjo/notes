@@ -7566,7 +7566,7 @@
     if (hashId && hashId !== currentId) goTo(hashId, 'hash');
   });
 
-  // --- Zoom controls (scales the note grid, not the header/tab bar) ---
+  // --- Zoom controls (scales the note grid + editor text, not the header/tab bar) ---
   const ZOOM_MIN = 0.6;
   const ZOOM_MAX = 2;
   const ZOOM_STEP = 0.1;
@@ -7576,6 +7576,9 @@
   function applyZoom() {
     zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
     grid.style.zoom = zoom;
+    // The fullscreen editor isn't inside #grid, so it reads the same level as
+    // a font-size multiplier on its title/text (style.css, #note-overlay).
+    document.documentElement.style.setProperty('--note-zoom', String(zoom));
     zoomResetBtn.textContent = `${Math.round(zoom * 100)}%`;
     localStorage.setItem('nico-notes-zoom', String(zoom));
   }

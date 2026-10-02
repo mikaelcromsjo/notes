@@ -2629,6 +2629,11 @@ html.has-bg body { background: transparent; }
    Those containers must re-read colour and font themselves. */
 #grid, #note-overlay { color-scheme: var(--color-scheme, light); }
 #note-overlay .note-fullscreen { color: var(--text); font-family: var(--font-body); }
+/* Header zoom (−/100%/+) scales the editor's note text too — set as
+   --note-zoom on <html> by applyZoom(). ID selector outranks the phone and
+   :root:fullscreen type-scale overrides above. */
+#note-overlay .cell.center .center-title { font-size: calc(1.1rem * var(--note-zoom, 1)); }
+#note-overlay .cell.center .center-content { font-size: calc(0.9rem * var(--note-zoom, 1)); }
 
 /* Legibility halo for card text (see textShadow() in themes.js). Inherited by the
    text inside; controls keep their own plain look. */
