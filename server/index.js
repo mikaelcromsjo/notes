@@ -28,6 +28,7 @@ const historyRouter = require('./routes/history');
 const importRouter = require('./routes/import');
 const onboardingRouter = require('./routes/onboarding');
 const shareRouter = require('./routes/share');
+const sharesRouter = require('./routes/shares');
 const accountRouter = require('./routes/account');
 const alarmScheduler = require('./alarm-scheduler');
 const digestScheduler = require('./digest-scheduler');
@@ -132,6 +133,12 @@ app.use('/digest', digestPageRouter);
 // token (not the cookie), so the router sits above the 401 gate; its cookie-only
 // routes re-check req.userId themselves.
 app.use('/api/account', accountRouter);
+
+// Shared note spaces: most routes are session-authed (re-checked inside), but
+// the viewer feed is token-authed (?token=, like widgetRouter) and the invite
+// -accept link is a magic link (like authRouter) — both must sit above the
+// cookie gate, so the whole router does, same reasoning as accountRouter.
+app.use('/api/shares', sharesRouter);
 
 // Everything below the session endpoint needs a user.
 app.use('/api', (req, res, next) => {

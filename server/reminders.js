@@ -2,6 +2,7 @@
 // docs/plan/08-offline-privacy.md §3.1. No behavior change from the
 // pre-extraction handlers.
 const { HttpError } = require('./http-error');
+const { resolveNoteAccess } = require('./note-access');
 
 const now = () => new Date().toISOString();
 const validTs = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
@@ -114,10 +115,8 @@ function list(db, userId) {
 
 // Create a reminder for a note.
 function create(db, userId, body) {
-  const note = db
-    .prepare("SELECT id FROM notes WHERE id = ? AND user_id = ? AND status != 'deleted'")
-    .get(body && body.noteId, userId);
-  if (!note) throw new HttpError(404, 'note not found');
+  const { role, note } = resolveNoteAccess(db, userId, body && body.noteId);
+  if (!role) throw new HttpError(404, 'note not found');
 
   if (body && body.kind === 'location') {
     const loc = parseLocation(body);

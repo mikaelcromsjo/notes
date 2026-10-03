@@ -41,6 +41,12 @@ router.get('/tags', wrap((req) => notesCore.listTags(db, req.userId)));
 // for the same reason as "/search" above.
 router.get('/probable-root', wrap((req) => notesCore.probableRootNote(db, req.userId)));
 
+// The "graph root" anchoring server/shares.js's candidateLineage (explicit
+// users.root_note_id, or the same inferred probable-root as above). Must be
+// declared before "/:id" for the same reason as "/search" above.
+router.get('/root', wrap((req) => notesCore.getRootNote(db, req.userId)));
+router.put('/root', wrap((req) => notesCore.setRootNote(db, req.userId, req.body && req.body.noteId != null ? Number(req.body.noteId) : null)));
+
 // Background catch-up sweep for location encryption (docs/plan/
 // 08-offline-privacy.md's location note in db.js) — body: { items: [{id, geo}] }.
 // Not gated on account state the way /api/encryption/migrate is; the client

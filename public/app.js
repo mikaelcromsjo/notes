@@ -1,6 +1,7 @@
 (() => {
   const grid = document.getElementById('grid');
   const tabbar = document.getElementById('tabbar');
+  const spacesbar = document.getElementById('spacesbar');
   const pinbar = document.getElementById('pinbar');
   const latestbar = document.getElementById('latestbar');
   const todobar = document.getElementById('todobar');
@@ -74,6 +75,7 @@
   // Separate modal: only links the current note to an existing one (see
   // openLinkModal). #picker-overlay above only ever creates.
   const linkOverlay = document.getElementById('link-overlay');
+  const linkOverlayTitle = document.getElementById('link-overlay-title');
   const linkSearch = document.getElementById('link-search');
   const linkResults = document.getElementById('link-results');
   const linkCancelBtn = document.getElementById('link-cancel-btn');
@@ -163,6 +165,7 @@
   // shown only when its toggle is on AND it has something to display. ---
   const BAR_PREF_KEY = {
     tabs: 'nico-notes-bar-tabs',
+    spaces: 'nico-notes-bar-spaces',
     pins: 'nico-notes-bar-pins',
     latest: 'nico-notes-bar-latest',
     todos: 'nico-notes-bar-todos',
@@ -257,6 +260,56 @@
     });
   }
 
+  // In-app replacement for native prompt(). Resolves to the trimmed-not-here
+  // (caller's job) input string, or null on cancel/Escape/backdrop-click —
+  // same null-means-cancelled contract as window.prompt.
+  function promptDialog(message, { defaultValue = '', placeholder = '', confirmLabel = 'OK' } = {}) {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      const box = document.createElement('div');
+      box.className = 'picker';
+      const p = document.createElement('p');
+      p.className = 'confirm-message';
+      p.textContent = message;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = defaultValue;
+      if (placeholder) input.placeholder = placeholder;
+      const actions = document.createElement('div');
+      actions.className = 'picker-actions';
+      const ok = document.createElement('button');
+      ok.textContent = confirmLabel;
+      const cancel = document.createElement('button');
+      cancel.className = 'secondary';
+      cancel.textContent = 'Cancel';
+      actions.append(ok, cancel);
+      box.append(p, input, actions);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      const done = (val) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(null);
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          done(input.value);
+        }
+      };
+      ok.addEventListener('click', () => done(input.value));
+      cancel.addEventListener('click', () => done(null));
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) done(null);
+      });
+      document.addEventListener('keydown', onKey);
+      input.focus();
+      input.select();
+    });
+  }
+
   // --- Offline support. The service worker serves the shell; this layer mirrors
   // note/link data into IndexedDB on every successful read and serves it back
   // when a fetch fails (phase 1), and queues writes made offline in an `outbox`
@@ -311,8 +364,19 @@
   // content === undefined means "this write doesn't touch content at all"
   // (a title-only or status-only update) — pass it through unchanged so the
   // server's own "no fields = plain overwrite" behaviour still applies.
+  //
+  // Never encrypt a shared-space note (currentSpace truthy), even when this
+  // device's own account has encryption on: account encryption is a
+  // zero-knowledge, *account-wide* key (public/crypto.js's own doc comment:
+  // "the caller always knows... for the signed-in account") — a shared
+  // space can have members on entirely different accounts with different
+  // keys (or no key at all), and there is no shared key between them. Any
+  // ciphertext written into a shared note is only ever readable again by
+  // the one account that happened to write it — everyone else, including
+  // its own owner, just sees garbage forever. See decryptIncoming below for
+  // the read-side half of this.
   async function encryptOutgoing(content) {
-    if (content === undefined || !encryptionActive()) return content;
+    if (content === undefined || currentSpace || !encryptionActive()) return content;
     return window.NicoCrypto.encryptText(encKey, content);
   }
 
@@ -323,10 +387,18 @@
   // garbled bytes rendered, and no risk of autosaving them back over the
   // real text (buildNoteEditor/makeCenterCell key off `content == null`
   // either way — see contentUnavailableMessage below for which wording).
+  //
+  // isEncrypted() is checked *before* this account's own encPrefs, not
+  // after — content can be ciphertext this device has no hope of reading
+  // even when its own encryption is off entirely (a shared note some other,
+  // encrypted account wrote to before encryptOutgoing above knew to skip
+  // shared notes). The old order returned that raw ciphertext blob
+  // unchanged for a non-encrypting account, which is exactly what looked
+  // like a corrupted note.
   async function decryptIncoming(content) {
-    if (content == null || !encPrefs || !encPrefs.enabled) return content;
-    if (!encKey) return null;
+    if (content == null) return content;
     if (!window.NicoCrypto.isEncrypted(content)) return content;
+    if (!encPrefs || !encPrefs.enabled || !encKey) return null;
     try {
       return await window.NicoCrypto.decryptText(encKey, content);
     } catch {
@@ -340,6 +412,18 @@
     if (encryptionLocked()) {
       return short ? '🔒 Locked' : '🔒 Locked — enter your recovery key in Settings → Privacy to view this note.';
     }
+    // Shared spaces have no offline mirror at all (v1 is online-only — see
+    // currentSpace's doc comment), so content == null here can never mean
+    // "never cached offline": it means the note still holds ciphertext some
+    // other member's account encrypted with a key only that account has
+    // (see encryptOutgoing/decryptIncoming above) — real and online, just
+    // unreadable by this account. The offline wording below would be
+    // actively misleading here (the user IS online).
+    if (currentSpace) {
+      return short
+        ? '🔒 Unreadable'
+        : "🔒 This note was saved encrypted by another account and can't be read here — have that member reopen and resave it.";
+    }
     return short ? 'Not available offline' : 'Not available offline — open this note once online to load and edit it.';
   }
 
@@ -349,9 +433,12 @@
   // either already has the key (encrypts inline) or never will (the Android
   // widget, which leaves its own points "pending" for sweepGeoEncryption to
   // catch up later). `extra` is folded into the plaintext JSON before
-  // encrypting (radiusM for a reminder, accuracy for a trail point).
+  // encrypting (radiusM for a reminder, accuracy for a trail point). Same
+  // "never for a shared-space note" exemption as encryptOutgoing above —
+  // callers already treat a null return as "send plain lat/lon instead", so
+  // this alone is enough to keep a shared note's geo unencrypted too.
   async function encryptGeoOutgoing(lat, lon, extra) {
-    if (!encryptionActive() || lat == null || lon == null) return null;
+    if (currentSpace || !encryptionActive() || lat == null || lon == null) return null;
     return window.NicoCrypto.encryptText(encKey, JSON.stringify({ lat, lon, ...extra }));
   }
 
@@ -2072,6 +2159,15 @@
   let linkCount = 0;
   const LINK_LIST_THRESHOLD = 8;
   let allNotesCache = [];
+  // Shared note spaces (server/shares.js): null = browsing the personal
+  // graph (unchanged behaviour everywhere below). Set by switchSpace() —
+  // the *only* place that reassigns it. { id, title, role: 'owner'|'editor' }
+  // while browsing a shared space instead. v1 is online-only while a space
+  // is active: no IndexedDB mirroring/outbox for shared-space browsing (see
+  // switchSpace's doc comment) — avoids a store.js schema bump and avoids
+  // combining multi-writer LWW with offline replay, a materially harder
+  // problem than either alone.
+  let currentSpace = null;
   let saveTimer = null;
   let currentUser = null;
   let widgetToken = null;
@@ -2492,6 +2588,39 @@
     parentNeighbor = (data && data.parent) || null;
     allLinks = (data && data.links) || [];
     linkCount = (data && data.linkCount) || 0;
+
+    // Cross-scope references (server/shares.js's personal_refs) show up as
+    // pseudo-neighbor cards too, prepended so a rare-but-important reference
+    // never gets crowded out of the grid by ordinary neighbors — marked
+    // with isRef (makeNeighborCell gives them a 🔗 badge, no drag/rehome, no
+    // theme, and "remove" calls api.removeRef instead of api.unlink) since
+    // they're never a real links row, never counted in allLinks/linkCount.
+    if (!isTmp(id)) {
+      const refs = await api.getRefsForNote(id);
+      if (refs.length) {
+        const pseudo = refs.map((ref) => {
+          const targetIsShared = ref.personal_note_id === id;
+          return {
+            id: targetIsShared ? ref.shared_note_id : ref.personal_note_id,
+            // noAccess (server/shares.js's listRefsForNote): the space this
+            // ref points into was dissolved, or this member was removed
+            // from it — the ref itself is kept rather than silently
+            // dropped, but its real title is never leaked once this
+            // account can't actually open it any more.
+            title: ref.noAccess ? `No access to "${ref.shareTitle}"` : ref.title,
+            status: ref.status,
+            type: null,
+            isRef: true,
+            noAccess: Boolean(ref.noAccess),
+            refId: ref.id,
+            refShareId: ref.share_id,
+            refTargetIsShared: targetIsShared,
+          };
+        });
+        neighbors = pseudo.concat(neighbors);
+      }
+    }
+
     // Fold in not-yet-synced local neighbours (offline-created notes/attachments
     // linked to this one) that a server response can't know about yet.
     if (store && pendingCount > 0 && !isTmp(id)) {
@@ -2847,14 +2976,29 @@
     }
   }
 
+  // v1 shared spaces are online-only (see currentSpace's doc comment) — no
+  // outbox/offline-queue path makes sense there (nothing's mirrored to
+  // replay against). Every write helper that would otherwise fall through
+  // to an offline-queue branch calls this first so an offline attempt while
+  // browsing a space fails fast with a clear message instead of silently
+  // queuing something that can never be replayed correctly.
+  function assertSpaceOnline() {
+    if (currentSpace && !navigator.onLine) {
+      toast('This needs a connection while browsing a shared space.');
+      throw httpErr(0, 'offline');
+    }
+  }
+
   async function togglePin(id, pin) {
+    assertSpaceOnline();
     if (navigator.onLine && !isTmp(id)) {
       try {
         const note = await reqJson(`/api/notes/${id}/pin`, pin ? 'PUT' : 'DELETE');
-        await cache.putNote(note);
+        if (!currentSpace) await cache.putNote(note);
         return note;
       } catch (err) {
         if (err.httpStatus) throw err;
+        if (currentSpace) throw httpErr(0, 'offline');
       }
     }
     const prev = await localNoteFor(id);
@@ -2870,6 +3014,20 @@
     // Read: refresh the IndexedDB mirror when the network answers, fall back to
     // it when it doesn't.
     listNotes: async () => {
+      // A shared space's note list is never mirrored into IndexedDB (v1 is
+      // online-only there — see currentSpace's doc comment): mixing it into
+      // the same store used to rebuild the *personal* offline graph would
+      // let a shared note bleed into the personal cache.
+      if (currentSpace) {
+        try {
+          const rows = await fetch(`/api/shares/${currentSpace.id}/notes`).then((r) => r.json());
+          await Promise.all(rows.map(decryptNoteGeo));
+          return rows;
+        } catch {
+          toast('Could not load this space — check your connection.');
+          return [];
+        }
+      }
       try {
         const rows = await fetch('/api/notes').then((r) => r.json());
         await Promise.all(rows.map(decryptNoteGeo));
@@ -2881,10 +3039,19 @@
     },
     // Client-side content search over the mirror (docs/plan/
     // 08-offline-privacy.md §3.2) — always local now, online or off, so a
-    // search query never round-trips to the server. GET /api/notes/search
-    // still exists server-side as a fallback path (see server/notes.js) but
-    // nothing here calls it any more.
-    searchNotes: (q) => cache.localSearch(q),
+    // personal search query never round-trips to the server. GET
+    // /api/notes/search still exists server-side as a fallback path (see
+    // server/notes.js) but nothing here calls it any more for the personal
+    // case. A shared space is the opposite: it has no offline mirror at all
+    // (v1 is online-only for shares — same rule as getShareNotes/
+    // getShareLinks), so there's no local corpus to search there — this is
+    // a live call every debounced keystroke, same as those two.
+    searchNotes: (q) =>
+      currentSpace
+        ? fetch(`/api/shares/${currentSpace.id}/search?q=${encodeURIComponent(q)}`)
+            .then((r) => (r.ok ? r.json() : []))
+            .catch(() => [])
+        : cache.localSearch(q),
     // Every open ('todo') note anywhere below `id` in the inferred hierarchy —
     // powers the to-do bar's "under here" scoping.
     getSubtreeTodos: async (id) => {
@@ -2948,35 +3115,50 @@
         if (n) {
           n.content = await decryptIncoming(n.content);
           await decryptNoteGeo(n);
-          await cache.putNote(n);
+          // Never mirror a shared-space note into the personal IndexedDB
+          // cache (v1 shared spaces are online-only — see currentSpace's
+          // doc comment) — it would sit among personal notes in the same
+          // store and be reconstructed as part of the personal offline graph.
+          if (!currentSpace) await cache.putNote(n);
         }
-        return n || (await cache.cachedNote(id));
+        return n || (currentSpace ? null : await cache.cachedNote(id));
       } catch {
-        return cache.cachedNote(id);
+        return currentSpace ? null : cache.cachedNote(id);
       }
     },
     // Writes: online, hit the server and mirror the result; on a genuine HTTP
     // error, surface it; on a network drop (or when already offline), apply the
     // change locally and queue it (see the write-queue section above).
     createNote: async (data) => {
+      assertSpaceOnline();
       const loc = await getLocation();
       const geo = loc ? await encryptGeoOutgoing(loc.lat, loc.lon) : null;
-      const body = loc ? (geo ? { ...data, geo } : { ...data, lat: loc.lat, lon: loc.lon }) : data;
+      const spaced = currentSpace ? { ...data, shareId: currentSpace.id } : data;
+      const body = loc ? (geo ? { ...spaced, geo } : { ...spaced, lat: loc.lat, lon: loc.lon }) : spaced;
       if (navigator.onLine) {
         try {
           const wireBody = { ...body, content: await encryptOutgoing(body.content) };
           const note = await postJson('/api/notes', wireBody);
           note.content = await decryptIncoming(note.content);
           await decryptNoteGeo(note);
-          await cache.putNote(note);
+          if (!currentSpace) await cache.putNote(note);
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
+          // A mid-request network drop (not a clean offline start, which
+          // assertSpaceOnline already caught above) — queueCreateNote's
+          // tmp: id + outbox replay assumes the personal graph (it syncs
+          // against /api/notes, not this space's own notes endpoint), so a
+          // shared-space create can't be queued at all; surface the failure
+          // instead of silently misfiling it into the personal graph later.
+          if (currentSpace) throw httpErr(0, 'offline');
         }
       }
       return queueCreateNote(body);
     },
     createAttachment: async (parentId, formData) => {
+      assertSpaceOnline();
+      if (currentSpace) formData.set('shareId', String(currentSpace.id));
       const loc = await getLocation();
       if (loc) {
         const geo = await encryptGeoOutgoing(loc.lat, loc.lon);
@@ -3001,11 +3183,12 @@
           const note = await res.json();
           if (note && note.id != null) {
             await decryptNoteGeo(note);
-            await cache.putNote(note);
+            if (!currentSpace) await cache.putNote(note);
           }
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
+          if (currentSpace) throw httpErr(0, 'offline'); // see createNote's same comment
         }
       }
       if (inline) {
@@ -3052,7 +3235,17 @@
       return note;
     },
     updateNote: async (id, data) => {
-      const prev = await localNoteFor(id);
+      assertSpaceOnline();
+      // A shared note is never mirrored into the personal IndexedDB cache
+      // (see getNote's same reasoning), so localNoteFor(id) has nothing
+      // useful to say here — fall back to the in-memory currentNote, which
+      // is always the note this came from (the editor only ever opens on
+      // the centered note).
+      const prev = currentSpace
+        ? currentNote && currentNote.id === id
+          ? currentNote
+          : {}
+        : await localNoteFor(id);
       if (navigator.onLine && !isTmp(id)) {
         try {
           const note = await putJson(`/api/notes/${id}`, {
@@ -3064,22 +3257,25 @@
           note.content = await decryptIncoming(note.content);
           if (note && note.conflict) await handleConflict(note, data);
           if (note) delete note.conflict;
-          await cache.putNote(note);
+          if (!currentSpace) await cache.putNote(note);
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
+          if (currentSpace) throw httpErr(0, 'offline'); // see createNote's same comment
         }
       }
       return queueUpdateNote(id, data, prev);
     },
     setStatus: async (id, status) => {
+      assertSpaceOnline();
       if (navigator.onLine && !isTmp(id)) {
         try {
           const note = await putJson(`/api/notes/${id}/status`, { status });
-          await cache.putNote(note);
+          if (!currentSpace) await cache.putNote(note);
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
+          if (currentSpace) throw httpErr(0, 'offline');
         }
       }
       const prev = await localNoteFor(id);
@@ -3096,11 +3292,12 @@
     // lets it cascade to sub notes. Cosmetic — offline it's optimistic + outbox
     // like status, but never touches updated_at.
     setNoteTheme: async (id, theme, children) => {
+      assertSpaceOnline(); // shared notes don't support theme overrides at all — see server/notes.js's setTheme
       const clean = theme && Object.keys(theme).length ? theme : null;
       if (navigator.onLine && !isTmp(id)) {
         try {
           const note = await putJson(`/api/notes/${id}/theme`, { theme: clean, children: Boolean(children) });
-          await cache.putNote(note);
+          if (!currentSpace) await cache.putNote(note);
           patchListCache(id, { theme: note.theme, theme_children: note.theme_children });
           return note;
         } catch (err) {
@@ -3150,33 +3347,39 @@
       if (isTmp(id)) return cache.localNeighbors(id);
       try {
         const d = await fetch(`/api/notes/${id}/neighbors`).then((r) => r.json());
-        await cache.putNeighbors(id, d);
+        if (!currentSpace) await cache.putNeighbors(id, d);
         return d;
       } catch {
         // Offline: the last server-ranked arrangement if we have it (keeps the
-        // grid coherent), else a link-recency recompute.
+        // grid coherent), else a link-recency recompute. Not meaningful for a
+        // shared note (never mirrored — see getNote's same reasoning).
+        if (currentSpace) return { parent: null, neighbors: [], linkCount: 0, links: [] };
         const blob = await cache.getNeighborsBlob(id);
         return blob ? cache.filterNeighborBlob(blob) : cache.localNeighbors(id);
       }
     },
     link: async (a, b, rehomeFrom) => {
+      assertSpaceOnline();
       const rehoming = rehomeFrom != null && rehomeFrom !== b;
       if (navigator.onLine && !anyTmp(a, b, rehomeFrom)) {
         try {
           const r = await reqJson('/api/links', 'POST', rehoming ? { a, b, rehomeFrom } : { a, b });
-          await mirrorLink(a, b);
-          await cache.patchNeighborLink(a, b);
-          if (rehoming) {
-            await mirrorLink(rehomeFrom, b, { removed: true });
-            await cache.patchNeighborLink(rehomeFrom, b, { removed: true });
-            // A move is stronger evidence than link chronology — mirror the
-            // server's provenance stamp so the offline hierarchy fallback
-            // reflects it too (see server/routes/links.js's rehome handler).
-            await cache.putNote({ id: b, created_from_note_id: a }, { fromServer: false });
+          if (!currentSpace) {
+            await mirrorLink(a, b);
+            await cache.patchNeighborLink(a, b);
+            if (rehoming) {
+              await mirrorLink(rehomeFrom, b, { removed: true });
+              await cache.patchNeighborLink(rehomeFrom, b, { removed: true });
+              // A move is stronger evidence than link chronology — mirror the
+              // server's provenance stamp so the offline hierarchy fallback
+              // reflects it too (see server/routes/links.js's rehome handler).
+              await cache.putNote({ id: b, created_from_note_id: a }, { fromServer: false });
+            }
           }
           return r;
         } catch (err) {
           if (err.httpStatus) throw err;
+          if (currentSpace) throw httpErr(0, 'offline'); // see createNote's same comment
         }
       }
       const ts = new Date().toISOString();
@@ -3196,14 +3399,18 @@
       return { a, b };
     },
     unlink: async (a, b) => {
+      assertSpaceOnline();
       if (navigator.onLine && !anyTmp(a, b)) {
         try {
           const r = await reqJson('/api/links', 'DELETE', { a, b });
-          await mirrorLink(a, b, { removed: true });
-          await cache.patchNeighborLink(a, b, { removed: true });
+          if (!currentSpace) {
+            await mirrorLink(a, b, { removed: true });
+            await cache.patchNeighborLink(a, b, { removed: true });
+          }
           return r;
         } catch (err) {
           if (err.httpStatus) throw err;
+          if (currentSpace) throw httpErr(0, 'offline');
         }
       }
       await putLocalLink(a, b, null, true);
@@ -3544,6 +3751,69 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(sub),
       }).catch(() => {}),
+
+    // --- Shared note spaces (server/shares.js) — all online-only, no
+    // offline mirror; see currentSpace's doc comment. ---
+    getMyShares: () => fetch('/api/shares').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    getShareCandidates: (rootNoteId) =>
+      reqJson(`/api/shares/candidates?rootNoteId=${rootNoteId}`, 'GET'),
+    createShare: (title, noteIds) => postJson('/api/shares', { title, noteIds }),
+    addNoteToShare: (shareId, noteId) => postJson(`/api/shares/${shareId}/notes`, { noteId }),
+    inviteShareEditor: (shareId, email) => postJson(`/api/shares/${shareId}/invite`, { email }),
+    // Idempotent — returns the existing link if one's already live, mints
+    // one only if none exists. Use this for "copy the link" (a re-click
+    // must never invalidate copies already handed out); mintShareViewerLink
+    // is the explicit, always-rotates "regenerate" action.
+    getShareViewerLink: (shareId) => reqJson(`/api/shares/${shareId}/viewer-token`, 'GET'),
+    mintShareViewerLink: (shareId) => postJson(`/api/shares/${shareId}/viewer-token`, {}),
+    revokeShareViewerLink: (shareId) => reqJson(`/api/shares/${shareId}/viewer-token`, 'DELETE'),
+    getShare: (shareId) => reqJson(`/api/shares/${shareId}`, 'GET'),
+    // The landing note for entering a share — { note: {id,title}|null }, same
+    // "probable root" pick as a personal graph's own landing note. See
+    // switchSpace's doc comment on why this replaced "most recently updated".
+    getShareRoot: (shareId) => reqJson(`/api/shares/${shareId}/root`, 'GET'),
+    getShareNotes: (shareId) =>
+      fetch(`/api/shares/${shareId}/notes`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    // Only real caller is graph view's buildGraphAdjacency — a space's links
+    // never get an offline mirror, same as getShareNotes.
+    getShareLinks: (shareId) =>
+      fetch(`/api/shares/${shareId}/links`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    // Mirrors getHierarchyParents, scoped to a share — see
+    // refreshThemeContext's doc comment. Same online-only rule as
+    // getShareNotes/getShareLinks, so no store.meta fallback here.
+    getShareHierarchyParents: (shareId) =>
+      fetch(`/api/shares/${shareId}/hierarchy-parents`)
+        .then((r) => (r.ok ? r.json() : { parents: {} }))
+        .then((j) => j.parents || {})
+        .catch(() => ({})),
+    getRefsForNote: (noteId) =>
+      fetch(`/api/shares/refs/${noteId}`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    // Bulk sibling of getRefsForNote, scoped to the current graph-view
+    // scope rather than one note — see server/shares.js's listRefsForScope.
+    // Only real caller is graph view's computeGraphData.
+    getAllRefs: () =>
+      fetch(`/api/shares/refs${currentSpace ? `?shareId=${currentSpace.id}` : ''}`)
+        .then((r) => (r.ok ? r.json() : []))
+        .catch(() => []),
+    addRef: (shareId, personalNoteId, sharedNoteId) =>
+      postJson(`/api/shares/${shareId}/refs`, { personalNoteId, sharedNoteId }),
+    removeRef: (refId) => reqJson(`/api/shares/refs/${refId}`, 'DELETE'),
+    // Owner-only: dissolves the whole space, notes move back to personal.
+    dissolveShare: (shareId) => reqJson(`/api/shares/${shareId}`, 'DELETE'),
+    // Owner-only: removes one other member (editor) from the space.
+    removeShareMember: (shareId, memberUserId) =>
+      reqJson(`/api/shares/${shareId}/members/${memberUserId}`, 'DELETE'),
+
+    // Correct how a link is treated for hierarchy purposes (server/links.js's
+    // setRelation) — "mark `other`, as seen from `center`, as..." 'child' |
+    // 'cross' | 'auto'.
+    setLinkRelation: (center, other, relation) => putJson('/api/links/relation', { center, other, relation }),
+
+    // The graph root (server/notes.js's getRootNote/setRootNote) — explicit
+    // or inferred; { note: {id,title}|null, marked: bool }. noteId null
+    // clears an explicit mark, reverting to inferred.
+    getRootNote: () => reqJson('/api/notes/root', 'GET'),
+    setRootNote: (noteId) => putJson('/api/notes/root', { noteId }),
   };
 
   // Pull whatever the current colour mode needs (nothing for off/path).
@@ -3608,6 +3878,16 @@
         (await api.getNote(currentId)) ||
         allNotesCache.find((n) => n.id === currentId) ||
         null;
+      // This personal tab's note has moved into a shared space since the
+      // tab was opened (server/shares.js's createShare/addNoteToShare) —
+      // follow it in rather than silently showing it as if still personal
+      // (which is what used to happen: the fetch above succeeds either
+      // way, scope-transparently, but nothing here checked it). goTo
+      // itself now calls ensureScope, so just hand off to it.
+      if (currentNote && currentNote.share_id != null) {
+        await goTo(currentNote.id, 'tab');
+        return;
+      }
       if (!currentNote) {
         // Offline and this note was never cached — fall back to something we have.
         if (allNotesCache.length > 0) {
@@ -3662,19 +3942,49 @@
     await refreshFromTabs(tabs);
   }
 
-  // Recenter the active tab on a note (neighbor clicks, hash navigation, fallbacks).
+  // Makes currentSpace/allNotesCache consistent with `shareId` (null =
+  // personal) — WITHOUT navigating anywhere; the caller does that part.
+  // This is what makes landing on a shared note through *any* path (a tab
+  // opened before it was shared, a hash bookmark, a wikilink, a search
+  // result, a neighbor click, not just the explicit "Reference in a space"/
+  // "Shared spaces" entry points) transparently enter or leave its space —
+  // see goTo's and refreshFromTabs' calls into this below. A no-op if we're
+  // already in the right scope.
+  async function ensureScope(shareId, meta) {
+    const already = currentSpace ? currentSpace.id : null;
+    if (already === (shareId == null ? null : shareId)) return;
+    if (shareId == null) {
+      currentSpace = null;
+      allNotesCache = await api.listNotes();
+      return;
+    }
+    currentSpace = meta && meta.id === shareId ? meta : null;
+    if (!currentSpace) {
+      const shares = await api.getMyShares();
+      const match = shares.find((s) => s.id === shareId);
+      // We can already see the note (that's how we got here), so a member
+      // row should always exist — this fallback is just belt-and-suspenders
+      // against a race (e.g. just-removed) rather than an expected path.
+      currentSpace = match ? { id: shareId, title: match.title, role: match.role } : { id: shareId, title: 'Shared space', role: 'viewer' };
+    }
+    allNotesCache = await api.listNotes();
+  }
+
+  // Recenter the grid on a note (neighbor clicks, hash navigation, fallbacks).
   async function goTo(id, via = 'neighbor') {
     const note = await api.getNote(id);
     if (!note) return;
+    await ensureScope(note.share_id != null ? note.share_id : null);
     const from = currentId;
     currentId = note.id;
     currentNote = note;
+    // Tabs are unified across personal and shared notes — the same tab bar
+    // tracks either kind, a space-centered tab just carries a 🔗 badge (see
+    // renderTabbar) — so this always runs, not just for personal notes.
     setHash(currentId);
+    if (activeTabId) tabs = await api.moveTab(activeTabId, currentId);
     await loadNeighbors(currentId);
     await refreshColorData();
-    if (activeTabId) {
-      tabs = await api.moveTab(activeTabId, currentId);
-    }
     renderTabbar();
     renderPinbar();
     await render();
@@ -3693,6 +4003,173 @@
       return;
     }
     await goTo(id, via);
+  }
+
+  // Enter a shared note space and land on its "probable root" note — the
+  // explicit entry points (➕ → "Share this note…"/"Reference in a
+  // space…", the Spaces bar, the Account → Shared spaces panel, an invite-
+  // accept link). Tabs are unified (see goTo's doc comment), so this is
+  // just an ordinary jump: ensureScope makes allNotesCache reflect the
+  // space, then goTo (which repoints the active tab, same as any other
+  // navigation) lands on a note in it. `shareId == null` only refreshes
+  // scope/allNotesCache back to personal, with nothing else to do — no
+  // tabs were ever hidden while a space was active, so there's nothing to
+  // restore.
+  //
+  // Landing note = server/shares.js's shareRootNote (same "probable root"
+  // heuristic as a personal graph's own landing note, and the anonymous
+  // viewer's pickCenter) — NOT "most recently updated", which used to land
+  // on whatever note in the space someone last touched, however unrelated
+  // to the space itself (e.g. a space named "Work" opening on a throwaway
+  // note titled "Sol" just because it was the last one edited).
+  async function switchSpace(shareId, meta) {
+    await ensureScope(shareId, meta);
+    if (shareId == null) return;
+    if (!allNotesCache.length) {
+      toast('That space has no notes yet.');
+      return;
+    }
+    const rootInfo = await api.getShareRoot(shareId).catch(() => null);
+    const rootId = rootInfo && rootInfo.note && rootInfo.note.id;
+    const landingId = rootId && allNotesCache.some((n) => n.id === rootId) ? rootId : allNotesCache[0].id;
+    await goTo(landingId, 'tab');
+  }
+
+  // "Share this note…" (editor ➕ menu, only offered outside a space — see
+  // its wiring below). The candidate list is the note's own
+  // created_from_note_id lineage (server/shares.js's candidateLineage,
+  // deliberately never arbitrary link-reachability — see its own doc
+  // comment for why); this lists exactly what's about to move before
+  // asking for a name, so nothing moves without the user actually seeing
+  // the list first.
+  async function openShareFlow(anchor, note) {
+    let candidates;
+    try {
+      candidates = (await api.getShareCandidates(note.id)).notes;
+    } catch (e) {
+      toast(e.message || "Couldn't prepare this note for sharing.");
+      return;
+    }
+    const existing = (await api.getMyShares()).filter((s) => s.role === 'owner' || s.role === 'editor');
+
+    const items = [
+      {
+        label: '➕ New shared space…',
+        onClick: async () => {
+          const names = candidates.map((n) => `• ${n.title}`).join('\n');
+          const ok = await confirmDialog(`Share these ${candidates.length} note(s) into a new space?\n\n${names}`, {
+            confirmLabel: 'Share',
+          });
+          if (!ok) return;
+          const title = await promptDialog('Name this shared space:', {
+            defaultValue: note.title,
+            confirmLabel: 'Create',
+          });
+          if (!title || !title.trim()) return;
+          try {
+            const share = await api.createShare(title.trim(), candidates.map((n) => n.id));
+            toast(`Shared as "${share.title}".`);
+            closeNoteFullscreen();
+            await switchSpace(share.id, { id: share.id, title: share.title, role: 'owner' });
+          } catch (e) {
+            toast(e.message || "Couldn't create the shared space.");
+          }
+        },
+      },
+      ...existing.map((s) => ({
+        label: `📂 Add to "${s.title}"`,
+        onClick: async () => {
+          try {
+            await api.addNoteToShare(s.id, note.id);
+            toast(`Added to "${s.title}".`);
+            closeNoteFullscreen();
+            await switchSpace(s.id, { id: s.id, title: s.title, role: s.role });
+          } catch (e) {
+            toast(e.message || "Couldn't add this note to that space.");
+          }
+        },
+      })),
+    ];
+    openActionMenu(anchor, items);
+  }
+
+  // "Reference in a space…" (editor ➕ menu, available either side — see its
+  // wiring below). A personal_refs pointer is only ever created from a
+  // *personal* note's side (server/shares.js's addRef requires the personal
+  // side to be owned outright) — simplest v1: from inside a space, point
+  // back at whatever your personal note was before entering it.
+  async function openRefFlow(anchor, note) {
+    if (currentSpace) {
+      toast('Create the reference from your personal notes instead.');
+      return;
+    }
+    const shares = await api.getMyShares();
+    if (!shares.length) {
+      toast('You have no shared spaces yet.');
+      return;
+    }
+    openActionMenu(
+      anchor,
+      shares.map((s) => ({
+        label: `📂 ${s.title}`,
+        onClick: () => pickShareNoteForRef(s, note),
+      }))
+    );
+  }
+
+  async function pickShareNoteForRef(share, personalNote) {
+    const notes = await api.getShareNotes(share.id);
+    if (!notes.length) {
+      toast(`"${share.title}" has no notes yet.`);
+      return;
+    }
+    const typed = await promptDialog(
+      `Type the exact title of the note in "${share.title}" to reference:\n\n${notes
+        .map((n) => `• ${n.title}`)
+        .join('\n')}`,
+      { confirmLabel: 'Reference' }
+    );
+    if (!typed) return;
+    const match = notes.find((n) => (n.title || '').trim().toLowerCase() === typed.trim().toLowerCase());
+    if (!match) {
+      toast('No note with that exact title.');
+      return;
+    }
+    try {
+      await api.addRef(share.id, personalNote.id, match.id);
+      toast(`Referenced "${match.title}".`);
+      // The reference now shows as a 🔗-badged neighbor card (loadNeighbors
+      // merges personal_refs in) — refresh the grid if we're centered on
+      // the note it was just added to.
+      if (currentId === personalNote.id) {
+        await loadNeighbors(currentId);
+        await render();
+      }
+    } catch (e) {
+      toast(e.message || "Couldn't create that reference.");
+    }
+  }
+
+  // Mark (or clear) this user's explicit graph root (server/notes.js's
+  // getRootNote/setRootNote) — the stable anchor server/shares.js's
+  // candidateLineage uses, and the one thing that stops the grid's "back"
+  // slot guessing a parent for it (server/neighbors.js's
+  // skipStructuralFallback). noteId null clears the mark, reverting to the
+  // inferred root.
+  async function setGraphRoot(noteId) {
+    try {
+      const result = await api.setRootNote(noteId);
+      toast(
+        noteId != null
+          ? `"${result.note.title}" is now your home note.`
+          : 'Cleared — back to guessing your home note automatically.'
+      );
+      await loadNeighbors(currentId);
+      await render();
+      if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
+    } catch (e) {
+      toast(e.message || "Couldn't update your home note.");
+    }
   }
 
   // --- Sync panel: opened from the topbar pill when something is queued or
@@ -4040,7 +4517,11 @@
   let themePrefsDirty = false;
   let themeSyncing = false;
   let themeSaveTimer = null;
-  let themeParents = {}; // childId → parentId, only fetched while a note cascades
+  // childId → parentId, server/hierarchy.js's inferred hierarchy. Used by the
+  // theme cascade (styleFor) *and*, since it's the same "probable parent"
+  // signal, to resolve a neighbor card's relation icon when nothing was
+  // explicitly marked — see linkRelationOf below.
+  let hierarchyParents = {};
   let themeScreenKey = '';
   let themeScope = 'app';
   const themeParseMemo = new Map();
@@ -4132,9 +4613,18 @@
     allNotesCache.find((n) => n.id === id) || (currentNote && currentNote.id === id ? currentNote : null);
 
   async function refreshThemeContext() {
-    themeParents = allNotesCache.some((n) => n.theme && n.theme_children)
-      ? await api.getHierarchyParents()
-      : {};
+    // Needed on every render for relation icons (linkRelationOf below), not
+    // just while some note cascades a theme, so no more skipping it based on
+    // theme_children alone. A shared space uses its own scoped hierarchy
+    // (server/shares.js's hierarchyParents) rather than the personal one —
+    // theme cascading still makes no sense there (a space has no
+    // theme_children of its own to walk; styleFor's chain lookup just comes
+    // up empty), but the guessed-relation use needs the real map, not `{}`,
+    // or every neighbor card in a space fell back to an unearned
+    // auto-cross reading even where a parent/child was clearly inferrable.
+    hierarchyParents = currentSpace
+      ? await api.getShareHierarchyParents(currentSpace.id)
+      : await api.getHierarchyParents();
   }
 
   // Effective style for a note. skipOwn = what it *inherits*, before its own
@@ -4144,7 +4634,7 @@
     if (noteId == null) return style;
     const chain = [];
     const seen = new Set([noteId]);
-    for (let cur = themeParents[String(noteId)]; cur != null && !seen.has(cur); cur = themeParents[String(cur)]) {
+    for (let cur = hierarchyParents[String(noteId)]; cur != null && !seen.has(cur); cur = hierarchyParents[String(cur)]) {
       seen.add(cur);
       chain.push(cur);
     }
@@ -4160,7 +4650,7 @@
   // The nearest ancestor whose theme cascades down to this note, for the modal.
   function themeInheritSource(noteId) {
     const seen = new Set([noteId]);
-    for (let cur = themeParents[String(noteId)]; cur != null && !seen.has(cur); cur = themeParents[String(cur)]) {
+    for (let cur = hierarchyParents[String(noteId)]; cur != null && !seen.has(cur); cur = hierarchyParents[String(cur)]) {
       seen.add(cur);
       const n = themeNoteRow(cur);
       if (n && n.theme_children && parseNoteTheme(n.theme)) return n;
@@ -4568,8 +5058,9 @@
       }
       for (const t of themePrefs.custom) {
         gal.appendChild(
-          themeSwatch(t.name, t.style, themePrefs.active === t.id, () => choose(t.id), () => {
-            if (!confirm(`Delete the theme “${t.name}”?`)) return;
+          themeSwatch(t.name, t.style, themePrefs.active === t.id, () => choose(t.id), async () => {
+            if (!(await confirmDialog(`Delete the theme “${t.name}”?`, { confirmLabel: 'Delete', danger: true })))
+              return;
             themePrefs.custom = themePrefs.custom.filter((x) => x.id !== t.id);
             if (themePrefs.active === t.id) themePrefs.active = 'light';
             commitThemePrefs();
@@ -4839,8 +5330,13 @@
     const wantsBegin = params.get('ob') === 'begin';
     const wantsPreview = params.get('preview') === '1';
     const shared = consumePendingShare();
+    // /?space=<id> — the invite-accept redirect (GET /api/shares/invites/accept)
+    // and the "Reference in a space" jump both land here.
+    const spaceParam = params.get('space');
+    const wantsSpace = spaceParam != null && spaceParam !== 'invalid';
+    if (spaceParam === 'invalid') toast('That invite link is invalid or has expired.');
 
-    if (!handledD && !wantsCompose && !isFresh && !wantsBegin && !wantsPreview && !shared) return;
+    if (!handledD && !wantsCompose && !isFresh && !wantsBegin && !wantsPreview && !shared && !spaceParam) return;
 
     const url = new URL(location.href);
     if (handledD) url.searchParams.delete('d');
@@ -4848,12 +5344,14 @@
     if (isFresh) url.searchParams.delete('fresh');
     if (wantsBegin) url.searchParams.delete('ob');
     if (wantsPreview) url.searchParams.delete('preview');
+    if (spaceParam != null) url.searchParams.delete('space');
     history.replaceState(null, '', url.pathname + url.search + url.hash);
 
     if (d === 'agenda') openAgenda();
     else if (d === 'insights') openInsights();
 
-    if (shared) createSharedNote(shared);
+    if (wantsSpace) switchSpace(Number(spaceParam));
+    else if (shared) createSharedNote(shared);
     else if (wantsCompose) openPicker({ standalone: true });
     else if (isFresh || wantsPreview) openNoteFullscreen('preview');
     else if (wantsBegin) {
@@ -5123,10 +5621,160 @@
     return line;
   }
 
+  // How long a press-and-hold has to last, with no drag, to count as a
+  // long-press rather than a tap — shared by attachCardDrag's card long-
+  // press and attachLongPress's plain-element one below.
+  const LONG_PRESS_MS = 500;
+
+  // Minimal press-and-hold detector for elements that don't otherwise
+  // handle pointer events (the >8-links overflow list's rows — cards use
+  // attachCardDrag's own integrated version instead, since they already
+  // own the full pointer lifecycle for drag-to-rehome). Swallows the
+  // synthetic click a long-press would otherwise also fire, same trick
+  // attachCardDrag uses for a completed drag.
+  function attachLongPress(el, callback) {
+    let timer = null;
+    let fired = false;
+    let startX = 0;
+    let startY = 0;
+    const cancel = () => {
+      clearTimeout(timer);
+      timer = null;
+    };
+    el.addEventListener('pointerdown', (e) => {
+      if (!e.isPrimary || (e.button != null && e.button > 0)) return;
+      fired = false;
+      startX = e.clientX;
+      startY = e.clientY;
+      timer = setTimeout(() => {
+        fired = true;
+        callback(e.clientX, e.clientY);
+      }, LONG_PRESS_MS);
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) > DRAG_THRESHOLD) cancel();
+    });
+    el.addEventListener('pointerup', () => {
+      cancel();
+      if (fired) {
+        const swallow = (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+        };
+        document.addEventListener('click', swallow, true);
+        setTimeout(() => document.removeEventListener('click', swallow, true), 60);
+      }
+    });
+    el.addEventListener('pointercancel', cancel);
+    el.addEventListener('pointerleave', cancel);
+  }
+
+  // The relationship a link (as seen from the centered note) currently
+  // reads as, from the same signals server/hierarchy.js's buildRootedTree
+  // looks at: an explicit links.kind='cross' always wins; otherwise
+  // 'child' when the OTHER note's created_from_note_id points at CENTER
+  // (other is center's child), 'parent' when CENTER's created_from_note_id
+  // points at OTHER (the reverse — other is center's parent); these two
+  // are mutually exclusive by construction (a note has exactly one
+  // created_from_note_id, so at most one direction can ever be true for a
+  // given link) — never both, which is exactly what "only one can be
+  // child" means.
+  //
+  // Nothing recorded either way doesn't mean nothing to show: the server
+  // already guesses a direction for these (the same "probable parent" rules
+  // as GET /notes/:id/neighbors and buildHierarchy) — parentNeighbor *is*
+  // that guess for the parent direction (computeNeighbors returns it
+  // pre-picked, so no extra lookup), and hierarchyParents (the graph-wide
+  // version of the same guess, fetched by refreshThemeContext — the
+  // personal graph or, while viewing a shared space, that space's own
+  // scoped hierarchy) answers it for the child direction: other reads as
+  // center's guessed child when the wider hierarchy separately arrived at
+  // center as *other's* parent. 'auto-parent'/'auto-child' for those; when
+  // even the guess has no direction to offer (a genuine cross-link between
+  // two independently-rooted areas — the only remaining case, now that
+  // server/hierarchy.js's guessLinkKind and buildHierarchy both resolve
+  // every other link to some direction), 'auto-cross' — never an
+  // unlabelled, meaningless "unmarked" state (no ⚙ gear; the three real
+  // relations, explicit or guessed, are the only outcomes a user should
+  // ever see here). `other` needs `.id`, `.created_from_note_id` and
+  // `.link_kind` — present on both a neighbor row and an allLinks row
+  // (server/neighbors.js includes all three in each).
+  function linkRelationOf(other) {
+    if (other.link_kind === 'cross') return 'cross';
+    if (other.created_from_note_id === currentId) return 'child';
+    if (currentNote && currentNote.created_from_note_id === other.id) return 'parent';
+    if (parentNeighbor && parentNeighbor.id === other.id) return 'auto-parent';
+    if (hierarchyParents[String(other.id)] === currentId) return 'auto-child';
+    return 'auto-cross';
+  }
+  // ⤵ other hangs off center (center is the parent); ⤴ the reverse (other
+  // is center's parent) — deliberately not the previous 👶, which gave
+  // both directions the same icon and made an actual parent-child pair
+  // look symmetric ("both children of each other") instead of directional.
+  // The guessed variants reuse the same arrows (still directional, still
+  // useful) rather than a separate glyph — dimmed instead via the button's
+  // `is-guessed` class (see makeNeighborCell/buildLinksPanel) so a guess
+  // never reads as visually identical to something the user actually set.
+  const RELATION_ICON = {
+    child: '⤵',
+    parent: '⤴',
+    cross: '🔀',
+    'auto-child': '⤵',
+    'auto-parent': '⤴',
+    'auto-cross': '🔀',
+  };
+  const RELATION_LABEL = {
+    child: 'child',
+    parent: 'parent',
+    cross: 'cross-reference',
+    'auto-child': 'probable child',
+    'auto-parent': 'probable parent',
+    'auto-cross': 'probable cross-reference',
+  };
+
+  // The "choose relationship" menu (server/links.js's setRelation) — "mark
+  // `other`, as seen from `centerId`, as a child / a parent / a cross-
+  // reference", plus "Remove connection" (a plain unlink — no separate ✕
+  // button any more, this is the only place that action lives now).
+  // Reachable from a card or an overflow-list row either by clicking its
+  // single relation button, or by long-pressing the card/row itself (see
+  // attachCardDrag/attachLongPress) — the same two trigger styles, so
+  // touch users never have to hit a small target precisely.
+  function openRelationMenu(anchor, centerId, other) {
+    const current = linkRelationOf(other);
+    const apply = async (relation) => {
+      try {
+        await api.setLinkRelation(centerId, other.id, relation);
+        await loadNeighbors(currentId);
+        await render();
+        if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
+      } catch (e) {
+        toast(e.message || "Couldn't update that connection.");
+      }
+    };
+    openActionMenu(anchor, [
+      { label: '⤵ Mark as child', active: current === 'child', onClick: () => apply('child') },
+      { label: '⤴ Mark as parent', active: current === 'parent', onClick: () => apply('parent') },
+      { label: '🔀 Mark as cross-reference', active: current === 'cross', onClick: () => apply('cross') },
+      {
+        label: '✕ Remove connection',
+        onClick: async () => {
+          await api.unlink(centerId, other.id);
+          await loadNeighbors(currentId);
+          await refreshColorData();
+          await render();
+          if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
+        },
+      },
+    ]);
+  }
+
   // Scrollable list of every note linked to the current one, each row a
-  // click-to-open title plus an ✕ to sever that connection. Only shown in the
-  // fullscreen view, and only once the grid can no longer surface every link
-  // (see LINK_LIST_THRESHOLD).
+  // click-to-open title plus one relation button (its icon reflects the
+  // current child/cross/auto state — see linkRelationOf/RELATION_ICON) that
+  // opens the same menu as a card's (child / cross-reference / remove).
+  // Only shown in the fullscreen view, and only once the grid can no longer
+  // surface every link (see LINK_LIST_THRESHOLD).
   function buildLinksPanel() {
     const panel = document.createElement('div');
     panel.className = 'center-links';
@@ -5153,20 +5801,21 @@
         goTo(link.id, 'link-list');
       });
 
-      const x = document.createElement('button');
-      x.className = 'center-links-x';
-      x.textContent = '✕';
-      x.title = 'Remove connection';
-      x.addEventListener('click', async () => {
-        await api.unlink(currentId, link.id);
-        await loadNeighbors(currentId);
-        await refreshColorData();
-        await render();
-        renderNoteFullscreen();
+      const relBtn = document.createElement('button');
+      const relation = linkRelationOf(link);
+      relBtn.className = 'center-links-relation' + (relation.startsWith('auto-') ? ' is-guessed' : '');
+      relBtn.textContent = RELATION_ICON[relation];
+      relBtn.title = `Link relationship (${RELATION_LABEL[relation]}) — tap to change`;
+      relBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openRelationMenu(relBtn, currentId, link);
       });
+      // A long press anywhere on the row reaches the same menu, so touch
+      // users don't need to hit the small icon precisely.
+      attachLongPress(row, () => openRelationMenu(row, currentId, link));
 
       row.appendChild(name);
-      row.appendChild(x);
+      row.appendChild(relBtn);
       list.appendChild(row);
     });
 
@@ -5384,13 +6033,17 @@
     addBtn.className = 'add-link-btn';
     addBtn.textContent = '➕';
     addBtn.title = 'Create, attach, or connect';
-    addBtn.addEventListener('click', () =>
+    addBtn.addEventListener('click', () => {
       openActionMenu(addBtn, [
         { label: '📝 Create a note', onClick: () => openPicker() },
         { label: '📎 Add / remove attachment', onClick: () => openPicker({ mode: 'attach' }) },
         { label: '🔗 Connect to note', onClick: () => openLinkModal() },
-      ])
-    );
+        // "Share this note…" only outside a space — a shared note is already
+        // shared; moving notes between two different shares isn't supported.
+        ...(!currentSpace ? [{ label: '🔗 Share this note…', onClick: () => openShareFlow(addBtn, currentNote) }] : []),
+        { label: '📌 Reference in a space…', onClick: () => openRefFlow(addBtn, currentNote) },
+      ]);
+    });
 
     // GTD context tags: no stored field — a tag is just an `@word` in the
     // note's own text (see server/agenda.js-style content scanning), so
@@ -5675,7 +6328,13 @@
     await render();
   }
 
-  function attachCardDrag(cell, note) {
+  // `onLongPress`, when given, fires if the pointer is held on the cell for
+  // LONG_PRESS_MS with no drag started — a touch-friendly alternative to a
+  // small on-card button (see makeNeighborCell's relation button/menu). It's
+  // integrated into this same pointer lifecycle, rather than a second
+  // attachLongPress on top of it, so the two gestures (drag, long-press)
+  // never fight over the same pointerdown.
+  function attachCardDrag(cell, note, onLongPress) {
     cell.dataset.noteId = String(note.id);
 
     let pointerId = null;
@@ -5684,19 +6343,33 @@
     let dragging = false;
     let ghost = null;
     let hovered = null;
+    let longPressTimer = null;
+    let longPressFired = false;
 
     const clearHover = () => {
       if (hovered) hovered.classList.remove('drop-target');
       hovered = null;
     };
+    const clearLongPress = () => {
+      clearTimeout(longPressTimer);
+      longPressTimer = null;
+    };
 
     cell.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || (e.button != null && e.button > 0)) return;
-      if (e.target.closest('.unlink-btn')) return;
+      if (e.target.closest('.relation-btn')) return;
       pointerId = e.pointerId;
       startX = e.clientX;
       startY = e.clientY;
       dragging = false;
+      longPressFired = false;
+      if (onLongPress) {
+        longPressTimer = setTimeout(() => {
+          if (dragging) return;
+          longPressFired = true;
+          onLongPress();
+        }, LONG_PRESS_MS);
+      }
     });
 
     cell.addEventListener('pointermove', (e) => {
@@ -5706,6 +6379,7 @@
 
       if (!dragging) {
         if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+        clearLongPress();
         dragging = true;
         try { cell.setPointerCapture(pointerId); } catch {}
         cell.classList.add('dragging');
@@ -5724,7 +6398,9 @@
 
     const finish = (e, cancelled) => {
       if (pointerId == null || (e.pointerId != null && e.pointerId !== pointerId)) return;
+      clearLongPress();
       const wasDragging = dragging;
+      const wasLongPress = longPressFired;
       const target = hovered;
 
       try {
@@ -5736,14 +6412,14 @@
       if (ghost) { ghost.remove(); ghost = null; }
       clearHover();
 
-      if (!wasDragging) return;
+      if (!wasDragging && !wasLongPress) return;
 
-      // Swallow the click this drag would otherwise synthesize.
+      // Swallow the click this drag or long-press would otherwise synthesize.
       const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
       document.addEventListener('click', swallow, true);
       setTimeout(() => document.removeEventListener('click', swallow, true), 60);
 
-      if (cancelled || !target) return;
+      if (wasLongPress || cancelled || !target) return;
       rehomeCard(note.id, currentId, Number(target.dataset.noteId));
     };
 
@@ -5761,24 +6437,53 @@
       'cell neighbor' +
       (subNeighbors ? ' nested' : '') +
       (isBack ? ' back' : '') +
+      // Only the side that's actually shared gets the "leads to a shared
+      // space" treatment — a reference viewed from *inside* that space,
+      // pointing back at an ordinary personal note, shouldn't look shared
+      // itself just because it's a reference.
+      (neighbor.isRef && neighbor.refTargetIsShared ? ' ref-link' : '') +
+      (neighbor.isRef && neighbor.noAccess ? ' ref-noaccess' : '') +
       (neighbor.status === 'done' ? ' dimmed' : '') +
       (triggeredAlarmIds.has(neighbor.id) ? ' alarm-triggered' : '');
 
     applyCellColor(cell, neighbor);
-    applyCellTheme(cell, neighbor.id);
-    attachCardDrag(cell, neighbor);
+    if (!neighbor.isRef) {
+      // A reference is never a real link and never carries its own theme —
+      // applyCellTheme/attachCardDrag both assume a normal linked neighbor
+      // in this same graph, which a cross-scope reference isn't; nor is
+      // there a relationship to correct on one, so no long-press menu either.
+      applyCellTheme(cell, neighbor.id);
+      attachCardDrag(cell, neighbor, () => openRelationMenu(cell, currentId, neighbor));
+    }
 
-    const unlinkBtn = document.createElement('button');
-    unlinkBtn.className = 'unlink-btn';
-    unlinkBtn.textContent = '✕';
-    unlinkBtn.title = 'Remove connection';
-    unlinkBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await api.unlink(currentId, neighbor.id);
-      await loadNeighbors(currentId);
-      await render();
-    });
-    cell.appendChild(unlinkBtn);
+    // One button per card: a reference just removes itself (there's no
+    // relationship to correct on one), a real link opens the relationship
+    // menu (child / cross-reference / remove) — see openRelationMenu.
+    // Click for a precise pointer, long-press (wired into attachCardDrag
+    // above) as the touch-friendly alternative that doesn't need to land on
+    // this exactly.
+    const actionBtn = document.createElement('button');
+    actionBtn.className = 'relation-btn';
+    if (neighbor.isRef) {
+      actionBtn.textContent = '✕';
+      actionBtn.title = 'Remove reference';
+      actionBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await api.removeRef(neighbor.refId);
+        await loadNeighbors(currentId);
+        await render();
+      });
+    } else {
+      const relation = linkRelationOf(neighbor);
+      if (relation.startsWith('auto-')) actionBtn.classList.add('is-guessed');
+      actionBtn.textContent = RELATION_ICON[relation];
+      actionBtn.title = `Link relationship (${RELATION_LABEL[relation]}) — tap to change`;
+      actionBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openRelationMenu(actionBtn, currentId, neighbor);
+      });
+    }
+    cell.appendChild(actionBtn);
 
     if (subNeighbors) {
       const miniGrid = document.createElement('div');
@@ -5821,18 +6526,49 @@
     } else {
       const title = document.createElement('div');
       title.className = 'neighbor-title';
-      const icon = TYPE_ICON[neighbor.type];
+      // 🔗 marks a reference (server/shares.js's personal_refs) whose
+      // *target* is the shared note — that's the side worth flagging as
+      // "leads to a shared space". A reference viewed from inside that
+      // space, pointing back at an ordinary personal note, gets no badge:
+      // that note isn't shared, only the note it's referenced from is.
+      // 🚫 overrides that for a noAccess ref (the space it pointed into was
+      // dissolved, or this member was removed from it) — its title is
+      // already the "No access to..." placeholder, not a real note title.
+      const icon = neighbor.isRef
+        ? neighbor.noAccess
+          ? '🚫'
+          : neighbor.refTargetIsShared
+          ? '🔗'
+          : null
+        : TYPE_ICON[neighbor.type];
       const base = icon ? `${icon} ${neighbor.title}` : neighbor.title;
       title.textContent = (isBack ? '↩ ' : '') + base;
       cell.appendChild(title);
 
-      const preview = buildAttachmentPreview(neighbor, { compact: true });
-      if (preview) cell.appendChild(preview);
+      if (!neighbor.isRef) {
+        const preview = buildAttachmentPreview(neighbor, { compact: true });
+        if (preview) cell.appendChild(preview);
+      }
 
       cell.addEventListener('click', async (e) => {
         // Let the attachment's own link/player take the tap (view/download/
         // play) instead of navigating the grid to this note.
         if (e.target.closest('a, audio, input, label')) return;
+        if (neighbor.isRef) {
+          if (neighbor.noAccess) {
+            // Nothing to navigate to — goTo would just 404 silently against
+            // a note this account can no longer resolve at all. The ✕
+            // button (server/shares.js's removeRef) is still the way to
+            // clear this reference away, same as any other ref.
+            toast(neighbor.title); // already "No access to \"<space>\""
+            return;
+          }
+          // Cross-scope, possibly into or out of a space — goTo's own
+          // ensureScope call handles that transparently now (tabs are
+          // unified, so this is just an ordinary jump).
+          await goTo(neighbor.id, navVia);
+          return;
+        }
         // Top half: just center it, same as before (the center cell is
         // already a read-only preview — opening fullscreen too is
         // redundant). Bottom half: center it and go straight into editing.
@@ -5954,7 +6690,8 @@
 
     let subById = {};
     if (gridDepth >= 2) {
-      const forSub = Object.values(slotNote).map((s) => s.note);
+      // A reference isn't a real note in this graph — no mini sub-grid for it.
+      const forSub = Object.values(slotNote).map((s) => s.note).filter((n) => !n.isRef);
       if (forSub.length > 0) {
         const results = await Promise.all(forSub.map((n) => api.getNeighbors(n.id)));
         forSub.forEach((n, i) => {
@@ -5980,7 +6717,9 @@
     cells.forEach((cell) => grid.appendChild(cell));
   }
 
-  // --- Tab bar ---
+  // --- Tab bar --- One unified bar for personal and shared notes alike — a
+  // tab centered on a shared note differs only by a 🔗 badge on its title
+  // (server/tabs.js's list() includes each tab's note's share_id for this).
   function renderTabbar() {
     tabbar.innerHTML = '';
     tabbar.classList.toggle('hidden', !barPrefs.tabs);
@@ -5994,7 +6733,7 @@
 
       const title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = tab.title;
+      title.textContent = tab.share_id != null ? `🔗 ${tab.title}` : tab.title;
 
       const closeBtn = document.createElement('button');
       closeBtn.className = 'tab-close';
@@ -6031,6 +6770,31 @@
     tabbar.appendChild(newTabBtn);
   }
 
+  // --- Spaces bar: quick-jump to a shared space you belong to (the ➕
+  // menu's "Share this note…"/"Reference in a space…" and the Account →
+  // Shared spaces panel are the other ways in). Fire-and-forget — a fetch,
+  // never awaited by rendering (same convention as warmCache); it just
+  // paints in whenever it resolves. ---
+  async function renderSpacesbar() {
+    if (!spacesbar) return;
+    const shares = await api.getMyShares();
+    spacesbar.innerHTML = '';
+    spacesbar.classList.toggle('hidden', shares.length === 0 || !barPrefs.spaces);
+
+    shares.forEach((share) => {
+      const chip = document.createElement('div');
+      chip.className = 'tab' + (currentSpace && currentSpace.id === share.id ? ' active' : '');
+
+      const title = document.createElement('span');
+      title.className = 'tab-title';
+      title.textContent = `🔗 ${share.title}`;
+
+      chip.appendChild(title);
+      chip.addEventListener('click', () => switchSpace(share.id, { id: share.id, title: share.title, role: share.role }));
+      spacesbar.appendChild(chip);
+    });
+  }
+
   // --- Pin bar: shortcuts to pinned notes ---
   function renderPinbar() {
     const pinned = allNotesCache.filter((n) => n.pinned);
@@ -6056,6 +6820,7 @@
     // The latest and to-do bars track the same note cache, so keep them in lockstep.
     renderLatestbar();
     renderTodobar();
+    renderSpacesbar();
   }
 
   // --- Latest bar: shortcuts to the most recently edited notes account-wide. ---
@@ -7082,12 +7847,20 @@
   function buildResultRow(n) {
     const div = document.createElement('div');
     div.className = 'result';
-    const icon = TYPE_ICON[n.type] ? `${TYPE_ICON[n.type]} ` : '';
+    // isCross (the link modal's cross-scope candidates only — never set on
+    // a header-search result) means picking this row creates a reference,
+    // not a real link — the 🔗 and subtitle make that clear before you tap it.
+    const icon = n.isCross ? '🔗 ' : TYPE_ICON[n.type] ? `${TYPE_ICON[n.type]} ` : '';
     const title = document.createElement('div');
     title.className = 'result-title';
     title.textContent = icon + (n.title || 'Untitled');
     div.appendChild(title);
-    if (n.snippet) {
+    if (n.isCross) {
+      const snip = document.createElement('div');
+      snip.className = 'result-snippet result-parent';
+      snip.textContent = n.crossShareId != null ? `reference — in shared space "${n.crossShareTitle}"` : 'reference — your personal notes';
+      div.appendChild(snip);
+    } else if (n.snippet) {
       const snip = document.createElement('div');
       snip.className = 'result-snippet';
       snip.textContent = n.snippet;
@@ -7423,13 +8196,66 @@
 
   // --- Link modal: connects the currently open/centered note to an existing
   // one. Separate from the create modal above (openPicker) on purpose — that
-  // one always makes something new; this one never does. ---
+  // one always makes something new; this one never does. Also reused, in
+  // 'home' mode, as the picker for "any note can be home" (Account →
+  // Home note → Change…) — same search UI, different candidate pool and
+  // click action; see openLinkModal/renderLinkResults below.
   let linkTarget = null;
+  let linkModalMode = 'connect'; // 'connect' | 'home'
+  let homeNoteCandidates = [];
 
-  function openLinkModal() {
+  // Candidates from the *other* scope than linkTarget's — a real `links`
+  // row can never span scopes (server/links.js's create), so offering
+  // them here at all only makes sense if picking one creates a reference
+  // instead (server/shares.js's addRef). Loaded once per modal open;
+  // filtered by the search query the same way the same-scope candidates
+  // already are. Without this, a note that moved into (or already lived
+  // in) a different scope than the one you're centered on would just
+  // never appear here, with no explanation why "Connect to note" can't
+  // find it.
+  let linkCrossCandidates = [];
+  async function loadLinkCrossCandidates() {
+    try {
+      if (currentSpace) {
+        // Centered on a shared note — the only meaningful cross-scope
+        // targets are your own personal notes. Deliberately a raw fetch,
+        // not api.listNotes (which is scope-branched to whatever
+        // currentSpace currently is) — this always wants the personal list
+        // regardless of where you're browsing.
+        const rows = await fetch('/api/notes').then((r) => (r.ok ? r.json() : []));
+        linkCrossCandidates = rows.map((n) => ({ ...n, isCross: true, crossShareId: null }));
+      } else {
+        const shares = await api.getMyShares();
+        const lists = await Promise.all(shares.map((s) => api.getShareNotes(s.id)));
+        linkCrossCandidates = lists.flatMap((list, i) =>
+          list.map((n) => ({ ...n, isCross: true, crossShareId: shares[i].id, crossShareTitle: shares[i].title }))
+        );
+      }
+    } catch {
+      linkCrossCandidates = [];
+    }
+  }
+
+  async function openLinkModal(mode = 'connect') {
+    linkModalMode = mode;
     linkTarget = currentId;
     linkSearch.value = '';
     linkResults.innerHTML = '';
+    linkCrossCandidates = [];
+    if (mode === 'home') {
+      linkOverlayTitle.textContent = 'Set home note';
+      // Personal notes only, and deliberately not allNotesCache — that's
+      // scope-relative (whatever you're currently browsing), but a home
+      // note is always personal, regardless of where this picker happens
+      // to be opened from (e.g. from Account settings, or while inside a
+      // shared space).
+      homeNoteCandidates = currentSpace
+        ? await fetch('/api/notes').then((r) => (r.ok ? r.json() : [])).catch(() => [])
+        : allNotesCache;
+    } else {
+      linkOverlayTitle.textContent = 'Connect to note';
+      loadLinkCrossCandidates(); // fire-and-forget — ready by the time typing settles
+    }
     linkOverlay.classList.remove('hidden');
     linkSearch.focus();
   }
@@ -7448,14 +8274,50 @@
   let linkSearchDebounce = null;
 
   function renderLinkResults(list) {
+    if (linkModalMode === 'home') {
+      const q = linkSearch.value.trim().toLowerCase();
+      const matches = (q ? homeNoteCandidates.filter((n) => (n.title || '').toLowerCase().includes(q)) : homeNoteCandidates).slice(0, 8);
+      linkResults.innerHTML = '';
+      matches.forEach((n) => {
+        const div = buildResultRow(n);
+        div.addEventListener('click', async () => {
+          closeLinkModal();
+          await setGraphRoot(n.id);
+        });
+        linkResults.appendChild(div);
+      });
+      return;
+    }
     const linkedIds = new Set(neighbors.map((n) => n.id));
-    const matches = list.filter((n) => n.id !== linkTarget && !linkedIds.has(n.id)).slice(0, 8);
+    const sameScope = list.filter((n) => n.id !== linkTarget && !linkedIds.has(n.id));
+    const q = linkSearch.value.trim().toLowerCase();
+    const crossScope = (q
+      ? linkCrossCandidates.filter((n) => (n.title || '').toLowerCase().includes(q))
+      : linkCrossCandidates
+    ).filter((n) => n.id !== linkTarget);
+    const matches = [...sameScope, ...crossScope].slice(0, 8);
 
     linkResults.innerHTML = '';
     matches.forEach((n) => {
       const div = buildResultRow(n);
       div.addEventListener('click', async () => {
-        await api.link(linkTarget, n.id);
+        try {
+          if (n.isCross) {
+            // A real link can never span scopes — this is a reference
+            // instead (server/shares.js's addRef), always expressed as
+            // {shareId, personalNoteId, sharedNoteId} regardless of which
+            // side (linkTarget or n) is the personal one.
+            const shareId = currentSpace ? currentSpace.id : n.crossShareId;
+            const personalNoteId = currentSpace ? n.id : linkTarget;
+            const sharedNoteId = currentSpace ? linkTarget : n.id;
+            await api.addRef(shareId, personalNoteId, sharedNoteId);
+          } else {
+            await api.link(linkTarget, n.id);
+          }
+        } catch (e) {
+          toast(e.message || "Couldn't connect that note.");
+          return;
+        }
         await loadNeighbors(currentId);
         await refreshColorData();
         closeLinkModal();
@@ -7473,7 +8335,10 @@
     renderLinkResults(
       q ? allNotesCache.filter((n) => (n.title || '').toLowerCase().includes(ql)) : allNotesCache
     );
-    if (!q) {
+    // 'home' mode ignores this list entirely (renderLinkResults filters
+    // homeNoteCandidates itself) — no point round-tripping a server search
+    // whose results would just be thrown away.
+    if (!q || linkModalMode === 'home') {
       clearTimeout(linkSearchDebounce);
       return;
     }
@@ -8544,6 +9409,10 @@
   // ---------------------------------------------------------------------------
 
   let graphState = null; // { centerId, nodes, edges, pos, camera:{x,y,scale} }
+  // The app scope (null = personal, else a share id) active when the graph
+  // overlay was opened — see closeGraph's doc comment on why it's restored
+  // there by default.
+  let graphOriginalShareId = null;
   let graphLayoutMode = localStorage.getItem('nico-graph-layout') || 'radial';
   let graphLevel = parseInt(localStorage.getItem('nico-graph-level'), 10) || 20;
   let graphShowDone = localStorage.getItem('nico-graph-show-done') === '1'; // default off
@@ -8601,8 +9470,15 @@
 
   // Undirected adjacency over the (online or offline-mirrored) link graph —
   // same source cache.localNeighbors draws on for one note, walked globally.
+  // In a shared space, cache.cachedLinks() is the wrong source entirely: it's
+  // the *personal* link mirror (see its own doc comment), never populated
+  // with a space's links, so graph view would find no edges out of the
+  // center note and every other space note would sit undiscovered even
+  // though graphActiveNotes() already has them. Space links have no offline
+  // mirror (same "online-only" rule as getShareNotes), so this is a live
+  // fetch each time the overlay opens or rebuilds.
   async function buildGraphAdjacency() {
-    const links = await cache.cachedLinks();
+    const links = currentSpace ? await api.getShareLinks(currentSpace.id) : await cache.cachedLinks();
     const adj = new Map();
     const add = (a, b) => {
       if (!adj.has(a)) adj.set(a, new Set());
@@ -8674,6 +9550,47 @@
         edges.push([c.id, nb]);
       }
     }
+
+    // Cross-scope references (server/shares.js's personal_refs) are never a
+    // `links` row, so buildGraphAdjacency's adjacency above has no edges for
+    // them at all — without this, a note with one just silently showed no
+    // trace of it here even though the 3x3 grid marks it with a 🔗
+    // pseudo-neighbor card (loadNeighbors). Every ref belonging to a chosen
+    // note is included as its own one-hop pseudo-node off that note,
+    // unconditionally — same "never crowded out by ranking" rule
+    // loadNeighbors applies, and cheap since a real account has few of
+    // these. The far end lives in a different scope than the one being
+    // graphed (out of a personal note into a space, or vice versa), so
+    // unlike a real neighbor it can't be looked up in notesById — id'd as
+    // `ref:<refId>` (never collides with a real numeric note id) and
+    // carries its own display title (or the noAccess placeholder) straight
+    // from the server, same shape loadNeighbors builds for the grid.
+    // `targetShareId` is which scope the far end actually lives in (null =
+    // personal) — handleGraphTap's recenterGraph needs it to follow the
+    // reference: a ref's own share_id is the far scope when it's being
+    // viewed from personal, but personal (null) when it's being viewed
+    // from inside that same space.
+    const refs = await api.getAllRefs();
+    for (const ref of refs) {
+      const localId = currentSpace ? ref.shared_note_id : ref.personal_note_id;
+      const targetId = currentSpace ? ref.personal_note_id : ref.shared_note_id;
+      if (!chosenIds.has(localId)) continue;
+      const localNode = chosen.find((c) => c.id === localId);
+      const pseudoId = `ref:${ref.id}`;
+      chosen.push({
+        id: pseudoId,
+        note: { title: ref.noAccess ? `No access to "${ref.shareTitle}"` : ref.title, status: ref.status },
+        distance: localNode.distance + 1,
+        heat: 0,
+        score: 0,
+        isRef: true,
+        noAccess: Boolean(ref.noAccess),
+        targetId,
+        targetShareId: currentSpace ? null : ref.share_id,
+      });
+      edges.push([localId, pseudoId]);
+    }
+
     return { nodes: chosen, edges };
   }
 
@@ -8916,22 +9833,32 @@
     for (const [a, b] of graphAnimEdges) {
       const pa = posOf(a);
       const pb = posOf(b);
+      // A cross-scope reference edge is dashed — it's not a real `links`
+      // row (see computeGraphData's ref pseudo-nodes), just a pointer into
+      // another scope, so it reads visually different from an ordinary link.
+      const nodeA = graphAnimNodesById.get(a);
+      const nodeB = graphAnimNodesById.get(b);
+      ctx.setLineDash(nodeA && nodeA.isRef || (nodeB && nodeB.isRef) ? [4 / cam.scale, 3 / cam.scale] : []);
       ctx.globalAlpha = Math.min(pa.opacity, pb.opacity);
       ctx.beginPath();
       ctx.moveTo(pa.x, pa.y);
       ctx.lineTo(pb.x, pb.y);
       ctx.stroke();
     }
+    ctx.setLineDash([]);
 
     for (const [id, vis] of graphVisual) {
       const node = graphAnimNodesById.get(id);
       if (!node || vis.opacity <= 0) continue;
       const isCenter = id === graphState.centerId;
-      const radius = isCenter ? 15 : 7 + node.heat * 7;
-      ctx.globalAlpha = vis.opacity * (node.note.status === 'done' ? 0.45 : 1);
+      const radius = isCenter ? 15 : node.isRef ? 6 : 7 + node.heat * 7;
+      ctx.globalAlpha = vis.opacity * (node.note.status === 'done' ? 0.45 : 1) * (node.noAccess ? 0.6 : 1);
       ctx.beginPath();
       ctx.arc(vis.x, vis.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isCenter ? accent : lerpHex('4f6df5', 'c9821a', node.heat);
+      // A reference node gets a fixed, neutral colour instead of the usual
+      // heat gradient — it isn't a note in this scope at all, so its own
+      // heat/status would be meaningless here.
+      ctx.fillStyle = isCenter ? accent : node.isRef ? (node.noAccess ? '#999999' : '#8a5fd8') : lerpHex('4f6df5', 'c9821a', node.heat);
       ctx.fill();
       if (isCenter) {
         ctx.lineWidth = 2.5 / cam.scale;
@@ -8958,10 +9885,14 @@
       if (sx < -60 || sx > w + 60 || sy < -20 || sy > h + 20) continue; // off-screen
       const isCenter = id === graphState.centerId;
       let title = (node.note && node.note.title) || 'Untitled';
+      // 🔗 flags a cross-scope reference node (🚫 when access to its space
+      // is gone — its title is already the "No access to..." placeholder in
+      // that case, same icon rule as the grid's neighbor cards).
+      if (node.isRef) title = (node.noAccess ? '🚫 ' : '🔗 ') + title;
       if (title.length > 22) title = title.slice(0, 21) + '…';
       ctx.font = isCenter ? 'bold 12px sans-serif' : '12px sans-serif';
 
-      const worldRadius = isCenter ? 15 : 7 + node.heat * 7;
+      const worldRadius = isCenter ? 15 : node.isRef ? 6 : 7 + node.heat * 7;
       const len = Math.hypot(vis.x, vis.y) || 1;
       const dirX = isCenter ? 1 : vis.x / len;
       const dirY = isCenter ? 0 : vis.y / len;
@@ -9015,16 +9946,40 @@
   // Tapping the already-centred node opens it for editing (same "open a note"
   // path as everywhere else, so it does log a nav event); tapping any other
   // visible node just recentres the map on it.
+  // Recentre the graph on `centerId`, switching the app's scope first if it
+  // lives somewhere other than the one currently graphed (ensureScope is a
+  // no-op when it's already the right scope — the common, same-scope case).
+  // This is just a peek, not a commit: closeGraph restores the original
+  // scope by default if the overlay closes without the user having
+  // actually opened a note (see its own doc comment).
+  async function recenterGraph(centerId, shareId) {
+    await ensureScope(shareId);
+    syncGraphLevelBounds(); // scope may just have changed — keep the slider honest about it
+    await rebuildGraph(centerId);
+  }
+
+  // A tap always centres the graph on whatever it hit — including a 🔗
+  // reference, which recentres across the scope boundary it points into —
+  // except the already-centred node, which opens it for real instead (same
+  // as tapping the centre of the 3x3 grid).
   async function handleGraphTap(clientX, clientY) {
     const hit = graphHitTest(clientX, clientY);
     if (!hit) return;
+    if (hit.isRef) {
+      if (hit.noAccess) {
+        toast(hit.note.title); // already "No access to \"<space>\""
+        return;
+      }
+      await recenterGraph(hit.targetId, hit.targetShareId);
+      return;
+    }
     if (hit.id === graphState.centerId) {
       const id = hit.id;
-      closeGraph();
+      await closeGraph({ restoreScope: false }); // goTo below sets the real scope itself
       await goTo(id, 'graph');
       await openNoteFullscreen('preview');
     } else {
-      await rebuildGraph(hit.id);
+      await recenterGraph(hit.id, currentSpace ? currentSpace.id : null);
     }
   }
 
@@ -9110,8 +10065,14 @@
   }
 
   // Keeps the slider's bounds (and the clamped current level) in sync with
-  // graphMaxLevel() — needed on open and again whenever the Done toggle
-  // changes what's eligible to be counted.
+  // graphMaxLevel() — needed on open, whenever the Done toggle changes
+  // what's eligible to be counted, and (recenterGraph) whenever a tap
+  // follows a reference across a scope boundary: graphMaxLevel() reads
+  // allNotesCache, which ensureScope just repointed at the new scope's own
+  // notes, so without this the slider kept showing bounds sized to
+  // whichever scope was active when the graph was last opened/toggled —
+  // e.g. capped at a small space's note count while actually browsing a
+  // much bigger personal graph, or vice versa.
   function syncGraphLevelBounds() {
     const min = Math.min(6, graphMaxLevel());
     const max = graphMaxLevel();
@@ -9128,6 +10089,7 @@
       toast('No notes to map yet.');
       return;
     }
+    graphOriginalShareId = currentSpace ? currentSpace.id : null;
     graphOverlay.classList.remove('hidden');
     syncGraphLevelBounds();
     graphLayoutToggleBtn.textContent = graphLayoutMode === 'force' ? '🌀 Force' : '🎯 Radial';
@@ -9139,7 +10101,15 @@
     await rebuildGraph(startId);
   }
 
-  function closeGraph() {
+  // restoreScope: a tap-to-recentre (recenterGraph) can leave the app's
+  // scope pointed at wherever the graph last wandered into, without the
+  // user ever having actually opened a note there — it's just a peek, not
+  // a commit. Closing any other way (✕, Escape, outside-tap) should leave
+  // the app exactly where it was, so this restores the scope active when
+  // the graph was opened. handleGraphTap's "open the centred note" branch
+  // passes false, since goTo (called right after) is about to set the
+  // correct scope for real.
+  async function closeGraph({ restoreScope = true } = {}) {
     graphOverlay.classList.add('hidden');
     cancelAnimationFrame(graphAnimHandle);
     graphAnimHandle = null;
@@ -9151,6 +10121,9 @@
     graphPanStart = null;
     graphPinchStartDist = null;
     graphPinchMid = null;
+    if (restoreScope && graphOriginalShareId !== (currentSpace ? currentSpace.id : null)) {
+      await ensureScope(graphOriginalShareId);
+    }
   }
 
   graphBtn.addEventListener('click', openGraph);
@@ -9396,6 +10369,7 @@
   // Header-row toggles (the "Header rows" section).
   const barToggleEls = {
     tabs: document.getElementById('bar-toggle-tabs'),
+    spaces: document.getElementById('bar-toggle-spaces'),
     pins: document.getElementById('bar-toggle-pins'),
     latest: document.getElementById('bar-toggle-latest'),
     todos: document.getElementById('bar-toggle-todos'),
@@ -9422,6 +10396,8 @@
     loadDigestPrefs();
     renderSessions();
     renderEncryptionPanel();
+    renderSharesSection();
+    renderRootNoteSection();
     accountOverlay.classList.remove('hidden');
   });
 
@@ -9491,6 +10467,202 @@
         row.append(btn);
       }
       sessionList.append(row);
+    }
+  }
+
+  // --- Home note (Account → Account section) ------------------------------
+  // A switch, not buttons: the underlying fact is exactly one boolean
+  // (info.marked — "set by you" vs. "our best guess"), so flipping it on
+  // locks in whichever note is *currently* shown (today's guess, usually)
+  // as the real, explicit home; flipping it off clears back to guessing —
+  // the same two actions a note's own ➕ menu offers, just reachable
+  // without leaving this screen.
+  const rootNoteTitle = document.getElementById('root-note-title');
+  const rootNoteStatus = document.getElementById('root-note-status');
+  const rootNoteToggle = document.getElementById('root-note-toggle');
+  let rootNoteInfo = null;
+  async function renderRootNoteSection() {
+    if (!rootNoteTitle) return;
+    rootNoteTitle.textContent = 'Loading…';
+    rootNoteStatus.textContent = '';
+    rootNoteInfo = await api.getRootNote().catch(() => null);
+    if (!rootNoteInfo || !rootNoteInfo.note) {
+      rootNoteTitle.textContent = 'Home note';
+      rootNoteStatus.textContent = 'No notes yet to guess a home from.';
+      rootNoteToggle.disabled = true;
+      return;
+    }
+    rootNoteTitle.textContent = `Home: "${rootNoteInfo.note.title}"`;
+    rootNoteStatus.textContent = rootNoteInfo.marked ? 'Set by you' : 'Our best guess — not set by you yet';
+    rootNoteToggle.disabled = false;
+    rootNoteToggle.checked = rootNoteInfo.marked;
+  }
+  rootNoteToggle.addEventListener('change', async () => {
+    if (!rootNoteInfo || !rootNoteInfo.note) return;
+    await setGraphRoot(rootNoteToggle.checked ? rootNoteInfo.note.id : null);
+    await renderRootNoteSection();
+  });
+  // Picks any note (not just today's current/guessed one) as home — opens
+  // the same search modal as a note's own ➕ → "Connect to note", just in
+  // 'home' mode (see openLinkModal). Closing the account overlay first: the
+  // picker is its own overlay and setGraphRoot re-renders the grid, which
+  // would otherwise happen underneath the settings modal.
+  document.getElementById('root-note-change-btn').addEventListener('click', () => {
+    closeAccount();
+    openLinkModal('home');
+  });
+
+  // --- Shared spaces (Account → Shared spaces section) -------------------
+  const sharesList = document.getElementById('shares-list');
+  async function renderSharesSection() {
+    if (!sharesList) return;
+    sharesList.textContent = 'Loading…';
+    const shares = await api.getMyShares();
+    sharesList.innerHTML = '';
+    if (!shares.length) {
+      sharesList.textContent = 'No shared spaces yet — create one from a note\'s ➕ menu.';
+      return;
+    }
+    for (const s of shares) {
+      const row = document.createElement('div');
+      // multi-action: up to 3 buttons (Open/Invite/Copy viewer link) is too
+      // much for one line next to the title — see style.css's comment on
+      // this class for why that needs its own layout, not the plain
+      // single-button .session-row (e.g. "Sign out") this is shared with.
+      row.className = 'session-row multi-action';
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      const name = document.createElement('span');
+      name.className = 'session-name';
+      name.textContent = `${s.title} (${s.role}, ${s.memberCount} member${s.memberCount === 1 ? '' : 's'})`;
+      meta.append(name);
+      row.append(meta);
+
+      const actions = document.createElement('div');
+      actions.className = 'session-actions';
+      row.append(actions);
+
+      const openBtn = document.createElement('button');
+      openBtn.className = 'secondary';
+      openBtn.textContent = 'Open';
+      openBtn.addEventListener('click', async () => {
+        closeAccount();
+        await switchSpace(s.id, { id: s.id, title: s.title, role: s.role });
+      });
+      actions.append(openBtn);
+
+      if (s.role === 'owner') {
+        const inviteBtn = document.createElement('button');
+        inviteBtn.className = 'secondary';
+        inviteBtn.textContent = 'Invite…';
+        inviteBtn.addEventListener('click', async () => {
+          const email = await promptDialog(`Invite someone to edit "${s.title}" — their email:`, {
+            confirmLabel: 'Invite',
+            placeholder: 'name@example.com',
+          });
+          if (!email || !email.trim()) return;
+          try {
+            await api.inviteShareEditor(s.id, email.trim());
+            toast(`Invite sent to ${email.trim()}.`);
+          } catch (e) {
+            toast(e.message || "Couldn't send that invite.");
+          }
+        });
+        actions.append(inviteBtn);
+
+        const linkBtn = document.createElement('button');
+        linkBtn.className = 'secondary';
+        linkBtn.textContent = 'Copy viewer link';
+        linkBtn.addEventListener('click', async () => {
+          try {
+            // Idempotent — re-clicking to grab another copy must never
+            // rotate (and so break) a link already handed out.
+            const { token } = await api.getShareViewerLink(s.id);
+            const url = `${location.origin}/space-view.html?id=${s.id}&token=${token}`;
+            await navigator.clipboard.writeText(url).catch(() => {});
+            toast('Viewer link copied — anyone with it can view (read-only), no account needed.');
+          } catch (e) {
+            toast(e.message || "Couldn't create a viewer link.");
+          }
+        });
+        actions.append(linkBtn);
+
+        // "Remove space" — dissolves it outright (server/shares.js's
+        // dissolveShare): notes move back to private, every other member
+        // loses access. Owner-only, same as invite/viewer-link above.
+        const removeSpaceBtn = document.createElement('button');
+        removeSpaceBtn.className = 'secondary danger';
+        removeSpaceBtn.textContent = 'Remove space';
+        removeSpaceBtn.addEventListener('click', async () => {
+          const otherMembers = s.memberCount - 1;
+          const warning = otherMembers > 0
+            ? ` The other ${otherMembers} member${otherMembers === 1 ? '' : 's'} will lose access to it.`
+            : '';
+          const ok = await confirmDialog(
+            `Remove "${s.title}"? Its notes move back to your private notes.${warning}`,
+            { confirmLabel: 'Remove space', danger: true }
+          );
+          if (!ok) return;
+          removeSpaceBtn.disabled = true;
+          try {
+            await api.dissolveShare(s.id);
+            toast(`"${s.title}" removed — its notes are back in your private notes.`);
+            // If we're centered inside the space being removed, goTo
+            // re-fetches the (now personal) note and ensureScope notices the
+            // mismatch and resets scope/allNotesCache on its own — see
+            // ensureScope's doc comment.
+            if (currentSpace && currentSpace.id === s.id) await goTo(currentId, 'tab');
+            renderSharesSection();
+            renderSpacesbar();
+          } catch (e) {
+            toast(e.message || "Couldn't remove that space.");
+            removeSpaceBtn.disabled = false;
+          }
+        });
+        actions.append(removeSpaceBtn);
+      }
+
+      sharesList.append(row);
+
+      // Member list, owner-only, so an invited editor can be removed — same
+      // "remove a invited user" action as removeMember's DELETE route, just
+      // with a UI. Fetched only for shares that actually have another
+      // member (memberCount includes the owner), so opening this panel
+      // doesn't fire one extra request per owned space for nothing.
+      if (s.role === 'owner' && s.memberCount > 1) {
+        const full = await api.getShare(s.id).catch(() => null);
+        for (const m of (full && full.members) || []) {
+          if (m.role === 'owner') continue;
+          const mrow = document.createElement('div');
+          mrow.className = 'session-row';
+          mrow.style.marginLeft = '1.25rem';
+          const mmeta = document.createElement('div');
+          mmeta.className = 'session-meta';
+          const mname = document.createElement('span');
+          mname.className = 'session-name';
+          mname.textContent = `${m.email} (${m.role})`;
+          mmeta.append(mname);
+          mrow.append(mmeta);
+
+          const removeMemberBtn = document.createElement('button');
+          removeMemberBtn.className = 'secondary danger';
+          removeMemberBtn.textContent = 'Remove';
+          removeMemberBtn.addEventListener('click', async () => {
+            if (!(await confirmDialog(`Remove ${m.email} from "${s.title}"?`, { confirmLabel: 'Remove', danger: true }))) return;
+            removeMemberBtn.disabled = true;
+            try {
+              await api.removeShareMember(s.id, m.id);
+              toast(`${m.email} removed from "${s.title}".`);
+              renderSharesSection();
+            } catch (e) {
+              toast(e.message || "Couldn't remove that member.");
+              removeMemberBtn.disabled = false;
+            }
+          });
+          mrow.append(removeMemberBtn);
+          sharesList.append(mrow);
+        }
+      }
     }
   }
 

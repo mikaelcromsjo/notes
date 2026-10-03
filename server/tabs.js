@@ -1,12 +1,20 @@
 // Pure tab-domain logic, extracted out of server/routes/tabs.js — see
-// docs/plan/08-offline-privacy.md §3.1. No behavior change from the
-// pre-extraction handlers.
+// docs/plan/08-offline-privacy.md §3.1.
+//
+// A tab row is owned by the user whose tab bar it's in — that's unrelated
+// to whether the note it's centered on is personal or shared, so tabs
+// themselves need no scope concept at all. What matters is `note_id`: any
+// note this user can currently see (resolveNoteAccess) is a valid tab
+// target, personal or shared alike — the client tells the two apart by
+// `share_id` (included below) and badges a shared one, but there is
+// otherwise exactly one kind of tab.
+const { resolveNoteAccess } = require('./shares');
 const { HttpError } = require('./http-error');
 
 function list(db, userId) {
   return db
     .prepare(
-      `SELECT tabs.id, tabs.note_id, tabs.is_active, tabs.sort_order, notes.title
+      `SELECT tabs.id, tabs.note_id, tabs.is_active, tabs.sort_order, notes.title, notes.share_id
        FROM tabs
        JOIN notes ON notes.id = tabs.note_id
        WHERE tabs.user_id = ? AND notes.status != 'deleted'
@@ -24,8 +32,7 @@ function activate(db, id, userId) {
 
 // Always opens a brand new tab on note_id (explicit "+" action).
 function create(db, userId, { note_id }) {
-  const note = db.prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?').get(note_id, userId);
-  if (!note) throw new HttpError(404, 'note not found');
+  if (!resolveNoteAccess(db, userId, note_id).role) throw new HttpError(404, 'note not found');
 
   db.transaction(() => {
     const { maxOrder } = db
@@ -42,8 +49,7 @@ function create(db, userId, { note_id }) {
 
 // Move an existing tab to point at a different note (in-tab navigation).
 function move(db, userId, id, { note_id }) {
-  const note = db.prepare('SELECT id FROM notes WHERE id = ? AND user_id = ?').get(note_id, userId);
-  if (!note) throw new HttpError(404, 'note not found');
+  if (!resolveNoteAccess(db, userId, note_id).role) throw new HttpError(404, 'note not found');
 
   const info = db.prepare('UPDATE tabs SET note_id = ? WHERE id = ? AND user_id = ?').run(note_id, id, userId);
   if (info.changes === 0) throw new HttpError(404, 'tab not found');

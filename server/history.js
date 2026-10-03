@@ -1,4 +1,5 @@
 const db = require('./db');
+const { resolveNoteAccess } = require('./note-access');
 
 const nowIso = () => new Date().toISOString();
 
@@ -7,12 +8,13 @@ const insertStmt = db.prepare(
    VALUES (?, ?, ?, ?, ?)`
 );
 
-// Title of a note the user owns, or a stable "#id" fallback (the note may have
-// been hard-deleted since the entry was written).
+// Title of a note the user can see (personal, or a shared note they're a
+// member of), or a stable "#id" fallback (the note may have been
+// hard-deleted since the entry was written, or since become inaccessible).
 function noteTitle(userId, id) {
   if (!id) return '(none)';
-  const n = db.prepare('SELECT title FROM notes WHERE id = ? AND user_id = ?').get(id, userId);
-  return n ? n.title : `note #${id}`;
+  const { role, note } = resolveNoteAccess(db, userId, id);
+  return role ? note.title : `note #${id}`;
 }
 
 function record(userId, action, payload, summary) {

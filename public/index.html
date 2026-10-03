@@ -49,6 +49,7 @@
   </header>
 
   <nav id="tabbar" class="tabbar"></nav>
+  <nav id="spacesbar" class="tabbar pinbar hidden"></nav>
   <nav id="pinbar" class="tabbar pinbar hidden"></nav>
   <nav id="latestbar" class="tabbar latestbar hidden"></nav>
   <nav id="todobar" class="tabbar todobar hidden"></nav>
@@ -125,7 +126,7 @@
        only links the currently open/centered note to an existing one. -->
   <div id="link-overlay" class="overlay hidden">
     <div class="picker">
-      <h2>Connect to note</h2>
+      <h2 id="link-overlay-title">Connect to note</h2>
       <input type="text" id="link-search" placeholder="Search existing notes…" autocomplete="off" />
       <div id="link-results" class="picker-results"></div>
       <div class="picker-actions">
@@ -335,6 +336,7 @@
       <div class="settings-main">
         <nav class="settings-nav" id="settings-nav">
           <button type="button" class="settings-nav-item active" data-section="account">Account</button>
+          <button type="button" class="settings-nav-item" data-section="spaces">Shared spaces</button>
           <button type="button" class="settings-nav-item" data-section="layout">Header rows</button>
           <button type="button" class="settings-nav-item" data-section="integrate">Integrate</button>
           <button type="button" class="settings-nav-item" data-section="privacy">Privacy</button>
@@ -357,6 +359,19 @@
               <button id="session-revoke-others-btn" class="secondary">Sign out all other devices</button>
             </div>
 
+            <label class="settings-label settings-btn-row-spaced">Home note</label>
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title" id="root-note-title">Loading…</span>
+                <span class="settings-toggle-sub" id="root-note-status"></span>
+              </span>
+              <input type="checkbox" id="root-note-toggle" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+            <div class="settings-btn-row">
+              <button id="root-note-change-btn" class="secondary">Change…</button>
+            </div>
+
             <label class="settings-label settings-btn-row-spaced">App version</label>
             <p class="settings-desc" id="update-status">The app updates itself in the background; check now to pick up a new version straight away.</p>
             <div class="settings-btn-row">
@@ -370,6 +385,12 @@
             </div>
           </section>
 
+          <section class="settings-section" data-section="spaces">
+            <h3>Shared spaces</h3>
+            <p class="settings-desc">Notes you've moved into a shared space — viewable by anyone with a viewer link, editable by anyone you invite. Create one from a note's ➕ menu → "Share this note…".</p>
+            <div id="shares-list" class="session-list"></div>
+          </section>
+
           <section class="settings-section" data-section="layout">
             <h3>Header rows</h3>
             <p class="settings-desc">Choose which rows appear under the top bar. A row also stays hidden while it has nothing to show.</p>
@@ -380,6 +401,15 @@
                 <span class="settings-toggle-sub">Open notes you can switch between</span>
               </span>
               <input type="checkbox" id="bar-toggle-tabs" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">Spaces</span>
+                <span class="settings-toggle-sub">Shared spaces you belong to</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-spaces" />
               <span class="settings-switch" aria-hidden="true"></span>
             </label>
 

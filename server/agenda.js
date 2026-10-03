@@ -15,6 +15,16 @@ const remindersStmt = db.prepare(
    WHERE r.user_id = ? AND n.status != 'deleted'`
 );
 
+// Every note this user can see, personal or shared: their own personal notes
+// (share_id IS NULL) plus every note in a share they're a member of. Reused
+// below by the notes-table scans (open tasks / to-dos / orphans) — a
+// reminder is always personal (r.user_id above), but a checked-off task, a
+// note's todo status, and whether it has any links at all are properties of
+// the *note*, not of whoever's asking, so a collaborator on a shared to-do
+// note should see it in their own agenda exactly like the note's creator
+// does, not just the creator. Takes userId twice (matches the two `?`s).
+const VISIBLE_NOTES = `((n.user_id = ? AND n.share_id IS NULL) OR n.share_id IN (SELECT share_id FROM share_members WHERE user_id = ?))`;
+
 // `[` is not a LIKE metacharacter in SQLite, so this is a literal-substring
 // prefilter for "has an unchecked GFM task" — the regex below does the real
 // work. Once an account has opted into content encryption (docs/plan/
@@ -25,8 +35,8 @@ const remindersStmt = db.prepare(
 // localOpenTasksAndTodos, §3.5) and for the Android widget feed, which has
 // no crypto of its own and so is *meant* to just show nothing here.
 const taskNotesStmt = db.prepare(
-  `SELECT id, title, content, updated_at FROM notes
-   WHERE user_id = ? AND status != 'deleted' AND content LIKE '%[ ]%'`
+  `SELECT id, title, content, updated_at FROM notes n
+   WHERE ${VISIBLE_NOTES} AND n.status != 'deleted' AND n.content LIKE '%[ ]%'`
 );
 
 // Notes the user flagged as an open thing to do (the center-cell status button's
@@ -34,9 +44,9 @@ const taskNotesStmt = db.prepare(
 // `content` is only pulled to extract GTD `@context` tags (server/tags.js)
 // for the agenda's by-tag grouping — never sent on to the client as-is.
 const todoNotesStmt = db.prepare(
-  `SELECT id, title, content, updated_at FROM notes
-   WHERE user_id = ? AND status = 'todo'
-   ORDER BY updated_at DESC`
+  `SELECT id, title, content, updated_at FROM notes n
+   WHERE ${VISIBLE_NOTES} AND n.status = 'todo'
+   ORDER BY n.updated_at DESC`
 );
 
 // Unchecked task line, matching public/app.js toggleTaskInSource's grammar
@@ -48,11 +58,14 @@ const OPEN_TASKS_LIMIT = 20;
 // grid, only by search; the same signal the insights overlay shows. A linked
 // note that just hasn't been navigated to yet isn't an orphan, it's reachable,
 // only unvisited. Most-recently-touched first: an orphan you edited yesterday
-// is more likely worth resurfacing than one from years ago.
+// is more likely worth resurfacing than one from years ago. The links check
+// deliberately ignores links.user_id (creator provenance, never scope — see
+// links.js's list() doc comment): a shared note linked by a collaborator, not
+// by this user, still has a link and must not show as orphaned.
 const orphansStmt = db.prepare(
   `SELECT n.id, n.title FROM notes n
-   WHERE n.user_id = ? AND n.status != 'deleted'
-     AND NOT EXISTS (SELECT 1 FROM links l WHERE l.user_id = ? AND (l.note_a = n.id OR l.note_b = n.id))
+   WHERE ${VISIBLE_NOTES} AND n.status != 'deleted'
+     AND NOT EXISTS (SELECT 1 FROM links l WHERE l.note_a = n.id OR l.note_b = n.id)
    ORDER BY n.updated_at DESC LIMIT 20`
 );
 
@@ -142,7 +155,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   nudges.sort((a, b) => Number(b.due) - Number(a.due) || Date.parse(a.dueAt) - Date.parse(b.dueAt));
 
   const openTasks = [];
-  for (const n of taskNotesStmt.all(userId)) {
+  for (const n of taskNotesStmt.all(userId, userId)) {
     const open = (String(n.content || '').match(OPEN_TASK_RE) || []).length;
     if (open > 0) {
       openTasks.push({ noteId: n.id, title: n.title, open, updatedAt: n.updated_at });
@@ -150,7 +163,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   }
   openTasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 
-  const todos = todoNotesStmt.all(userId).map((n) => ({
+  const todos = todoNotesStmt.all(userId, userId).map((n) => ({
     noteId: n.id,
     title: n.title,
     updatedAt: n.updated_at,

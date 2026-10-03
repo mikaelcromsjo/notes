@@ -1,5 +1,6 @@
 const express = require('express');
 const db = require('../db');
+const { resolveNoteAccess } = require('../shares');
 
 const router = express.Router();
 
@@ -14,14 +15,22 @@ function safeParse(s) {
   }
 }
 
+// A note this user can act on (personal, or a shared note they're a member
+// of) — see server/shares.js's resolveNoteAccess. Undo/redo entries are only
+// ever read back by the same user who made them (the routes below filter
+// `history WHERE user_id = ?`), so this just confirms the note is still
+// reachable to them, the same "world moved on" guard as before.
 function ownNote(id, uid) {
-  return db.prepare('SELECT * FROM notes WHERE id = ? AND user_id = ?').get(id, uid);
+  return resolveNoteAccess(db, uid, id).note;
 }
 
-function linkExists(a, b, uid) {
-  return db
-    .prepare('SELECT 1 FROM links WHERE note_a = ? AND note_b = ? AND user_id = ?')
-    .get(a, b, uid);
+// links.user_id is creator provenance, not scope (see server/links.js) — a
+// link between two notes this user can act on may have been created by a
+// different collaborator in a shared space, so these no longer filter by
+// user_id at all; the caller is responsible for checking ownNote() on both
+// endpoints first where that matters (every branch below already does).
+function linkExists(a, b) {
+  return db.prepare('SELECT 1 FROM links WHERE note_a = ? AND note_b = ?').get(a, b);
 }
 
 function addLink(a, b, uid) {
@@ -30,8 +39,27 @@ function addLink(a, b, uid) {
   ).run(a, b, nowIso(), uid);
 }
 
-function removeLink(a, b, uid) {
-  db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ? AND user_id = ?').run(a, b, uid);
+function removeLink(a, b) {
+  db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?').run(a, b);
+}
+
+// Shared by the 'link-relation' undo/redo branches below (server/links.js's
+// setRelation) — restores a link's kind AND both its notes'
+// created_from_note_id to a given
+// {kind, centerCreatedFrom, otherCreatedFrom} snapshot. Both sides, always
+// — setRelation itself may touch either or both (clearing a stale reverse
+// pointer when flipping direction), so undo/redo has to put both back
+// exactly, not just the one this particular action's `relation` primarily
+// targeted. Requires both notes and the link itself to still exist (the
+// one piece of "world moved on" a plain note-existence check can't cover
+// here).
+function applyLinkRelation(noteA, noteB, centerId, otherId, state, uid) {
+  if (!ownNote(noteA, uid) || !ownNote(noteB, uid)) throw new Error('one of those notes no longer exists');
+  if (!linkExists(noteA, noteB)) throw new Error('that link no longer exists');
+  db.prepare('UPDATE links SET kind = ? WHERE note_a = ? AND note_b = ?').run(state.kind, noteA, noteB);
+  db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ?').run(state.centerCreatedFrom, centerId);
+  db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ?').run(state.otherCreatedFrom, otherId);
+  return { noteId: otherId };
 }
 
 // Reverse one recorded action. Throws with a human message when the world has
@@ -117,6 +145,10 @@ function applyUndo(action, p, uid) {
     return { noteId: n.id };
   }
 
+  if (action === 'link-relation') {
+    return applyLinkRelation(p.noteA, p.noteB, p.centerId, p.otherId, p.before, uid);
+  }
+
   throw new Error('unknown action');
 }
 
@@ -195,6 +227,10 @@ function applyRedo(action, p, uid) {
     return { noteId: n.id };
   }
 
+  if (action === 'link-relation') {
+    return applyLinkRelation(p.noteA, p.noteB, p.centerId, p.otherId, p.after, uid);
+  }
+
   throw new Error('unknown action');
 }
 
@@ -269,6 +305,18 @@ function isStale(action, p, uid) {
       if (!n) return true;
       return n.type !== p.after.type || n.attachment_path !== p.after.attachment_path;
     }
+    if (action === 'link-relation') {
+      const center = ownNote(p.centerId, uid);
+      const other = ownNote(p.otherId, uid);
+      if (!center || !other || !linkExists(p.noteA, p.noteB, uid)) return true;
+      const link = db.prepare('SELECT kind FROM links WHERE note_a = ? AND note_b = ?').get(p.noteA, p.noteB);
+      // Already undone (or changed back to `before` by something else)?
+      return (
+        center.created_from_note_id === p.before.centerCreatedFrom &&
+        other.created_from_note_id === p.before.otherCreatedFrom &&
+        (link.kind || null) === p.before.kind
+      );
+    }
   } catch {
     return true;
   }
@@ -317,6 +365,18 @@ function isRedoStale(action, p, uid) {
       const n = ownNote(p.noteId, uid);
       if (!n) return true;
       return n.type !== p.before.type || n.attachment_path !== p.before.attachment_path;
+    }
+    if (action === 'link-relation') {
+      const center = ownNote(p.centerId, uid);
+      const other = ownNote(p.otherId, uid);
+      if (!center || !other || !linkExists(p.noteA, p.noteB, uid)) return true;
+      const link = db.prepare('SELECT kind FROM links WHERE note_a = ? AND note_b = ?').get(p.noteA, p.noteB);
+      // Already redone (or independently set to `after` by something else)?
+      return (
+        center.created_from_note_id === p.after.centerCreatedFrom &&
+        other.created_from_note_id === p.after.otherCreatedFrom &&
+        (link.kind || null) === p.after.kind
+      );
     }
   } catch {
     return true;

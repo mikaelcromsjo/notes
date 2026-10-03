@@ -57,12 +57,19 @@ router.get('/insights', (req, res) => {
 
   // Orphan = structurally disconnected — no links at all, so it can't be
   // reached via the grid, only by search. A linked note that just hasn't been
-  // navigated to yet isn't an orphan; it's reachable, only unvisited.
+  // navigated to yet isn't an orphan; it's reachable, only unvisited. Visible
+  // to this user = their own personal notes plus every note in a share
+  // they're a member of (same VISIBLE_NOTES reasoning as server/agenda.js's
+  // matching query — a shared note's orphan status is a property of the
+  // note, not of who created it). The links check ignores links.user_id
+  // (creator provenance, never scope — see links.js's list() doc comment):
+  // a shared note linked by a collaborator still has a link.
   const orphans = db
     .prepare(
       `SELECT n.id, n.title FROM notes n
-       WHERE n.user_id = ? AND n.status != 'deleted'
-         AND NOT EXISTS (SELECT 1 FROM links l WHERE l.user_id = ? AND (l.note_a = n.id OR l.note_b = n.id))
+       WHERE ((n.user_id = ? AND n.share_id IS NULL) OR n.share_id IN (SELECT share_id FROM share_members WHERE user_id = ?))
+         AND n.status != 'deleted'
+         AND NOT EXISTS (SELECT 1 FROM links l WHERE l.note_a = n.id OR l.note_b = n.id)
        ORDER BY n.updated_at DESC LIMIT 20`
     )
     .all(uid, uid);

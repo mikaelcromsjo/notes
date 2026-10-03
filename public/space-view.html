@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Shared space</title>
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+  <!-- Reuses the app's own .grid/.cell rules (and CSS variables, which have
+       sane defaults even with no theme JS applied) so a shared space reads
+       like the app itself, just read-only. See server/routes/shares.js's
+       token-authed viewer routes — this page has no account, no session,
+       and no write path at all; that absence is the read-only enforcement. -->
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { display: flex; flex-direction: column; }
+    header.space-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0.75rem 1.25rem; border-bottom: 1px solid var(--border);
+      gap: 0.75rem; flex-wrap: wrap;
+    }
+    header.space-header h1 { font-size: 1.05rem; margin: 0; }
+    header.space-header .badge {
+      font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border);
+      border-radius: 999px; padding: 0.15rem 0.6rem; white-space: nowrap;
+    }
+    #space-status { padding: 3rem 1.5rem; text-align: center; color: var(--muted); }
+    .cell.center { gap: 0.5rem; }
+    .cell .neighbor-title { font-weight: 600; }
+    .cell-content { font-size: 0.85rem; color: var(--muted); overflow: hidden; white-space: pre-wrap; }
+    .cell.is-parent .neighbor-title { color: var(--muted); }
+    /* The fullscreen preview's title/content — deliberately NOT
+       .center-title.readonly/.center-content.readonly from style.css: those
+       are the *grid cell's* compact-preview rules (single-line ellipsis,
+       clamped height), wrong for this expanded, full-text view. */
+    .preview-title { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.6rem; }
+    .preview-content.placeholder { color: var(--muted); font-style: italic; }
+  </style>
+</head>
+<body>
+  <header class="space-header">
+    <h1 id="space-title">Shared space</h1>
+    <span class="badge">👁️ Read-only</span>
+  </header>
+  <div id="space-status">Loading…</div>
+  <main id="space-grid" class="grid" style="display:none"></main>
+
+  <!-- Fullscreen read-only preview (tap the centered note) — same markup
+       shape as the main app's #note-overlay so it picks up the shared
+       .overlay/.note-fullscreen/.markdown-body rules from style.css above
+       with no page-specific CSS of its own. -->
+  <div id="note-overlay" class="overlay hidden">
+    <div class="note-fullscreen">
+      <button id="note-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <div id="note-overlay-body" class="note-fullscreen-body"></div>
+    </div>
+  </div>
+
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/purify.min.js"></script>
+  <script src="/space-view.js"></script>
+</body>
+</html>

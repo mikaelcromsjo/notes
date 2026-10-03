@@ -1,0 +1,11 @@
+{
+  "name": "launch-capture",
+  "private": true,
+  "description": "Standalone tooling: drives an isolated copy of the app in headless Chrome to record onboarding walkthrough GIFs/MP4s for marketing. Not part of the app runtime — separate deps, never touches data/notes.db.",
+  "scripts": {
+    "capture": "node capture.js"
+  },
+  "dependencies": {
+    "playwright": "^1.63.0"
+  }
+}

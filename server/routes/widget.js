@@ -2,6 +2,8 @@ const express = require('express');
 const db = require('../db');
 const { buildAgenda, dayIndexInZone, pickZone } = require('../agenda');
 const { computeNeighbors } = require('../neighbors');
+const { resolveNoteAccess, scopeOf } = require('../note-access');
+const { listRefsForNote } = require('../shares');
 const themes = require('../../public/themes.js');
 const { cleanPrefs } = require('./theme');
 const location = require('../location');
@@ -145,15 +147,11 @@ router.get('/', (req, res) => {
   // mirroring the app's active tab) passes back whichever note it centered on
   // last. Falls through to the usual active-tab/most-recent pick if absent,
   // not found, or since deleted — this never touches `tabs`, so re-centering
-  // the widget never changes what the app itself has open.
-  let center = req.query.center
-    ? db
-        .prepare(
-          `SELECT id, title, content, type, updated_at FROM notes
-           WHERE id = ? AND user_id = ? AND status != 'deleted'`
-        )
-        .get(req.query.center, user.id)
-    : null;
+  // the widget never changes what the app itself has open. resolveNoteAccess
+  // (not a raw `user_id = ?` match) so a shared note this user is only an
+  // editor/viewer member of — not the original creator — can still be
+  // re-centered on, same as the personal note case.
+  let center = req.query.center ? resolveNoteAccess(db, user.id, req.query.center).note : null;
 
   if (!center) {
     center = db
@@ -191,9 +189,47 @@ router.get('/', (req, res) => {
   // scored where there's history, link-recency cold-start otherwise — plus the
   // "probable parent" the app always places in the top-center cell, so a
   // widget that reproduces that layout (the Android grid widget) genuinely
-  // matches the app instead of approximating it.
-  const result = computeNeighbors(user.id, center.id) || { parent: null, neighbors: [] };
+  // matches the app instead of approximating it. Same root-note exception
+  // too (server/notes.js's neighbors()) — never guess a parent for the
+  // note explicitly marked as this user's graph root; a share has no root
+  // concept at all. scopeOf(center) — not a hardcoded { userId } — because
+  // `center` may be a shared-space note: computeNeighbors's scope clause
+  // requires share_id IS NULL for a { userId } scope, so the old hardcoded
+  // scope silently found no such note and always fell back to an empty
+  // parent/neighbors, leaving a shared center note stranded with no grid.
+  const isExplicitRoot =
+    center.share_id == null &&
+    db.prepare('SELECT 1 FROM users WHERE id = ? AND root_note_id = ?').get(user.id, center.id);
+  const result = computeNeighbors(scopeOf(center), center.id, user.id, {
+    skipStructuralFallback: Boolean(isExplicitRoot),
+  }) || { parent: null, neighbors: [] };
   const withUrl = (n) => ({ id: n.id, title: n.title, type: n.type, url: `${origin}/#${n.id}` });
+
+  // Cross-scope references (server/shares.js's personal_refs) — the same
+  // pseudo-neighbor merge public/app.js's loadNeighbors does for the in-app
+  // grid, so a personal note's pointer into a space (and a space note's
+  // pointer back out to the personal note it was referenced from) shows up
+  // here too, not just in-app. Prepended like the web app does; marked
+  // `ref: true` (`type: null`, matching the web app's isRef cards) rather
+  // than folded in unlabeled, since these are never a real `links` row.
+  const refCards = listRefsForNote(db, user.id, center.id).map((ref) => {
+    const targetIsShared = ref.personal_note_id === center.id;
+    const farId = targetIsShared ? ref.shared_note_id : ref.personal_note_id;
+    // noAccess: the space this ref points into was dissolved, or this
+    // member was removed from it — title is already the "No access to..."
+    // placeholder (never the real, now-unreachable, note title), and there's
+    // nothing left to navigate to, so no url (see app.js's same noAccess
+    // click-guard).
+    return {
+      id: farId,
+      title: ref.noAccess ? `No access to "${ref.shareTitle}"` : ref.title,
+      type: null,
+      ref: true,
+      refTargetIsShared: targetIsShared,
+      noAccess: Boolean(ref.noAccess),
+      url: ref.noAccess ? null : `${origin}/#${farId}`,
+    };
+  });
 
   // Once the account has opted into content encryption, `center.content` is
   // ciphertext — this native RemoteViews widget has no crypto of its own (see
@@ -222,7 +258,7 @@ router.get('/', (req, res) => {
       url: `${origin}/?preview=1#${center.id}`,
     },
     parent: result.parent ? withUrl(result.parent) : null,
-    neighbors: result.neighbors.map(withUrl),
+    neighbors: refCards.concat(result.neighbors.map(withUrl)),
   });
 });
 

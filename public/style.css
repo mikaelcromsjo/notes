@@ -728,7 +728,7 @@ button:hover { filter: brightness(1.05); }
   overflow-wrap: anywhere;
 }
 
-.cell.neighbor .unlink-btn {
+.cell.neighbor .relation-btn {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -740,7 +740,15 @@ button:hover { filter: brightness(1.05); }
   line-height: 1;
 }
 
-.cell.neighbor .unlink-btn:hover { color: var(--danger); }
+.cell.neighbor .relation-btn:hover { color: var(--accent); }
+
+/* A guessed (never explicitly marked) parent/child direction — dimmed so it
+   never reads as visually identical to a relationship the user actually
+   set. See linkRelationOf/RELATION_ICON in app.js. */
+.cell.neighbor .relation-btn.is-guessed,
+.cell.center .center-links-relation.is-guessed {
+  opacity: 0.55;
+}
 
 .cell.neighbor.nested {
   cursor: default;
@@ -872,7 +880,7 @@ button:hover { filter: brightness(1.05); }
   color: var(--accent);
 }
 
-.cell.center .center-links-x {
+.cell.center .center-links-relation {
   flex: 0 0 auto;
   background: transparent;
   border: none;
@@ -882,7 +890,7 @@ button:hover { filter: brightness(1.05); }
   line-height: 1;
 }
 
-.cell.center .center-links-x:hover { color: var(--danger); }
+.cell.center .center-links-relation:hover { color: var(--accent); }
 
 .cell.center .center-links-row.dimmed { opacity: 0.45; }
 
@@ -1246,6 +1254,7 @@ button:hover { filter: brightness(1.05); }
   margin: 0 0 1.2rem;
   font-size: 0.95rem;
   line-height: 1.45;
+  white-space: pre-line;
 }
 
 .picker-actions button.danger {
@@ -1985,7 +1994,8 @@ button:hover { filter: brightness(1.05); }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.5rem 0.75rem;
+  flex-wrap: wrap;
   padding: 0.5rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1996,6 +2006,22 @@ button:hover { filter: brightness(1.05); }
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+
+/* .session-row.multi-action (server/shares.js's per-space Open/Invite/Copy-
+   viewer-link rows, up to 3 buttons): the title takes its own full line, so
+   the buttons wrap onto a clean line below instead of overlapping it once
+   there isn't room for everything on one line. A plain single-button row
+   (e.g. "Sign out") doesn't get this class and keeps the original one-line
+   layout — it never needs to wrap. */
+.session-row.multi-action .session-meta {
+  flex: 1 1 100%;
+}
+
+.session-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
 }
 
 .session-name {
@@ -2100,6 +2126,32 @@ button:hover { filter: brightness(1.05); }
 
 .cell.neighbor.back .neighbor-title {
   color: var(--muted);
+}
+
+/* A cross-scope reference (server/shares.js's personal_refs) — never a real
+   link, so it gets its own subtle treatment rather than looking exactly like
+   an ordinary neighbor; the 🔗 in its title (app.js's makeNeighborCell) is
+   the primary marker, this is just a supporting border tint. */
+.cell.neighbor.ref-link {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.cell.neighbor.ref-link:hover {
+  border-style: solid;
+}
+
+/* A ref whose target space is gone (dissolved, or this member removed from
+   it) — kept rather than silently dropped (see server/shares.js's
+   dissolveShare/listRefsForNote), but there's nothing to open any more, so
+   it reads as inert rather than inviting a tap like a live reference does. */
+.cell.neighbor.ref-noaccess {
+  opacity: 0.5;
+  border-style: dotted;
+}
+
+.cell.neighbor.ref-noaccess:hover {
+  border-style: dotted;
 }
 
 /* Colour coding: a translucent tint set per cell from app.js. */

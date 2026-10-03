@@ -532,4 +532,113 @@ db.prepare(
   "DELETE FROM location_log WHERE recorded_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')"
 ).run();
 
+// --- Shared note spaces (server/shares.js) ---------------------------------
+// A share is an isolated space of notes+links, separate from any owner's
+// personal graph. Membership is an explicit, static fact (notes.share_id +
+// share_members below) — deliberately NEVER derived by walking the link
+// graph from a root note, because that boundary would be unstable: a private
+// note already links into most subtrees in a small graph (a day-one leak),
+// and any later link edit would silently grow what a viewer can reach (an
+// ongoing leak) with no action that looked like "sharing". See
+// docs/plan (shared-note-space plan) for the full reasoning.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS shares (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  -- role: 'owner' (the creator; can invite/remove members, manage the viewer
+  -- token) | 'editor' (can read/write notes+links in the share). A viewer has
+  -- no row here at all — see share_viewer_tokens below; viewer access is pure
+  -- token possession, never "membership".
+  CREATE TABLE IF NOT EXISTS share_members (
+    share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role     TEXT NOT NULL DEFAULT 'editor',
+    added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (share_id, user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_share_members_user ON share_members(user_id);
+
+  -- One raw (unhashed) opaque token per share — same trust model as
+  -- users.widget_token (server/widget-token.js): a read-only feed link, not
+  -- an auth secret guarding writes. One live viewer link per share; rotate to
+  -- invalidate.
+  CREATE TABLE IF NOT EXISTS share_viewer_tokens (
+    share_id   INTEGER PRIMARY KEY REFERENCES shares(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_share_viewer_tokens_token ON share_viewer_tokens(token);
+
+  -- Editor invite links: a parallel table to login_tokens (not a new
+  -- login_tokens "purpose", unlike account.js's 'delete-account') because an
+  -- invite needs share_id + role, which don't belong on every other purpose.
+  -- Same hash+consume-once idiom as login_tokens/routes/auth.js.
+  CREATE TABLE IF NOT EXISTS share_invites (
+    token_hash  TEXT PRIMARY KEY,
+    share_id    INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    email       TEXT NOT NULL,
+    role        TEXT NOT NULL DEFAULT 'editor',
+    invited_by  INTEGER NOT NULL REFERENCES users(id),
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    consumed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_share_invites_share ON share_invites(share_id);
+
+  -- Cross-scope reference: a personal note pointing at a shared note (or vice
+  -- versa) is NEVER a links row — see server/links.js's same-scope check.
+  -- Every reader of this table filters on user_id = the requesting user,
+  -- always (server/shares.js's listRefsForNote); that IS the leak guard, not
+  -- a permission check layered on top of a shared query.
+  CREATE TABLE IF NOT EXISTS personal_refs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    personal_note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    share_id         INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    shared_note_id   INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE(user_id, personal_note_id, shared_note_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_personal_refs_personal ON personal_refs(user_id, personal_note_id);
+  CREATE INDEX IF NOT EXISTS idx_personal_refs_shared ON personal_refs(user_id, shared_note_id);
+`);
+
+// notes.share_id: NULL = personal (unchanged behaviour, the default for every
+// existing row). Once set, that row's user_id becomes creator provenance
+// only — access is resolved via share_members, never user_id (see
+// server/shares.js's resolveNoteAccess).
+const shareNoteColumns = db.prepare('PRAGMA table_info(notes)').all();
+if (!shareNoteColumns.some((c) => c.name === 'share_id')) {
+  db.exec('ALTER TABLE notes ADD COLUMN share_id INTEGER REFERENCES shares(id)');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_notes_share ON notes(share_id)');
+
+// The user's explicitly marked "graph root" — a stable anchor for
+// server/hierarchy.js's rootedDescendants (used by server/shares.js's
+// candidateLineage to decide what "share this note" actually pulls in).
+// NULL = fall back to the same inferred "most globally significant note" as
+// probableRoot (server/notes.js's getRootNote).
+if (!userCols.some((c) => c.name === 'root_note_id')) {
+  db.exec('ALTER TABLE users ADD COLUMN root_note_id INTEGER REFERENCES notes(id)');
+}
+
+// Per-link classification: 'child' (a real parent-child edge — treat it as
+// hierarchy) | 'cross' (a lateral reference between two already-connected
+// areas — never treat it as hierarchy, no matter how the graph reshapes
+// around it) | NULL (unmarked — let server/hierarchy.js's buildRootedTree
+// guess dynamically, the original behavior). Guessed once at link-creation
+// time (server/links.js's create/guessLinkKind, server/notes.js's
+// create/createAttachmentNote) and user-correctable afterward
+// (PUT /api/links/kind) — a stored, stable verdict instead of an
+// always-recomputed one, so it can't silently flip as the graph reshapes
+// around it, and a wrong guess only needs fixing once.
+const linksCols = db.prepare('PRAGMA table_info(links)').all();
+if (!linksCols.some((c) => c.name === 'kind')) {
+  db.exec('ALTER TABLE links ADD COLUMN kind TEXT');
+}
+
 module.exports = db;

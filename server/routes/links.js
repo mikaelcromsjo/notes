@@ -26,4 +26,11 @@ router.post('/', wrap((req) => linksCore.create(db, req.userId, req.body), 201))
 
 router.delete('/', wrap((req) => linksCore.remove(db, req.userId, req.body), 204));
 
+// User-correctable override for how a link is treated for hierarchy
+// purposes ('child'/'cross'/'auto') — see server/links.js's setRelation.
+// Declared after '/' (not a collision either way — different path shapes —
+// but keeps this file's route order matching its rough "specific action
+// after the base CRUD" convention).
+router.put('/relation', wrap((req) => linksCore.setRelation(db, req.userId, req.body)));
+
 module.exports = router;

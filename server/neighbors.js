@@ -1,4 +1,5 @@
 const db = require('./db');
+const { scopeClause } = require('./hierarchy');
 
 // --- "Probable next step" / "probable parent" scoring ---------------------
 // A nav event's weight halves every HALF_LIFE_DAYS so ranking follows recent
@@ -16,57 +17,94 @@ const decaySum = `SUM(pow(0.5, (julianday('now') - julianday(created_at)) / ${HA
 // transition" weight and could point "back" at whichever note you happened
 // to arrive from, rather than the note's actual place in the hierarchy.
 //
-// Shared by the session-authed GET /api/notes/:id/neighbors (routes/notes.js)
-// and the token-authed GET /api/widget (routes/widget.js) — one definition of
-// "probable parent"/"probable next step" so the widget's grid genuinely
-// matches the app's, not a separately-tuned approximation of it.
+// `scope` is { userId } (a personal graph, share_id IS NULL) or { shareId }
+// (a shared space's own graph) — see server/hierarchy.js's scopeClause and
+// server/shares.js. It decides which notes/links are visible; it is NOT who
+// the ranking is personal to.
 //
-// Returns null if `id` isn't a note the user owns. Shape otherwise:
+// `rankUserId` is whose nav_events to rank by — always a real viewing user
+// for the session-authed GET /api/notes/:id/neighbors (routes/notes.js) and
+// GET /api/widget (routes/widget.js), even when `scope` is a shared space:
+// two collaborators looking at the same shared note each get their own
+// "probable next step" ordering, exactly as the "personal metadata stays
+// per-user" rule requires. It's `null` for the token-authed, account-less
+// shared-space viewer (routes/shares.js) — nothing to rank by, so ranking
+// falls back to the same cold-start link-recency order used before any
+// nav_events exist. Defaults to scope.userId, which makes every pre-existing
+// personal call site work unchanged.
+//
+// Shared by the session-authed GET /api/notes/:id/neighbors (routes/notes.js),
+// the token-authed GET /api/widget (routes/widget.js), and the token-authed
+// shared-space viewer (routes/shares.js) — one definition of "probable
+// parent"/"probable next step" for all three.
+//
+// Returns null if `id` isn't a note in `scope`. Shape otherwise:
 // { parent: <row|null>, neighbors: [<row with .p and .score>], linkCount, links }
-function computeNeighbors(uid, id) {
+// `skipStructuralFallback` (server/notes.js's neighbors(), for the note the
+// user has explicitly marked as their graph root — server/notes.js's
+// getRootNote/setRootNote): a root has no parent, full stop, so it should
+// never get a *guessed* one either — explicit created_from_note_id (if
+// somehow set anyway) still wins, only the oldest-surviving-link guess is
+// suppressed. Never set for the auto-*inferred* root (no explicit marking):
+// that's itself a heuristic, and suppressing its guess too would compound
+// one heuristic's mistake with another.
+function computeNeighbors(scope, id, rankUserId = scope.userId ?? null, { skipStructuralFallback = false } = {}) {
+  const centerClause = scopeClause(scope);
   const center = db
-    .prepare('SELECT id, created_from_note_id FROM notes WHERE id = ? AND user_id = ?')
-    .get(id, uid);
+    .prepare(`SELECT id, created_from_note_id FROM notes WHERE id = ? AND ${centerClause.sql}`)
+    .get(id, ...centerClause.params);
   if (!center) return null;
 
+  const linkedClause = scopeClause(scope, 'n');
   const linked = db
     .prepare(
       `SELECT n.id, n.title, n.updated_at, n.type, n.attachment_path, n.status,
               n.created_from_note_id, n.created_at AS note_created_at,
-              l.created_at AS linked_at
+              l.created_at AS linked_at, l.kind AS link_kind
        FROM links l
        JOIN notes n ON n.id = CASE WHEN l.note_a = ? THEN l.note_b ELSE l.note_a END
-       WHERE (l.note_a = ? OR l.note_b = ?) AND n.user_id = ? AND n.status != 'deleted'
+       WHERE (l.note_a = ? OR l.note_b = ?) AND ${linkedClause.sql} AND n.status != 'deleted'
        ORDER BY l.created_at DESC`
     )
-    .all(id, id, id, uid);
+    .all(id, id, id, ...linkedClause.params);
 
   if (linked.length === 0) return { parent: null, neighbors: [], linkCount: 0, links: [] };
 
-  const links = linked.map((r) => ({ id: r.id, title: r.title, type: r.type, status: r.status }));
+  const links = linked.map((r) => ({
+    id: r.id,
+    title: r.title,
+    type: r.type,
+    status: r.status,
+    created_from_note_id: r.created_from_note_id,
+    link_kind: r.link_kind,
+  }));
 
   const weightMap = (rows) => new Map(rows.map((r) => [r.nid, r.w]));
 
-  const fwd = weightMap(
-    db
-      .prepare(
-        `SELECT to_note_id AS nid, ${decaySum} AS w
-         FROM nav_events WHERE user_id = ? AND from_note_id = ?
-         GROUP BY to_note_id`
+  const fwd = rankUserId
+    ? weightMap(
+        db
+          .prepare(
+            `SELECT to_note_id AS nid, ${decaySum} AS w
+             FROM nav_events WHERE user_id = ? AND from_note_id = ?
+             GROUP BY to_note_id`
+          )
+          .all(rankUserId, id)
       )
-      .all(uid, id)
-  );
+    : new Map();
   const fwdTotal = [...fwd.values()].reduce((s, w) => s + w, 0);
 
-  const pop = weightMap(
-    db
-      .prepare(
-        `SELECT to_note_id AS nid, ${decaySum} AS w
-         FROM nav_events WHERE user_id = ?
-         GROUP BY to_note_id`
+  const pop = rankUserId
+    ? weightMap(
+        db
+          .prepare(
+            `SELECT to_note_id AS nid, ${decaySum} AS w
+             FROM nav_events WHERE user_id = ?
+             GROUP BY to_note_id`
+          )
+          .all(rankUserId)
       )
-      .all(uid)
-  );
+    : new Map();
   const popMax = Math.max(1, ...pop.values());
 
   const n = linked.length;
@@ -98,7 +136,7 @@ function computeNeighbors(uid, id) {
   //    meaning it was born at the moment this link was made — the same
   //    "spawned via a `[[wikilink]]`" shape as created_from_note_id, just on
   //    notes old enough (or imported) to predate that column being recorded.
-  if (!parent) {
+  if (!parent && !skipStructuralFallback) {
     const candidates = scored.filter(
       (r) => r.created_from_note_id !== id && r.note_created_at !== r.linked_at
     );
@@ -122,15 +160,16 @@ function computeNeighbors(uid, id) {
     // tends to be a hub other notes also point to, which chronology alone
     // can't tell once the actual oldest link is gone.
     if (oldestSurvivor && skippedDone) {
+      const degreeClause = scopeClause(scope, 'x');
       const degreeRows = db
         .prepare(
           `SELECT nid, COUNT(*) AS deg FROM (
-             SELECT note_a AS nid FROM links WHERE user_id = ?
+             SELECT note_a AS nid FROM links l JOIN notes x ON x.id = l.note_a WHERE ${degreeClause.sql}
              UNION ALL
-             SELECT note_b AS nid FROM links WHERE user_id = ?
+             SELECT note_b AS nid FROM links l JOIN notes x ON x.id = l.note_b WHERE ${degreeClause.sql}
            ) GROUP BY nid`
         )
-        .all(uid, uid);
+        .all(...degreeClause.params, ...degreeClause.params);
       const degree = new Map(degreeRows.map((r) => [r.nid, r.deg]));
       const survivors = candidates.filter((r) => r.status !== 'done');
       survivors.sort((a, b) => {
