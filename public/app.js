@@ -3759,6 +3759,7 @@
       reqJson(`/api/shares/candidates?rootNoteId=${rootNoteId}`, 'GET'),
     createShare: (title, noteIds) => postJson('/api/shares', { title, noteIds }),
     addNoteToShare: (shareId, noteId) => postJson(`/api/shares/${shareId}/notes`, { noteId }),
+    removeNoteFromShare: (shareId, noteId) => reqJson(`/api/shares/${shareId}/notes/${noteId}`, 'DELETE'),
     inviteShareEditor: (shareId, email) => postJson(`/api/shares/${shareId}/invite`, { email }),
     // Idempotent — returns the existing link if one's already live, mints
     // one only if none exists. Use this for "copy the link" (a re-click
@@ -4091,6 +4092,35 @@
       })),
     ];
     openActionMenu(anchor, items);
+  }
+
+  // "Remove from space" (editor ➕ menu, only inside a space — replaces
+  // "Reference in a space…" there). Moves the note back to its author's
+  // personal graph (server/shares.js's removeNoteFromShare). Lands on it in
+  // personal notes when it's yours; otherwise re-enters the space.
+  async function removeFromSpaceFlow(note) {
+    const space = currentSpace;
+    if (!space) return;
+    const ok = await confirmDialog(
+      `Remove "${note.title}" from "${space.title}"?\n\nIt moves back to its author's personal notes; links to other notes in the space become references.`,
+      { confirmLabel: 'Remove' }
+    );
+    if (!ok) return;
+    let res;
+    try {
+      res = await api.removeNoteFromShare(space.id, note.id);
+    } catch (e) {
+      toast(e.message || "Couldn't remove this note from the space.");
+      return;
+    }
+    toast(`Removed from "${space.title}".`);
+    closeNoteFullscreen();
+    if (res && res.mine) {
+      await switchSpace(null);
+      await goTo(note.id, 'tab');
+    } else {
+      await switchSpace(space.id, space);
+    }
   }
 
   // "Reference in a space…" (editor ➕ menu, available either side — see its
@@ -6041,7 +6071,9 @@
         // "Share this note…" only outside a space — a shared note is already
         // shared; moving notes between two different shares isn't supported.
         ...(!currentSpace ? [{ label: '🔗 Share this note…', onClick: () => openShareFlow(addBtn, currentNote) }] : []),
-        { label: '📌 Reference in a space…', onClick: () => openRefFlow(addBtn, currentNote) },
+        currentSpace
+          ? { label: '📤 Remove from space', onClick: () => removeFromSpaceFlow(currentNote) }
+          : { label: '📌 Reference in a space…', onClick: () => openRefFlow(addBtn, currentNote) },
       ]);
     });
 
@@ -7019,7 +7051,8 @@
 
     syncGeofenceWatch();
     renderAlarmbar();
-    updateAgendaBadge(ringingIds.size);
+    // Nudges (kind='anytime') are soft — they don't count toward the 🔔 badge.
+    updateAgendaBadge(alarms.filter((a) => a.triggered && a.kind !== 'anytime').length);
     if (changed) {
       renderTabbar();
       renderPinbar();

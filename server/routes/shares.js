@@ -218,6 +218,14 @@ router.post(
   wrap((req) => sharesCore.addNoteToShare(db, req.userId, Number(req.params.id), req.body.noteId), 201)
 );
 
+// Moves one note back to its author's personal graph — see
+// sharesCore.removeNoteFromShare's doc comment.
+router.delete(
+  '/:id/notes/:noteId',
+  requireSession,
+  wrap((req) => sharesCore.removeNoteFromShare(db, req.userId, Number(req.params.id), Number(req.params.noteId)))
+);
+
 // inviteEditor sends mail (async); handled directly rather than through
 // `wrap` so a rejected promise can never escape uncaught (see routes/auth.js's
 // request-link handler for the same self-contained async try/catch shape).
