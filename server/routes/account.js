@@ -7,7 +7,7 @@ const AdmZip = require('adm-zip');
 const db = require('../db');
 const sessions = require('../sessions');
 const mailer = require('../mailer');
-const { uploadsDir } = require('../upload-config');
+const { uploadsDir, IMAGE_EXT, AUDIO_EXT, FILE_EXT } = require('../upload-config');
 const history = require('../history');
 const snapshots = require('../snapshots');
 
@@ -190,6 +190,10 @@ router.get('/export', (req, res) => {
     )
   );
 
+  // The exact copy a restore actually uses (server/snapshots.js) — data.json
+  // stays for reading / other tools and for restoring on older builds.
+  zip.addFile('account.db', snapshots.writeAccountDb(user.id));
+
   zip.addFile(
     'README.txt',
     Buffer.from(
@@ -200,9 +204,9 @@ notes/        One Markdown file per note. The YAML front-matter carries the
               metadata; a "## Links" list names the notes it connects to as
               [[wikilinks]]. Re-import this folder with Settings -> Import &
               export -> "Markdown folder" to rebuild the notes and the graph.
-attachments/  The image / audio files the notes reference.
-data.json     A complete machine-readable copy of everything stored for your
-              account - every column of every row - for backup or inspection.
+attachments/  The files the notes reference (images, audio, documents).
+account.db    The exact copy (SQLite) that Settings -> Restore from backup uses.
+data.json     The same data as JSON, for reading or other tools.
 
 Generated ${new Date().toISOString()}
 `,
@@ -218,15 +222,123 @@ Generated ${new Date().toISOString()}
   res.end(buf);
 });
 
-// --- POST /api/account/import ---------------------------------------------
-// Restore an export produced by GET /api/account/export: replaces THIS account's
-// graph (notes, links, tabs, reminders, nav history, undo log) with the snapshot
-// in the upload's data.json, re-linking every note reference to freshly assigned
-// ids and copying the bundled attachment files back into /uploads. This is the
-// lossless path — the per-note Markdown files are for reading / other tools.
+// --- Restore from a downloaded backup ---------------------------------------
+// POST /import/check (the .zip) stages the upload and reports what a restore
+// would do; POST /import/apply { token } does it. A zip with account.db
+// (every export since it was added) restores exactly through
+// server/snapshots.js and only writes the attachment files this server
+// doesn't already have; older zips / bare data.json fall back to the legacy
+// data.json importer below (not exact). Either way a server snapshot is
+// taken first, so the restore is undoable. 1 GB cap here — nginx's
+// client_max_body_size for this site must allow it too.
+// Uploads land straight in snapshots/staging (same filesystem as the
+// database, so staging is a rename, never a cross-device copy).
 const restoreUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 60 * 1024 * 1024 },
+  dest: snapshots.stagingDir,
+  limits: { fileSize: 1024 * 1024 * 1024 },
+});
+const RESTORE_FILE_EXT = new Set([...Object.values(IMAGE_EXT), ...Object.values(AUDIO_EXT), ...Object.values(FILE_EXT), '.jpeg']);
+
+// What the legacy importer can't bring back (shown before a legacy restore).
+const LEGACY_LOSSES = [
+  'notes in shared spaces come back as private notes',
+  'cross-space references are dropped',
+  'note themes, nudge time windows, link types and encrypted locations are lost',
+  'attached files other than images/audio are not restored',
+];
+
+function zipOf(filePath) {
+  try {
+    return new AdmZip(filePath);
+  } catch {
+    return null; // not a zip — maybe a bare data.json
+  }
+}
+
+router.post('/import/check', restoreUpload.single('file'), (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  if (!req.file) return res.status(400).json({ error: 'a backup .zip is required' });
+  const token = snapshots.stageUpload(req.userId, req.file.path);
+  const staged = snapshots.stagedPath(req.userId, token);
+  const zip = zipOf(staged);
+  const entry = zip && zip.getEntry('account.db');
+  if (!entry) return res.json({ token, exact: false, losses: LEGACY_LOSSES });
+
+  const tmp = snapshots.scratchPath('check');
+  try {
+    fs.writeFileSync(tmp, entry.getData(), { mode: 0o600 });
+    const analysis = snapshots.analyzeFile(req.userId, tmp);
+    const referenced = snapshots.referencedUploads(tmp);
+    const inZip = new Set(zip.getEntries().filter((e) => e.entryName.startsWith('attachments/')).map((e) => path.basename(e.entryName)));
+    const missingOnServer = [...referenced].filter((f) => !fs.existsSync(path.join(uploadsDir, f)));
+    res.json({
+      token,
+      exact: true,
+      ...analysis,
+      files: { referenced: referenced.size, toWrite: missingOnServer.filter((f) => inZip.has(f)).length, unavailable: missingOnServer.filter((f) => !inZip.has(f)).length },
+    });
+  } catch (err) {
+    snapshots.dropStaged(req.userId, token);
+    res.status(400).json({ error: `could not read the backup: ${err.message}` });
+  } finally {
+    fs.unlink(tmp, () => {});
+  }
+});
+
+router.post('/import/apply', express.json(), (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  const token = req.body && req.body.token;
+  const staged = snapshots.stagedPath(req.userId, token);
+  if (!staged) return res.status(404).json({ error: 'that upload has expired — choose the file again' });
+  const zip = zipOf(staged);
+  const entry = zip && zip.getEntry('account.db');
+
+  if (!entry) {
+    // Legacy: hand the staged file to the data.json importer.
+    req.file = { buffer: fs.readFileSync(staged), originalname: 'backup', mimetype: zip ? 'application/zip' : 'application/json' };
+    snapshots.dropStaged(req.userId, token);
+    return legacyImport(req, res);
+  }
+
+  const tmp = snapshots.scratchPath('apply');
+  try {
+    fs.writeFileSync(tmp, entry.getData(), { mode: 0o600 });
+    snapshots.analyzeFile(req.userId, tmp); // validates before anything changes
+    let before;
+    try {
+      before = snapshots.takeSnapshot(req.userId, 'pre-restore');
+    } catch (err) {
+      console.error('[account] pre-restore snapshot failed:', err && err.message);
+      return res.status(500).json({ error: 'could not save a snapshot of your current notes first — nothing was changed' });
+    }
+    // Only files the restored notes point at, only if missing here, only
+    // allowlisted extensions, same name (the notes refer to it by name).
+    let filesWritten = 0;
+    const referenced = snapshots.referencedUploads(tmp);
+    for (const e of zip.getEntries()) {
+      if (e.isDirectory || !e.entryName.startsWith('attachments/')) continue;
+      const base = path.basename(e.entryName);
+      if (!referenced.has(base) || !/^[A-Za-z0-9._-]+$/.test(base) || !RESTORE_FILE_EXT.has(path.extname(base).toLowerCase())) continue;
+      const dest = path.join(uploadsDir, base);
+      if (fs.existsSync(dest)) continue;
+      fs.writeFileSync(dest, e.getData());
+      filesWritten++;
+    }
+    const result = snapshots.restoreFromFile(req.userId, tmp, { untrusted: true });
+    const historyId = history.record(
+      req.userId,
+      'restore',
+      { before, after: null },
+      `Restored backup (${result.restored.notes} notes)`
+    );
+    res.json({ ok: true, exact: true, ...result, restored: { ...result.restored, attachments: filesWritten }, historyId });
+  } catch (err) {
+    console.error('[account] restore failed:', err && err.message);
+    res.status(500).json({ error: `restore failed and was rolled back: ${err.message}` });
+  } finally {
+    fs.unlink(tmp, () => {});
+    snapshots.dropStaged(req.userId, token);
+  }
 });
 
 // Extensions we are willing to write back under /uploads (mirrors the upload
@@ -270,7 +382,18 @@ function parseSnapshot(file) {
   return { json, attachments };
 }
 
+// Kept for clients still running the previous build (one-step legacy restore).
 router.post('/import', restoreUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'a .zip or data.json file is required' });
+  const tmpPath = req.file.path;
+  req.file.buffer = fs.readFileSync(tmpPath);
+  fs.unlink(tmpPath, () => {});
+  legacyImport(req, res);
+});
+
+// The data.json importer: rebuilds the graph from the JSON with new ids. Not
+// exact (see LEGACY_LOSSES) — only used for backups without account.db.
+function legacyImport(req, res) {
   if (!req.userId) return res.status(401).json({ error: 'no active session' });
   if (!req.file) return res.status(400).json({ error: 'a .zip or data.json file is required' });
 
@@ -456,7 +579,7 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
     `Restored backup "${req.file.originalname || 'backup'}" (${counts.notes} notes)`
   );
   res.json({ ok: true, restored: counts, historyId });
-});
+}
 
 // --- Server backups (exact snapshots, see server/snapshots.js) -------------
 // Unlike the .zip download these are lossless (every column of every row,
@@ -478,6 +601,17 @@ router.post('/snapshots', (req, res) => {
   } catch (err) {
     console.error('[account] snapshot failed:', err && err.message);
     res.status(500).json({ error: 'could not create the backup' });
+  }
+});
+
+// What restoring it would do (an older snapshot may lack newer columns).
+router.get('/snapshots/:id/check', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  if (!snapshots.ownsSnapshot(req.userId, req.params.id)) return res.status(404).json({ error: 'backup not found' });
+  try {
+    res.json(snapshots.analyzeSnapshot(req.userId, req.params.id));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

@@ -536,14 +536,14 @@
             </div>
 
             <label class="settings-label settings-btn-row-spaced" for="snapshot-create-btn">Server backups</label>
-            <p class="settings-desc"><strong>Exact</strong> copies kept on this server: every note, link, space, reference, reminder, theme and setting, as they are now. Restoring one replaces what's here and can be undone. Attachment files aren't copied — they stay on the server as long as a note or backup points at them. The last 10 you create are kept, plus 10 made automatically before each restore.</p>
+            <p class="settings-desc">Exact copies kept on this server: every note, link, space, reference, reminder, theme and setting, as they are now. Restoring one replaces what's here and can be undone. Attachment files aren't copied — they stay on the server. The last 10 you create are kept, plus 10 made automatically before each restore.</p>
             <div class="settings-btn-row">
               <button id="snapshot-create-btn" class="secondary">Create backup</button>
             </div>
             <div class="session-list" id="snapshot-list"></div>
 
             <label class="settings-label settings-btn-row-spaced" for="export-btn">Download &amp; restore</label>
-            <p class="settings-desc">Download a .zip to keep off this server: readable Markdown per note, the attachment files, and <code>data.json</code>. <strong>Restore from it is not exact</strong>: notes in shared spaces come back as private notes, cross-space references are dropped, attached files other than images/audio (PDFs etc.) aren't brought back, and some newer settings (note themes, nudge time windows, link types) are lost. It replaces what's here now; a server backup is taken first, so it can be undone. Use server backups for an exact restore.</p>
+            <p class="settings-desc">Download a .zip to keep off this server: an exact copy of your account plus all attachment files, and readable Markdown per note. Restoring it replaces what's here now — exactly, on this server; only files the server is missing are written back. A server backup is taken first, so a restore can be undone. Backups downloaded before this version restore without spaces, references and some settings (you'll be told before anything changes).</p>
             <div class="settings-btn-row">
               <button id="export-btn" class="secondary">Download backup (.zip)</button>
               <button id="restore-btn" class="secondary danger">Restore from backup…</button>

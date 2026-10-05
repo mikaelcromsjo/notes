@@ -10909,8 +10909,17 @@
       restore.className = 'secondary';
       restore.textContent = 'Restore';
       restore.addEventListener('click', async () => {
+        let warnings = [];
+        try {
+          warnings = restoreWarnings({ exact: true, ...(await reqJson(`/api/account/snapshots/${encodeURIComponent(s.id)}/check`, 'GET')) });
+        } catch {
+          toast("Couldn't read that backup.");
+          return;
+        }
         const ok = await confirmDialog(
-          `Restore the server backup from ${name.textContent}?\n\nEverything in this account is replaced with that backup — anything made since disappears.\n\nWhat's here now is backed up first, so you can undo this afterwards.`,
+          `Restore the server backup from ${name.textContent}?\n\nEverything in this account is replaced with that backup — anything made since disappears.` +
+            (warnings.length ? `\n\n⚠ ${warnings.join('\n\n⚠ ')}` : '') +
+            `\n\nWhat's here now is backed up first, so you can undo this afterwards.`,
           { confirmLabel: 'Restore', danger: true }
         );
         if (!ok) return;
@@ -11204,23 +11213,65 @@
   });
 
   restoreBtn.addEventListener('click', () => restoreFile.click());
+  // Warnings for a restore, from the server's analysis (server/snapshots.js's
+  // analyze, or the legacy importer's `losses`) — one line each.
+  function restoreWarnings(a) {
+    const out = [];
+    if (!a.exact && a.losses) {
+      out.push(`This is an older backup without an exact copy, so it is NOT restored exactly: ${a.losses.join('; ')}.`);
+      return out;
+    }
+    const cols = Object.entries(a.missingColumns || {}).map(([t, c]) => `${t}: ${c.join(', ')}`);
+    if (cols.length || (a.missingTables || []).length) {
+      out.push(
+        `This backup was made by an older version. What it didn't store yet comes back empty/default — ${[
+          ...cols,
+          ...(a.missingTables || []).map((t) => `${t} (none)`),
+        ].join('; ')}.`
+      );
+    }
+    if (a.leavingSpaces) out.push(`${a.leavingSpaces} note(s) were in shared spaces you're no longer in — they come back as private notes.`);
+    if (a.remap) out.push('This backup is from another account or server: notes get new ids and the undo history in it is not restored.');
+    if (a.files && a.files.unavailable) out.push(`${a.files.unavailable} attachment file(s) are neither in the backup nor on the server — those notes will show the file as missing.`);
+    return out;
+  }
+
+  // .zip restore: upload once to check (the server stages it and says what
+  // the restore would do), confirm with those warnings, then apply.
   restoreFile.addEventListener('change', async () => {
     const file = restoreFile.files[0];
     if (!file) return;
     restoreFile.value = '';
-    const ok = await confirmDialog(
-      `Restore from "${file.name}"?\n\nThis REPLACES every note, link, tab, reminder and attachment in this account with the backup — anything made since that backup disappears.\n\nA .zip restore is not exact: notes in shared spaces come back private, cross-space references are dropped, and some settings are lost. For an exact restore use a server backup.\n\nWhat's here now is backed up on the server first, so you can undo the restore afterwards (from the toast after reloading, or the ↩ history panel).`,
-      { confirmLabel: 'Replace everything', danger: true }
-    );
-    if (!ok) return;
     restoreBtn.disabled = true;
-    restoreStatus.textContent = 'Restoring…';
+    restoreStatus.textContent = `Uploading “${file.name}”…`;
     try {
       const fd = new FormData();
       fd.set('file', file);
-      const res = await fetch('/api/account/import', { method: 'POST', body: fd });
-      const body = await res.json().catch(() => ({}));
+      const res = await fetch('/api/account/import/check', { method: 'POST', body: fd });
+      const check = await res.json().catch(() => ({}));
       if (!res.ok) {
+        restoreStatus.textContent =
+          check.error || (res.status === 413 ? 'That file is larger than the server accepts.' : 'Could not read that backup.');
+        return;
+      }
+      restoreStatus.textContent = '';
+      const warnings = restoreWarnings(check);
+      const when = check.createdAt ? ` (made ${new Date(check.createdAt).toLocaleString()})` : '';
+      const ok = await confirmDialog(
+        `Restore from “${file.name}”${when}?\n\nThis REPLACES every note, link, tab, reminder and attachment in this account with the backup — anything made since disappears.` +
+          (warnings.length ? `\n\n⚠ ${warnings.join('\n\n⚠ ')}` : '') +
+          `\n\nWhat's here now is backed up on the server first, so you can undo this afterwards.`,
+        { confirmLabel: 'Replace everything', danger: true }
+      );
+      if (!ok) return;
+      restoreStatus.textContent = 'Restoring…';
+      const ar = await fetch('/api/account/import/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: check.token }),
+      });
+      const body = await ar.json().catch(() => ({}));
+      if (!ar.ok) {
         restoreStatus.textContent = body.error || 'Restore failed.';
         return;
       }
@@ -11230,8 +11281,8 @@
         sessionStorage.setItem('nico-restore-undo', String(body.historyId));
       } catch {}
       setTimeout(() => location.reload(), 1200);
-    } catch {
-      restoreStatus.textContent = 'Restore failed.';
+    } catch (e) {
+      restoreStatus.textContent = (e && e.message) || 'Restore failed.';
     } finally {
       restoreBtn.disabled = false;
     }
