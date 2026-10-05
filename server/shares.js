@@ -578,6 +578,10 @@ function removeMember(db, userId, shareId, targetUserId) {
 // to this space" outcome listRefsForNote surfaces for it below, rather
 // than the ref silently vanishing (or the delete failing outright once
 // foreign_keys=ON had something left to enforce against it).
+// A link *inside* the space between notes of two different owners can't
+// survive: once both are personal it would join two accounts' private
+// graphs (never valid — no route can show or remove it). Those are dropped;
+// there's no space left for them to become a reference into.
 function dissolveShare(db, userId, shareId) {
   requireOwnerOf(shareId, userId);
   const share = db.prepare('SELECT title FROM shares WHERE id = ?').get(shareId);
@@ -593,6 +597,15 @@ function dissolveShare(db, userId, shareId) {
          WHERE pr.share_id = ?`
       )
       .all(shareId);
+
+    db.prepare(
+      `DELETE FROM links WHERE rowid IN (
+         SELECT l.rowid FROM links l
+         JOIN notes na ON na.id = l.note_a
+         JOIN notes nb ON nb.id = l.note_b
+         WHERE na.share_id = ? AND nb.share_id = ? AND na.user_id != nb.user_id
+       )`
+    ).run(shareId, shareId);
 
     db.prepare('UPDATE notes SET share_id = NULL WHERE share_id = ?').run(shareId);
 
