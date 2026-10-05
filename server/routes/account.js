@@ -458,6 +458,54 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
   res.json({ ok: true, restored: counts, historyId });
 });
 
+// --- Server backups (exact snapshots, see server/snapshots.js) -------------
+// Unlike the .zip download these are lossless (every column of every row,
+// spaces and references included) but live on this server — they don't
+// contain the attachment files themselves, which stay in /uploads.
+router.get('/snapshots', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  res.json(snapshots.listSnapshots(req.userId));
+});
+
+router.post('/snapshots', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  if (rateLimited(`snapshot:${req.userId}`, 10, 60 * 60 * 1000)) {
+    return res.status(429).json({ error: 'too many backups — try again later' });
+  }
+  try {
+    const id = snapshots.takeSnapshot(req.userId, 'manual');
+    res.status(201).json(snapshots.listSnapshots(req.userId).find((s) => s.id === id));
+  } catch (err) {
+    console.error('[account] snapshot failed:', err && err.message);
+    res.status(500).json({ error: 'could not create the backup' });
+  }
+});
+
+// Restore = same undoable swap as undoing a .zip restore: snapshot what's
+// here now (the undo point), load the chosen one, record a 'restore' entry.
+router.post('/snapshots/:id/restore', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  const id = req.params.id;
+  if (!snapshots.ownsSnapshot(req.userId, id)) return res.status(404).json({ error: 'backup not found' });
+  let before;
+  try {
+    before = snapshots.takeSnapshot(req.userId, 'pre-restore');
+    snapshots.restoreUserFromSnapshot(req.userId, id);
+  } catch (err) {
+    console.error('[account] snapshot restore failed:', err && err.message);
+    return res.status(500).json({ error: `restore failed and was rolled back: ${err.message}` });
+  }
+  const when = new Date(Number(id.split('-')[1])).toISOString().slice(0, 16).replace('T', ' ');
+  const historyId = history.record(req.userId, 'restore', { before, after: null }, `Restored server backup from ${when} UTC`);
+  res.json({ ok: true, historyId });
+});
+
+router.delete('/snapshots/:id', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  if (!snapshots.deleteSnapshot(req.userId, req.params.id)) return res.status(404).json({ error: 'backup not found' });
+  res.status(204).end();
+});
+
 // --- Account deletion: emailed-link re-auth --------------------------------
 // POST /api/account/delete-request  -> mails a one-time confirmation link
 // GET  /api/account/delete-confirm  -> the link; performs the irreversible wipe

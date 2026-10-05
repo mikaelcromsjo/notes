@@ -126,6 +126,8 @@
   const restoreBtn = document.getElementById('restore-btn');
   const restoreFile = document.getElementById('restore-file');
   const restoreStatus = document.getElementById('restore-status');
+  const snapshotCreateBtn = document.getElementById('snapshot-create-btn');
+  const snapshotList = document.getElementById('snapshot-list');
   const sessionList = document.getElementById('session-list');
   const sessionRevokeOthersBtn = document.getElementById('session-revoke-others-btn');
   const accountCloseBtn = document.getElementById('account-close-btn');
@@ -10795,6 +10797,7 @@
     renderEncryptionPanel();
     renderSharesSection();
     renderRootNoteSection();
+    renderSnapshots();
     accountOverlay.classList.remove('hidden');
   });
 
@@ -10866,6 +10869,92 @@
       sessionList.append(row);
     }
   }
+
+  // --- Server backups (Account → Backup) -----------------------------------
+  // Exact snapshots (server/snapshots.js) — create, restore (undoable: the
+  // server snapshots the current state first and records a 'restore'
+  // history entry, offered as a toast after the reload), delete.
+  const SNAPSHOT_KIND = {
+    manual: 'Backup',
+    'pre-restore': 'Automatic — before a restore',
+    'post-restore': 'Automatic — before an undo',
+  };
+  async function renderSnapshots() {
+    snapshotList.textContent = 'Loading…';
+    let rows = [];
+    try {
+      rows = await reqJson('/api/account/snapshots', 'GET');
+    } catch {
+      snapshotList.textContent = 'Server backups need a connection.';
+      return;
+    }
+    snapshotList.innerHTML = '';
+    if (!rows.length) {
+      snapshotList.textContent = 'No server backups yet.';
+      return;
+    }
+    for (const s of rows) {
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      const name = document.createElement('span');
+      name.className = 'session-name';
+      name.textContent = new Date(s.createdAt).toLocaleString();
+      const sub = document.createElement('span');
+      sub.className = 'session-sub';
+      sub.textContent = `${SNAPSHOT_KIND[s.kind] || s.kind} · ${(s.bytes / 1e6).toFixed(1)} MB`;
+      meta.append(name, sub);
+      const restore = document.createElement('button');
+      restore.className = 'secondary';
+      restore.textContent = 'Restore';
+      restore.addEventListener('click', async () => {
+        const ok = await confirmDialog(
+          `Restore the server backup from ${name.textContent}?\n\nEverything in this account is replaced with that backup — anything made since disappears.\n\nWhat's here now is backed up first, so you can undo this afterwards.`,
+          { confirmLabel: 'Restore', danger: true }
+        );
+        if (!ok) return;
+        restore.disabled = true;
+        try {
+          const res = await postJson(`/api/account/snapshots/${encodeURIComponent(s.id)}/restore`, {});
+          try {
+            sessionStorage.setItem('nico-restore-undo', String(res.historyId));
+          } catch {}
+          location.reload();
+        } catch (e) {
+          restore.disabled = false;
+          toast(e.message || 'Restore failed.');
+        }
+      });
+      const del = document.createElement('button');
+      del.className = 'secondary';
+      del.textContent = 'Delete';
+      del.addEventListener('click', async () => {
+        if (!(await confirmDialog(`Delete the server backup from ${name.textContent}?`, { confirmLabel: 'Delete', danger: true }))) return;
+        try {
+          await reqJson(`/api/account/snapshots/${encodeURIComponent(s.id)}`, 'DELETE');
+        } catch {
+          toast("Couldn't delete that backup.");
+        }
+        renderSnapshots();
+      });
+      row.append(meta, restore, del);
+      snapshotList.append(row);
+    }
+  }
+
+  snapshotCreateBtn.addEventListener('click', async () => {
+    snapshotCreateBtn.disabled = true;
+    try {
+      await postJson('/api/account/snapshots', {});
+      toast('Backup created.');
+    } catch (e) {
+      toast(e.httpStatus === 429 ? 'Too many backups — try again later.' : "Couldn't create a backup.");
+    } finally {
+      snapshotCreateBtn.disabled = false;
+    }
+    renderSnapshots();
+  });
 
   // --- Home note (Account → Account section) ------------------------------
   // A switch, not buttons: the underlying fact is exactly one boolean
@@ -11120,7 +11209,7 @@
     if (!file) return;
     restoreFile.value = '';
     const ok = await confirmDialog(
-      `Restore from "${file.name}"?\n\nThis REPLACES every note, link, tab, reminder and attachment in this account with the backup — anything made since that backup disappears.\n\nA snapshot of everything as it is now is saved first, so you can undo the restore afterwards (from the toast after reloading, or the ↩ history panel).`,
+      `Restore from "${file.name}"?\n\nThis REPLACES every note, link, tab, reminder and attachment in this account with the backup — anything made since that backup disappears.\n\nA .zip restore is not exact: notes in shared spaces come back private, cross-space references are dropped, and some settings are lost. For an exact restore use a server backup.\n\nWhat's here now is backed up on the server first, so you can undo the restore afterwards (from the toast after reloading, or the ↩ history panel).`,
       { confirmLabel: 'Replace everything', danger: true }
     );
     if (!ok) return;

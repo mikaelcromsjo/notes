@@ -9,8 +9,17 @@ const fs = require('fs');
 const path = require('path');
 const db = require('./db');
 
+// Per account and per kind: 'manual' (Settings -> "Create backup") and the
+// automatic ones a restore takes (pre-/post-restore) are pruned separately,
+// so restoring a few times can never push out a backup the user made.
 const SNAPSHOTS_KEPT = 10;
+const FILE_RE = /^(\d+)-(\d+)-(manual|pre-restore|post-restore)\.db$/;
 const dir = path.join(path.dirname(db.name), 'snapshots');
+
+function parseName(file) {
+  const m = FILE_RE.exec(path.basename(String(file)));
+  return m ? { userId: Number(m[1]), at: Number(m[2]), label: m[3] } : null;
+}
 
 function snapshotPath(file) {
   return path.join(dir, path.basename(String(file)));
@@ -34,9 +43,41 @@ function takeSnapshot(userId, label) {
 function prune(userId) {
   const mine = fs
     .readdirSync(dir)
-    .filter((f) => f.startsWith(`${userId}-`) && f.endsWith('.db'))
-    .sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1]));
-  for (const f of mine.slice(SNAPSHOTS_KEPT)) fs.unlink(path.join(dir, f), () => {});
+    .map((f) => ({ f, info: parseName(f) }))
+    .filter((x) => x.info && x.info.userId === userId)
+    .sort((a, b) => b.info.at - a.info.at);
+  for (const manual of [true, false]) {
+    const group = mine.filter((x) => (x.info.label === 'manual') === manual);
+    for (const { f } of group.slice(SNAPSHOTS_KEPT)) fs.unlink(path.join(dir, f), () => {});
+  }
+}
+
+// This account's snapshots, newest first: { id (the file name), kind, createdAt, bytes }.
+function listSnapshots(userId) {
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .map((f) => ({ f, info: parseName(f) }))
+    .filter((x) => x.info && x.info.userId === userId)
+    .sort((a, b) => b.info.at - a.info.at)
+    .map(({ f, info }) => ({
+      id: f,
+      kind: info.label,
+      createdAt: new Date(info.at).toISOString(),
+      bytes: fs.statSync(path.join(dir, f)).size,
+    }));
+}
+
+// A snapshot id from a client is only usable if it's one of this user's.
+function ownsSnapshot(userId, file) {
+  const info = parseName(file);
+  return Boolean(info && info.userId === userId && path.basename(String(file)) === String(file) && snapshotExists(file));
+}
+
+function deleteSnapshot(userId, file) {
+  if (!ownsSnapshot(userId, file)) return false;
+  fs.unlinkSync(snapshotPath(file));
+  return true;
 }
 
 function commonCols(table) {
@@ -129,4 +170,11 @@ function restoreUserFromSnapshot(userId, file) {
   }
 }
 
-module.exports = { takeSnapshot, restoreUserFromSnapshot, snapshotExists };
+module.exports = {
+  takeSnapshot,
+  restoreUserFromSnapshot,
+  snapshotExists,
+  listSnapshots,
+  ownsSnapshot,
+  deleteSnapshot,
+};
