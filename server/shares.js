@@ -72,9 +72,13 @@ function candidateLineage(db, userId, rootNoteId) {
   }
 
   let ids = null;
+  let parentOf = null; // id -> parent id within the tree, for the client's indented checklist
   if (graphRootId != null) {
     const rooted = rootedDescendants(userId, graphRootId, rootNoteId);
-    if (rooted) ids = rooted.ids;
+    if (rooted) {
+      ids = rooted.ids;
+      parentOf = rooted.parentOf;
+    }
   }
 
   if (!ids) {
@@ -91,6 +95,7 @@ function candidateLineage(db, userId, rootNoteId) {
       childrenOf.get(n.created_from_note_id).push(n.id);
     }
     ids = [rootNoteId, ...subtreeIds(childrenOf, rootNoteId)];
+    parentOf = new Map(rows.map((n) => [n.id, n.created_from_note_id]));
   }
 
   const placeholders = ids.map(() => '?').join(',');
@@ -101,7 +106,15 @@ function candidateLineage(db, userId, rootNoteId) {
       .map((n) => [n.id, n])
   );
   return {
-    notes: ids.map((id) => byId.get(id)).filter(Boolean).map((n) => ({ id: n.id, title: n.title, status: n.status })),
+    notes: ids
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((n) => ({
+        id: n.id,
+        title: n.title,
+        status: n.status,
+        parentId: n.id === rootNoteId ? null : parentOf.get(n.id) ?? null,
+      })),
   };
 }
 
@@ -119,6 +132,7 @@ function createShare(db, userId, { title, noteIds }) {
     if (role !== 'owner' || note.share_id != null) throw new HttpError(404, 'not found');
   }
 
+  let droppedLinks = [];
   const shareId = db.transaction(() => {
     const info = db
       .prepare('INSERT INTO shares (title, created_by, created_at) VALUES (?, ?, ?)')
@@ -127,12 +141,17 @@ function createShare(db, userId, { title, noteIds }) {
     db.prepare(
       'INSERT INTO share_members (share_id, user_id, role, added_at) VALUES (?, ?, ?, ?)'
     ).run(id, userId, 'owner', nowIso());
-    moveNotesIntoShare(db, userId, id, ids);
+    droppedLinks = moveNotesIntoShare(db, userId, id, ids);
     return id;
   })();
 
-  history.record(userId, 'create', { noteId: null }, `Shared "${t}"`);
-  return getShare(db, userId, shareId);
+  const historyId = history.record(
+    userId,
+    'share',
+    { shareId: Number(shareId), noteIds: ids, created: true, droppedLinks },
+    `Shared ${ids.length} note${ids.length === 1 ? '' : 's'} into new space "${t}"`
+  );
+  return { ...getShare(db, userId, shareId), historyId };
 }
 
 // `noteId` may be a single id (the common case: the ➕ menu's "Add to an
@@ -151,12 +170,19 @@ function addNoteToShare(db, userId, shareId, noteId) {
     const { role, note } = resolveNoteAccess(db, userId, id);
     if (role !== 'owner' || note.share_id != null) throw new HttpError(404, 'not found');
   }
-  db.transaction(() => moveNotesIntoShare(db, userId, shareId, ids))();
+  const droppedLinks = db.transaction(() => moveNotesIntoShare(db, userId, shareId, ids))();
+  const share = db.prepare('SELECT title FROM shares WHERE id = ?').get(shareId);
+  const historyId = history.record(
+    userId,
+    'share',
+    { shareId, noteIds: ids, created: false, droppedLinks },
+    `Added ${ids.length} note${ids.length === 1 ? '' : 's'} to "${share ? share.title : 'space'}"`
+  );
   const placeholders = ids.map(() => '?').join(',');
-  return db.prepare(`SELECT * FROM notes WHERE id IN (${placeholders})`).all(...ids);
+  return { notes: db.prepare(`SELECT * FROM notes WHERE id IN (${placeholders})`).all(...ids), historyId };
 }
 
-// Shared by createShare/addNoteToShare. Caller already validated every id in
+// Shared by createShare/addNoteToShare (and redo of a 'share' entry). Caller already validated every id in
 // `ids` resolves to a personal note `userId` owns. Sweeps `links`: a link
 // with both endpoints in `ids` is left alone (now legitimately share-scoped);
 // a link with exactly one endpoint in `ids` straddles the new boundary and is
@@ -169,7 +195,7 @@ function moveNotesIntoShare(db, userId, shareId, ids) {
 
   const straddling = db
     .prepare(
-      `SELECT note_a, note_b FROM links
+      `SELECT note_a, note_b, created_at, kind FROM links
        WHERE (note_a IN (${placeholders}) AND note_b NOT IN (${placeholders}))
           OR (note_b IN (${placeholders}) AND note_a NOT IN (${placeholders}))`
     )
@@ -188,6 +214,9 @@ function moveNotesIntoShare(db, userId, shareId, ids) {
     const sharedNoteId = idSet.has(note_a) ? note_a : note_b;
     addRefStmt.run(userId, personalNoteId, shareId, sharedNoteId, nowIso());
   }
+  // What a 'share' undo needs to put these links back exactly as they were
+  // (created_at feeds the hierarchy guess — see hierarchy.js).
+  return straddling.map(({ note_a, note_b, created_at, kind }) => ({ a: note_a, b: note_b, created_at, kind }));
 }
 
 // Inverse of addNoteToShare for a single note: moves it back to its
@@ -205,46 +234,85 @@ function removeNoteFromShare(db, userId, shareId, noteId) {
   if (!note || note.status === 'deleted' || note.share_id !== shareId) throw new HttpError(404, 'not found');
   if (role !== 'owner' && note.user_id !== userId) throw new HttpError(403, 'only the space owner or the note\'s author can remove it');
 
-  const authorStillMember = Boolean(
-    db.prepare('SELECT 1 FROM share_members WHERE share_id = ? AND user_id = ?').get(shareId, note.user_id)
+  const payload = { shareId, noteId: note.id, ...captureUnshare(db, note.id) };
+  db.transaction(() => moveNotesOutOfShare(db, shareId, [note]))();
+
+  const share = db.prepare('SELECT title FROM shares WHERE id = ?').get(shareId);
+  const historyId = history.record(
+    userId,
+    'unshare',
+    payload,
+    `Removed "${note.title}" from "${share ? share.title : 'a shared space'}"`
+  );
+  return { ok: true, mine: note.user_id === userId, historyId };
+}
+
+// What undoing a remove-from-space needs to put back exactly: the note's
+// in-space links (with created_at/kind) and every ref pointing into it
+// (moveNotesOutOfShare drops other members' refs outright).
+function captureUnshare(db, noteId) {
+  return {
+    inLinks: db
+      .prepare('SELECT note_a AS a, note_b AS b, created_at, kind FROM links WHERE note_a = ? OR note_b = ?')
+      .all(noteId, noteId),
+    refsIn: db
+      .prepare('SELECT user_id, personal_note_id, share_id, created_at FROM personal_refs WHERE shared_note_id = ?')
+      .all(noteId),
+  };
+}
+
+// The body of removeNoteFromShare (caller validates + wraps in a
+// transaction), for one note or a batch — undoing a 'share' history entry
+// (routes/history.js's applyShare) moves the whole batch back at once, so a
+// link between two notes moving out together is left alone, exactly like
+// moveNotesIntoShare leaves one between two notes moving in together. Per
+// note: a link to a note staying in the space straddles the boundary and
+// becomes a personal_ref from the author's side (if they're still a member
+// — otherwise just dropped); refs into it become a real link when the ref's
+// owner is the author, and are dropped otherwise.
+function moveNotesOutOfShare(db, shareId, notes) {
+  const idSet = new Set(notes.map((n) => n.id));
+  const isMember = db.prepare('SELECT 1 FROM share_members WHERE share_id = ? AND user_id = ?');
+  const dropLink = db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?');
+  const addRefStmt = db.prepare(
+    `INSERT OR IGNORE INTO personal_refs (user_id, personal_note_id, share_id, shared_note_id, created_at)
+     VALUES (?, ?, ?, ?, ?)`
+  );
+  const insertLink = db.prepare(
+    'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id, kind) VALUES (?, ?, ?, ?, NULL)'
   );
 
-  db.transaction(() => {
-    const straddling = db
+  const plans = notes.map((note) => ({
+    note,
+    authorStillMember: Boolean(isMember.get(shareId, note.user_id)),
+    straddling: db
       .prepare('SELECT note_a, note_b FROM links WHERE note_a = ? OR note_b = ?')
-      .all(noteId, noteId);
-    const refsIn = db
+      .all(note.id, note.id)
+      .filter((l) => !(idSet.has(l.note_a) && idSet.has(l.note_b))),
+    refsIn: db
       .prepare(
-        `SELECT pr.id, pr.user_id, pr.personal_note_id FROM personal_refs pr
+        `SELECT pr.user_id, pr.personal_note_id FROM personal_refs pr
          JOIN notes pn ON pn.id = pr.personal_note_id
          WHERE pr.shared_note_id = ? AND pn.user_id = pr.user_id`
       )
-      .all(noteId);
+      .all(note.id),
+  }));
 
-    db.prepare('UPDATE notes SET share_id = NULL WHERE id = ?').run(noteId);
+  for (const { note } of plans) db.prepare('UPDATE notes SET share_id = NULL WHERE id = ?').run(note.id);
 
-    const dropLink = db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?');
-    const addRefStmt = db.prepare(
-      `INSERT OR IGNORE INTO personal_refs (user_id, personal_note_id, share_id, shared_note_id, created_at)
-       VALUES (?, ?, ?, ?, ?)`
-    );
+  for (const { note, authorStillMember, straddling, refsIn } of plans) {
     for (const { note_a, note_b } of straddling) {
       dropLink.run(note_a, note_b);
-      if (authorStillMember) addRefStmt.run(note.user_id, noteId, shareId, note_a === noteId ? note_b : note_a, nowIso());
+      if (authorStillMember) {
+        addRefStmt.run(note.user_id, note.id, shareId, note_a === note.id ? note_b : note_a, nowIso());
+      }
     }
-
-    const insertLink = db.prepare(
-      'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id, kind) VALUES (?, ?, ?, ?, NULL)'
-    );
     for (const r of refsIn) {
       if (r.user_id !== note.user_id) continue; // swept by the DELETE below
-      insertLink.run(Math.min(r.personal_note_id, noteId), Math.max(r.personal_note_id, noteId), nowIso(), r.user_id);
+      insertLink.run(Math.min(r.personal_note_id, note.id), Math.max(r.personal_note_id, note.id), nowIso(), r.user_id);
     }
-    db.prepare('DELETE FROM personal_refs WHERE shared_note_id = ?').run(noteId);
-  })();
-
-  history.record(userId, 'create', { noteId: null }, `Removed "${note.title}" from a shared space`);
-  return { ok: true, mine: note.user_id === userId };
+    db.prepare('DELETE FROM personal_refs WHERE shared_note_id = ?').run(note.id);
+  }
 }
 
 function listMyShares(db, userId) {
@@ -670,16 +738,37 @@ function addRef(db, userId, { shareId, personalNoteId, sharedNoteId }) {
   const shared = resolveNoteAccess(db, userId, sharedNoteId);
   if (!shared.role || shared.note.share_id !== Number(shareId)) throw new HttpError(404, 'not found');
 
-  db.prepare(
+  const createdAt = nowIso();
+  const info = db.prepare(
     `INSERT OR IGNORE INTO personal_refs (user_id, personal_note_id, share_id, shared_note_id, created_at)
      VALUES (?, ?, ?, ?, ?)`
-  ).run(userId, personalNoteId, shareId, sharedNoteId, nowIso());
-  return { ok: true };
+  ).run(userId, personalNoteId, shareId, sharedNoteId, createdAt);
+  if (!info.changes) return { ok: true, historyId: null }; // already referenced
+  const historyId = history.record(
+    userId,
+    'ref',
+    { shareId: Number(shareId), personalNoteId: Number(personalNoteId), sharedNoteId: Number(sharedNoteId), created_at: createdAt },
+    `Referenced "${personal.note.title}" ↔ "${shared.note.title}"`
+  );
+  return { ok: true, historyId };
 }
 
 function removeRef(db, userId, refId) {
-  const info = db.prepare('DELETE FROM personal_refs WHERE id = ? AND user_id = ?').run(refId, userId);
-  if (info.changes === 0) throw new HttpError(404, 'not found');
+  const row = db.prepare('SELECT * FROM personal_refs WHERE id = ? AND user_id = ?').get(refId, userId);
+  if (!row) throw new HttpError(404, 'not found');
+  db.prepare('DELETE FROM personal_refs WHERE id = ?').run(row.id);
+  const historyId = history.record(
+    userId,
+    'unref',
+    {
+      shareId: row.share_id,
+      personalNoteId: row.personal_note_id,
+      sharedNoteId: row.shared_note_id,
+      created_at: row.created_at,
+    },
+    `Removed reference "${history.noteTitle(userId, row.personal_note_id)}" ✕ "${history.noteTitle(userId, row.shared_note_id)}"`
+  );
+  return { ok: true, historyId };
 }
 
 module.exports = {
@@ -707,5 +796,8 @@ module.exports = {
   listRefsForNote,
   listRefsForScope,
   addRef,
+  moveNotesIntoShare,
+  moveNotesOutOfShare,
+  captureUnshare,
   removeRef,
 };

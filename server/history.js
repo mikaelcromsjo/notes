@@ -17,9 +17,10 @@ function noteTitle(userId, id) {
   return role ? note.title : `note #${id}`;
 }
 
+// Returns the new entry's id (callers that offer an inline "Undo" use it).
 function record(userId, action, payload, summary) {
-  if (!userId) return;
-  insertStmt.run(userId, action, summary, JSON.stringify(payload || {}), nowIso());
+  if (!userId) return null;
+  return Number(insertStmt.run(userId, action, summary, JSON.stringify(payload || {}), nowIso()).lastInsertRowid);
 }
 
 // Edits fire on every autosave; fold a run of them on the same note into one

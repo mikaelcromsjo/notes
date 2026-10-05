@@ -324,10 +324,10 @@ function buildRootedTree(userId, rootId) {
 function rootedDescendants(userId, rootId, targetId) {
   const tree = buildRootedTree(userId, rootId);
   if (!tree) return null;
-  const { dist, childrenOf } = tree;
+  const { dist, childrenOf, parentOf } = tree;
   if (!dist.has(targetId)) return null;
 
-  return { ids: [targetId, ...subtreeIds(childrenOf, targetId)] };
+  return { ids: [targetId, ...subtreeIds(childrenOf, targetId)], parentOf };
 }
 
 // The guess applied to a newly created link between two *already-existing*

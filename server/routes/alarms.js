@@ -35,7 +35,7 @@ router.post('/', wrap((req) => reminders.create(db, req.userId, req.body), 201))
 // Update a reminder by its own id.
 router.put('/:id', wrap((req) => reminders.update(db, req.userId, req.params.id, req.body)));
 
-router.delete('/:id', wrap((req) => reminders.remove(db, req.userId, req.params.id), 204));
+router.delete('/:id', wrap((req) => reminders.remove(db, req.userId, req.params.id)));
 
 // "OK" on the popup — quiet until the reminder next goes off. The client sends
 // the rolled-forward nextAt so the scheduler re-arms for that occurrence; any

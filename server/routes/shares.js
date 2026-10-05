@@ -58,7 +58,7 @@ router.get(
 router.delete(
   '/refs/:refId',
   requireSession,
-  wrap((req) => sharesCore.removeRef(db, req.userId, Number(req.params.refId)), 204)
+  wrap((req) => sharesCore.removeRef(db, req.userId, Number(req.params.refId)))
 );
 
 // Invite acceptance: a magic link, so (like /api/auth/callback) no session is

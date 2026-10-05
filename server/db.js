@@ -82,6 +82,12 @@ if (!noteColumns.some((c) => c.name === 'status')) {
 // done_prev_status, so reopening the ancestor can offer to reopen exactly
 // those notes — back to what each was — and nothing that was already done
 // on its own. Both cleared whenever the note's status is set directly.
+// The settings of the last reminder removed from this note (JSON, same shape
+// as server/reminders.js's serialize minus the schedule state), so the
+// alarm editor can start from them when a reminder is added again.
+if (!noteColumns.some((c) => c.name === 'last_reminder')) {
+  db.exec('ALTER TABLE notes ADD COLUMN last_reminder TEXT');
+}
 if (!noteColumns.some((c) => c.name === 'done_with_note_id')) {
   db.exec('ALTER TABLE notes ADD COLUMN done_with_note_id INTEGER');
   db.exec('ALTER TABLE notes ADD COLUMN done_prev_status TEXT');

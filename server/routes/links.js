@@ -24,7 +24,7 @@ router.get('/', wrap((req) => linksCore.list(db, req.userId)));
 
 router.post('/', wrap((req) => linksCore.create(db, req.userId, req.body), 201));
 
-router.delete('/', wrap((req) => linksCore.remove(db, req.userId, req.body), 204));
+router.delete('/', wrap((req) => linksCore.remove(db, req.userId, req.body)));
 
 // User-correctable override for how a link is treated for hierarchy
 // purposes ('child'/'cross'/'auto') — see server/links.js's setRelation.

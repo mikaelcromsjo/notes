@@ -221,6 +221,23 @@
     setTimeout(dismiss, duration);
   }
 
+  // "<msg> — tap to undo" for an action the server recorded as history entry
+  // `historyId` (null/undefined = nothing to undo, e.g. it was queued
+  // offline: just the plain message). `after` runs once the undo landed.
+  function undoToast(msg, historyId, after) {
+    if (historyId == null) return toast(msg);
+    toast(`${msg} — tap to undo`, {
+      duration: 7000,
+      onClick: async () => {
+        const u = await api.undoHistory(historyId);
+        if (!u.ok) return toast(u.error || "Couldn't undo that.");
+        await refreshAfterUndo(u);
+        if (after) await after(u);
+        toast('Undone.');
+      },
+    });
+  }
+
   function confirmDialog(message, { confirmLabel = 'OK', danger = false } = {}) {
     return new Promise((resolve) => {
       const overlay = document.createElement('div');
@@ -3925,7 +3942,7 @@
   // personal) — WITHOUT navigating anywhere; the caller does that part.
   // This is what makes landing on a shared note through *any* path (a tab
   // opened before it was shared, a hash bookmark, a wikilink, a search
-  // result, a neighbor click, not just the explicit "Reference in a space"/
+  // result, a neighbor click, not just the explicit "Share this note"/
   // "Shared spaces" entry points) transparently enter or leave its space —
   // see goTo's and refreshFromTabs' calls into this below. A no-op if we're
   // already in the right scope.
@@ -4031,25 +4048,34 @@
     }
     const existing = (await api.getMyShares()).filter((s) => s.role === 'owner' || s.role === 'editor');
 
+    // Share, then land in the space with a "tap to undo" toast — undo moves
+    // the notes straight back (routes/history.js's undoShare) and returns
+    // here to the note in personal notes.
+    const finish = async (share, historyId, count) => {
+      closeNoteFullscreen();
+      await switchSpace(share.id, share);
+      const label = count === 1 ? '1 note' : `${count} notes`;
+      toast(`Shared ${label} into “${share.title}” — tap to undo`, {
+        duration: 8000,
+        onClick: async () => {
+          const u = await api.undoHistory(historyId);
+          if (!u.ok) return toast(u.error || "Couldn't undo that.");
+          await switchSpace(null);
+          await goTo(note.id, 'tab');
+          toast('Undone — back in your notes.');
+        },
+      });
+    };
+
     const items = [
       {
         label: '➕ New shared space…',
         onClick: async () => {
-          const names = candidates.map((n) => `• ${n.title}`).join('\n');
-          const ok = await confirmDialog(`Share these ${candidates.length} note(s) into a new space?\n\n${names}`, {
-            confirmLabel: 'Share',
-          });
-          if (!ok) return;
-          const title = await promptDialog('Name this shared space:', {
-            defaultValue: note.title,
-            confirmLabel: 'Create',
-          });
-          if (!title || !title.trim()) return;
+          const picked = await openShareDialog(note, candidates, null);
+          if (!picked) return;
           try {
-            const share = await api.createShare(title.trim(), candidates.map((n) => n.id));
-            toast(`Shared as "${share.title}".`);
-            closeNoteFullscreen();
-            await switchSpace(share.id, { id: share.id, title: share.title, role: 'owner' });
+            const share = await api.createShare(picked.title, picked.ids);
+            await finish({ id: share.id, title: share.title, role: 'owner' }, share.historyId, picked.ids.length);
           } catch (e) {
             toast(e.message || "Couldn't create the shared space.");
           }
@@ -4058,11 +4084,11 @@
       ...existing.map((s) => ({
         label: `📂 Add to "${s.title}"`,
         onClick: async () => {
+          const picked = await openShareDialog(note, candidates, s);
+          if (!picked) return;
           try {
-            await api.addNoteToShare(s.id, note.id);
-            toast(`Added to "${s.title}".`);
-            closeNoteFullscreen();
-            await switchSpace(s.id, { id: s.id, title: s.title, role: s.role });
+            const res = await api.addNoteToShare(s.id, picked.ids);
+            await finish({ id: s.id, title: s.title, role: s.role }, res.historyId, picked.ids.length);
           } catch (e) {
             toast(e.message || "Couldn't add this note to that space.");
           }
@@ -4072,8 +4098,125 @@
     openActionMenu(anchor, items);
   }
 
-  // "Remove from space" (editor ➕ menu, only inside a space — replaces
-  // "Reference in a space…" there). Moves the note back to its author's
+  // The "Share this note" checklist — same look as the done-cascade dialog.
+  // `candidates` = server/shares.js's candidateLineage (the note first, then
+  // its sub-notes, each with a parentId), shown as an indented tree, all
+  // ticked; the note itself is always included. Unticking a row unticks
+  // everything under it. `share` null = a new space, so the dialog also
+  // asks for its name. Resolves { ids, title } or null if cancelled.
+  function openShareDialog(note, candidates, share) {
+    const childrenOf = new Map();
+    const inSet = new Set(candidates.map((c) => c.id));
+    for (const c of candidates) {
+      if (c.id === note.id || c.parentId == null || !inSet.has(c.parentId)) continue;
+      if (!childrenOf.has(c.parentId)) childrenOf.set(c.parentId, []);
+      childrenOf.get(c.parentId).push(c);
+    }
+    const rows = [];
+    const seen = new Set();
+    const walk = (c, depth) => {
+      if (seen.has(c.id)) return;
+      seen.add(c.id);
+      rows.push({ note: c, depth, checked: true, fixed: c.id === note.id });
+      for (const k of [...(childrenOf.get(c.id) || [])].sort((a, b) => String(a.title).localeCompare(String(b.title)))) {
+        walk(k, depth + 1);
+      }
+    };
+    const self = candidates.find((c) => c.id === note.id) || { id: note.id, title: note.title, status: note.status };
+    walk(self, 0);
+    for (const c of candidates) walk(c, 1); // anything the tree didn't place
+
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      const box = document.createElement('div');
+      box.className = 'picker cascade-dialog';
+      const h = document.createElement('h2');
+      h.textContent = share ? `Add to “${share.title}”` : 'Share into a new space';
+      const msg = document.createElement('p');
+      msg.className = 'confirm-message';
+      msg.textContent =
+        'These notes move into the space (they leave your personal notes). Untick any that should stay private.';
+      let nameInput = null;
+      if (!share) {
+        nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.placeholder = 'Name of the space';
+        nameInput.value = note.title || '';
+      }
+      const list = document.createElement('div');
+      list.className = 'cascade-list';
+      const okBtn = document.createElement('button');
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'secondary';
+      cancelBtn.textContent = 'Cancel';
+
+      const subtreeOf = (i) => {
+        const out = [];
+        for (let j = i + 1; j < rows.length && rows[j].depth > rows[i].depth; j++) out.push(j);
+        return out;
+      };
+      const update = () => {
+        const n = rows.filter((r) => r.checked).length;
+        const label = n === 1 ? '1 note' : `${n} notes`;
+        okBtn.textContent = share ? `Add ${label}` : `Share ${label}`;
+        okBtn.disabled = Boolean(nameInput && !nameInput.value.trim());
+      };
+      const draw = () => {
+        list.replaceChildren();
+        rows.forEach((r, i) => {
+          const row = document.createElement('label');
+          row.className = 'cascade-row' + (r.note.status === 'done' ? ' dimmed' : '');
+          row.style.paddingLeft = `${r.depth * 1.1}rem`;
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = r.checked;
+          cb.disabled = r.fixed;
+          cb.addEventListener('change', () => {
+            r.checked = cb.checked;
+            for (const j of subtreeOf(i)) rows[j].checked = cb.checked;
+            draw();
+          });
+          const title = document.createElement('span');
+          title.className = 'cascade-title';
+          title.textContent = r.note.title || 'Untitled';
+          row.append(cb, title);
+          list.appendChild(row);
+        });
+        update();
+      };
+      if (nameInput) nameInput.addEventListener('input', update);
+
+      const actions = document.createElement('div');
+      actions.className = 'picker-actions';
+      actions.append(okBtn, cancelBtn);
+      box.append(h, ...(nameInput ? [nameInput] : []), msg, list, actions);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      draw();
+
+      const done = (val) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(null);
+      };
+      okBtn.addEventListener('click', () => {
+        if (okBtn.disabled) return;
+        done({ ids: rows.filter((r) => r.checked).map((r) => r.note.id), title: nameInput ? nameInput.value.trim() : null });
+      });
+      cancelBtn.addEventListener('click', () => done(null));
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) done(null);
+      });
+      document.addEventListener('keydown', onKey);
+      (nameInput || okBtn).focus();
+    });
+  }
+
+  // "Remove from space" (editor ➕ menu, only inside a space). Moves the note back to its author's
   // personal graph (server/shares.js's removeNoteFromShare). Lands on it in
   // personal notes when it's yours; otherwise re-enters the space.
   async function removeFromSpaceFlow(note) {
@@ -4091,70 +4234,15 @@
       toast(e.message || "Couldn't remove this note from the space.");
       return;
     }
-    toast(`Removed from "${space.title}".`);
+    undoToast(`Removed from "${space.title}"`, res && res.historyId, async () => {
+      await goTo(note.id, 'tab'); // back in the space — goTo re-enters it
+    });
     closeNoteFullscreen();
     if (res && res.mine) {
       await switchSpace(null);
       await goTo(note.id, 'tab');
     } else {
       await switchSpace(space.id, space);
-    }
-  }
-
-  // "Reference in a space…" (editor ➕ menu, available either side — see its
-  // wiring below). A personal_refs pointer is only ever created from a
-  // *personal* note's side (server/shares.js's addRef requires the personal
-  // side to be owned outright) — simplest v1: from inside a space, point
-  // back at whatever your personal note was before entering it.
-  async function openRefFlow(anchor, note) {
-    if (currentSpace) {
-      toast('Create the reference from your personal notes instead.');
-      return;
-    }
-    const shares = await api.getMyShares();
-    if (!shares.length) {
-      toast('You have no shared spaces yet.');
-      return;
-    }
-    openActionMenu(
-      anchor,
-      shares.map((s) => ({
-        label: `📂 ${s.title}`,
-        onClick: () => pickShareNoteForRef(s, note),
-      }))
-    );
-  }
-
-  async function pickShareNoteForRef(share, personalNote) {
-    const notes = await api.getShareNotes(share.id);
-    if (!notes.length) {
-      toast(`"${share.title}" has no notes yet.`);
-      return;
-    }
-    const typed = await promptDialog(
-      `Type the exact title of the note in "${share.title}" to reference:\n\n${notes
-        .map((n) => `• ${n.title}`)
-        .join('\n')}`,
-      { confirmLabel: 'Reference' }
-    );
-    if (!typed) return;
-    const match = notes.find((n) => (n.title || '').trim().toLowerCase() === typed.trim().toLowerCase());
-    if (!match) {
-      toast('No note with that exact title.');
-      return;
-    }
-    try {
-      await api.addRef(share.id, personalNote.id, match.id);
-      toast(`Referenced "${match.title}".`);
-      // The reference now shows as a 🔗-badged neighbor card (loadNeighbors
-      // merges personal_refs in) — refresh the grid if we're centered on
-      // the note it was just added to.
-      if (currentId === personalNote.id) {
-        await loadNeighbors(currentId);
-        await render();
-      }
-    } catch (e) {
-      toast(e.message || "Couldn't create that reference.");
     }
   }
 
@@ -5312,6 +5400,17 @@
       }
     });
     handleDeepLink();
+    offerRestoreUndo();
+  }
+
+  // Right after a backup restore reloads the page: the restore's own undo.
+  function offerRestoreUndo() {
+    let id = null;
+    try {
+      id = sessionStorage.getItem('nico-restore-undo');
+      sessionStorage.removeItem('nico-restore-undo');
+    } catch {}
+    if (id && id !== 'undefined' && id !== 'null') undoToast('Backup restored', Number(id));
   }
 
   // Deep links into a fresh load:
@@ -5339,7 +5438,7 @@
     const wantsPreview = params.get('preview') === '1';
     const shared = consumePendingShare();
     // /?space=<id> — the invite-accept redirect (GET /api/shares/invites/accept)
-    // and the "Reference in a space" jump both land here.
+    // lands here.
     const spaceParam = params.get('space');
     const wantsSpace = spaceParam != null && spaceParam !== 'invalid';
     if (spaceParam === 'invalid') toast('That invite link is invalid or has expired.');
@@ -5923,7 +6022,8 @@
       {
         label: '✕ Remove connection',
         onClick: async () => {
-          await api.unlink(centerId, other.id);
+          const r = await api.unlink(centerId, other.id);
+          undoToast('Connection removed', r && r.historyId);
           await loadNeighbors(currentId);
           await refreshColorData();
           await render();
@@ -6205,9 +6305,9 @@
         // "Share this note…" only outside a space — a shared note is already
         // shared; moving notes between two different shares isn't supported.
         ...(!currentSpace ? [{ label: '🔗 Share this note…', onClick: () => openShareFlow(addBtn, currentNote) }] : []),
-        currentSpace
-          ? { label: '📤 Remove from space', onClick: () => removeFromSpaceFlow(currentNote) }
-          : { label: '📌 Reference in a space…', onClick: () => openRefFlow(addBtn, currentNote) },
+        // Referencing a note in another space is just "Connect to note" —
+        // its search spans your spaces and makes a cross-space reference.
+        ...(currentSpace ? [{ label: '📤 Remove from space', onClick: () => removeFromSpaceFlow(currentNote) }] : []),
       ]);
     });
 
@@ -6637,7 +6737,8 @@
       actionBtn.title = 'Remove reference';
       actionBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        await api.removeRef(neighbor.refId);
+        const r = await api.removeRef(neighbor.refId);
+        undoToast('Reference removed', r && r.historyId);
         await loadNeighbors(currentId);
         await render();
       });
@@ -6932,7 +7033,7 @@
   }
 
   // --- Spaces bar: quick-jump to a shared space you belong to (the ➕
-  // menu's "Share this note…"/"Reference in a space…" and the Account →
+  // menu's "Share this note…" and the Account →
   // Shared spaces panel are the other ways in). Fire-and-forget — a fetch,
   // never awaited by rendering (same convention as warmCache); it just
   // paints in whenever it resolves. ---
@@ -7748,10 +7849,20 @@
     if (alarmKind === 'location') refreshAlarmLocReadout();
   }
 
-  function openAlarmEditor(note) {
+  async function openAlarmEditor(note) {
     alarmEditNote = note;
     alarmPickedLoc = null;
-    const existing = alarms.find((a) => a.noteId === note.id);
+    const current = alarms.find((a) => a.noteId === note.id);
+    // No reminder now: start from the last one removed from this note
+    // (notes.last_reminder), if any.
+    let existing = current;
+    if (!existing && note.last_reminder) {
+      try {
+        existing = await decryptReminderRow(JSON.parse(note.last_reminder));
+      } catch {
+        existing = null;
+      }
+    }
 
     const d = new Date();
     alarmTimeInput.value =
@@ -7775,8 +7886,12 @@
       alarmDaysRow.appendChild(b);
     });
 
+    // A remembered one-time date that has already passed isn't a useful default.
+    const t = new Date();
+    const today = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+    const pastRemembered = !current && existing && existing.date && existing.date < today;
     alarmDateInput.value =
-      existing && existing.date ? existing.date : defaultAlarmDate(alarmTimeInput.value);
+      existing && existing.date && !pastRemembered ? existing.date : defaultAlarmDate(alarmTimeInput.value);
     syncAlarmDateVisibility();
 
     if (existing && existing.kind === 'location') {
@@ -7792,7 +7907,7 @@
     alarmNudgeDefaultsDone = !!(existing && existing.kind === 'anytime');
     setAlarmKind(existing ? existing.kind : 'time');
 
-    alarmRemoveBtn.classList.toggle('hidden', !existing);
+    alarmRemoveBtn.classList.toggle('hidden', !current);
     alarmOverlay.classList.remove('hidden');
   }
 
@@ -8002,9 +8117,19 @@
   alarmRemoveBtn.addEventListener('click', async () => {
     if (!alarmEditNote) return;
     const existing = alarms.find((a) => a.noteId === alarmEditNote.id);
-    if (existing) await api.removeAlarm(existing.id);
+    let r = null;
+    if (existing) {
+      r = await api.removeAlarm(existing.id);
+      // Same as the server's notes.last_reminder, so re-adding one right
+      // away (even offline) starts from these settings.
+      const { kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd } = existing;
+      const last = JSON.stringify({ kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd });
+      alarmEditNote.last_reminder = last;
+      if (currentNote && currentNote.id === alarmEditNote.id) currentNote.last_reminder = last;
+    }
     closeAlarmEditor();
     await afterAlarmChange();
+    if (existing) undoToast('Reminder removed', r && r.historyId);
   });
 
   alarmCancelBtn.addEventListener('click', closeAlarmEditor);
@@ -10459,6 +10584,12 @@
     create: '✨',
     update: '✏️',
     status: '✅',
+    share: '📂',
+    unshare: '📤',
+    ref: '🔗',
+    unref: '✂️',
+    reminder: '⏰',
+    restore: '🗄️',
     pin: '📌',
     unpin: '📌',
   };
@@ -10471,7 +10602,16 @@
   // a link, flipped a status, or soft-deleted the centered note, so rebuild from
   // the tab list (which drops tabs whose note is now deleted) and, if the
   // fullscreen editor is open, refresh or dismiss it.
-  async function refreshAfterUndo() {
+  // `res` = the undo/redo response: `reload` (a backup restore was swapped
+  // — everything changed), `unshared`/`reshared` (a note left/rejoined a
+  // space), `reminders` (reminder list changed).
+  async function refreshAfterUndo(res = {}) {
+    if (res.reload) {
+      location.reload();
+      return;
+    }
+    if (res.unshared && currentSpace && currentSpace.id === res.shareId) await switchSpace(null);
+    if (res.reminders) await checkAlarms({ popup: false });
     const editingId = noteOverlay.classList.contains('hidden') ? null : currentId;
     allNotesCache = await api.listNotes();
     const tabsList = await api.listTabs();
@@ -10537,7 +10677,7 @@
           when.classList.add('history-error');
           return;
         }
-        await refreshAfterUndo();
+        await refreshAfterUndo(res);
         await openHistory();
       });
 
@@ -10980,7 +11120,7 @@
     if (!file) return;
     restoreFile.value = '';
     const ok = await confirmDialog(
-      `Restore from "${file.name}"? This replaces every note, link, tab, reminder and attachment in this account with the backup. What's here now is deleted.`,
+      `Restore from "${file.name}"?\n\nThis REPLACES every note, link, tab, reminder and attachment in this account with the backup — anything made since that backup disappears.\n\nA snapshot of everything as it is now is saved first, so you can undo the restore afterwards (from the toast after reloading, or the ↩ history panel).`,
       { confirmLabel: 'Replace everything', danger: true }
     );
     if (!ok) return;
@@ -10997,6 +11137,9 @@
       }
       const r = body.restored || {};
       restoreStatus.textContent = `Restored ${r.notes || 0} notes, ${r.links || 0} links, ${r.reminders || 0} reminders, ${r.attachments || 0} files. Reloading…`;
+      try {
+        sessionStorage.setItem('nico-restore-undo', String(body.historyId));
+      } catch {}
       setTimeout(() => location.reload(), 1200);
     } catch {
       restoreStatus.textContent = 'Restore failed.';

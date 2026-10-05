@@ -1827,6 +1827,7 @@ button:hover { filter: brightness(1.05); }
 
 .picker-actions {
   display: flex;
+  flex-wrap: wrap; /* a button that doesn't fit drops to its own row (phones) */
   justify-content: flex-end;
   gap: 0.5rem;
   margin-top: 0.75rem;
@@ -2751,6 +2752,9 @@ html.has-bg body { background: transparent; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.cascade-row.dimmed {
+  opacity: 0.5;
 }
 .cascade-row.is-guessed .cascade-title {
   opacity: 0.75;

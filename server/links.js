@@ -77,10 +77,16 @@ function create(db, userId, { a, b, rehomeFrom }) {
   const guess = !isRehome && accessA.note.share_id == null ? guessLinkKind(userId, noteA, noteB) : null;
   const kind = guess && guess.cross ? 'cross' : null;
 
+  // Captured for history so undo/redo can put things back exactly: the
+  // link's own created_at/kind (the hierarchy guess reads link age), the
+  // parent stamp the guess below may add, and (rehome) the link it replaces.
+  const createdAt = nowIso();
+  let stamped = null;
+  let fromLink = null;
   db.transaction(() => {
     db.prepare(
       'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id, kind) VALUES (?, ?, ?, ?, ?)'
-    ).run(noteA, noteB, nowIso(), userId, kind);
+    ).run(noteA, noteB, createdAt, userId, kind);
 
     if (guess && guess.childId != null) {
       // The child side was previously unreachable from the graph root at
@@ -90,13 +96,15 @@ function create(db, userId, { a, b, rehomeFrom }) {
       // alone never captures). Never overwrite an existing explicit
       // parent — if this note already has one recorded, this new link is
       // additional, not a replacement for it.
-      db.prepare(
+      const info = db.prepare(
         'UPDATE notes SET created_from_note_id = ? WHERE id = ? AND user_id = ? AND created_from_note_id IS NULL'
       ).run(guess.parentId, guess.childId, userId);
+      if (info.changes) stamped = { childId: guess.childId, parentId: guess.parentId };
     }
 
     if (isRehome) {
       const [fa, fb] = [Math.min(rehomeFrom, b), Math.max(rehomeFrom, b)];
+      fromLink = db.prepare('SELECT created_at, kind FROM links WHERE note_a = ? AND note_b = ?').get(fa, fb) || null;
       db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ? AND user_id = ?').run(fa, fb, userId);
       // A move is explicit intent, stronger evidence than link chronology —
       // stamp it as provenance so the "probable parent" hierarchy (and
@@ -113,14 +121,14 @@ function create(db, userId, { a, b, rehomeFrom }) {
     history.record(
       userId,
       'rehome',
-      { card: Number(b), from: Number(rehomeFrom), to: Number(a), prevCreatedFrom },
+      { card: Number(b), from: Number(rehomeFrom), to: Number(a), prevCreatedFrom, toCreatedAt: createdAt, fromLink },
       `Moved "${history.noteTitle(userId, b)}" from "${history.noteTitle(userId, rehomeFrom)}" into "${history.noteTitle(userId, a)}"`
     );
   } else {
     history.record(
       userId,
       'link',
-      { a: noteA, b: noteB },
+      { a: noteA, b: noteB, created_at: createdAt, kind, stamped },
       `Linked "${history.noteTitle(userId, noteA)}" ↔ "${history.noteTitle(userId, noteB)}"`
     );
   }
@@ -139,15 +147,17 @@ function remove(db, userId, { a, b }) {
     throw new HttpError(404, 'link not found');
   }
 
-  const info = db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?').run(noteA, noteB);
-  if (info.changes === 0) throw new HttpError(404, 'link not found');
+  const row = db.prepare('SELECT created_at, kind FROM links WHERE note_a = ? AND note_b = ?').get(noteA, noteB);
+  if (!row) throw new HttpError(404, 'link not found');
+  db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?').run(noteA, noteB);
 
-  history.record(
+  const historyId = history.record(
     userId,
     'unlink',
-    { a: noteA, b: noteB },
+    { a: noteA, b: noteB, created_at: row.created_at, kind: row.kind },
     `Unlinked "${history.noteTitle(userId, noteA)}" ✕ "${history.noteTitle(userId, noteB)}"`
   );
+  return { ok: true, historyId };
 }
 
 // User-correctable override for how a link is treated for hierarchy

@@ -8,6 +8,8 @@ const db = require('../db');
 const sessions = require('../sessions');
 const mailer = require('../mailer');
 const { uploadsDir } = require('../upload-config');
+const history = require('../history');
+const snapshots = require('../snapshots');
 
 const router = express.Router();
 
@@ -280,6 +282,16 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
   }
   const { json, attachments } = snapshot;
 
+  // Undo point: an exact copy of everything as it is right now (see
+  // server/snapshots.js) — the restore is undoable from history.
+  let before;
+  try {
+    before = snapshots.takeSnapshot(req.userId, 'pre-restore');
+  } catch (err) {
+    console.error('[account] pre-restore snapshot failed:', err && err.message);
+    return res.status(500).json({ error: 'could not save a snapshot of your current notes first — nothing was changed' });
+  }
+
   // Old upload basename -> new one, for every bundled attachment we accept.
   const fileRenames = new Map();
   const filesToWrite = []; // { newBase, buf }
@@ -308,7 +320,6 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
   };
 
   const counts = { notes: 0, links: 0, tabs: 0, reminders: 0, navEvents: 0, history: 0, attachments: 0, attachmentsSkipped: attachments.size - fileRenames.size };
-  const oldUploadFiles = new Set();
 
   const insNote = db.prepare(
     `INSERT INTO notes (${NOTE_COLS.join(', ')}, user_id) VALUES (${NOTE_COLS.map(() => '?').join(', ')}, ?)`
@@ -316,13 +327,10 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
 
   try {
     db.transaction(() => {
-      // Note which files the current graph uses, so we can delete them after.
-      for (const n of db.prepare('SELECT attachment_path, content FROM notes WHERE user_id = ?').all(req.userId)) {
-        for (const f of uploadRefs(n)) oldUploadFiles.add(f);
-      }
-
       // Wipe this account's graph (push subscriptions + login tokens are device
-      // / auth state, not part of a graph snapshot — leave them).
+      // / auth state, not part of a graph snapshot — leave them). The home-
+      // note pointer has no ON DELETE, so it must go first.
+      db.prepare('UPDATE users SET root_note_id = NULL WHERE id = ?').run(req.userId);
       for (const sql of [
         'DELETE FROM reminders WHERE user_id = ?',
         'DELETE FROM nav_events WHERE user_id = ?',
@@ -430,8 +438,9 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
     return res.status(500).json({ error: `restore failed and was rolled back: ${err.message}` });
   }
 
-  // DB committed — now the filesystem. Write the new attachment files, then drop
-  // the ones only the replaced graph used.
+  // DB committed — now the filesystem. Write the new attachment files. The
+  // replaced graph's own files stay on disk (like replaced attachments do):
+  // undoing the restore brings back notes that point at them.
   for (const { newBase, buf } of filesToWrite) {
     try {
       fs.writeFileSync(path.join(uploadsDir, newBase), buf);
@@ -440,12 +449,13 @@ router.post('/import', restoreUpload.single('file'), (req, res) => {
       console.error('[account] could not write restored upload', newBase, err && err.message);
     }
   }
-  const kept = new Set(fileRenames.values());
-  for (const f of oldUploadFiles) {
-    if (!kept.has(f)) fs.unlink(path.join(uploadsDir, f), () => {});
-  }
-
-  res.json({ ok: true, restored: counts });
+  const historyId = history.record(
+    req.userId,
+    'restore',
+    { before, after: null },
+    `Restored backup "${req.file.originalname || 'backup'}" (${counts.notes} notes)`
+  );
+  res.json({ ok: true, restored: counts, historyId });
 });
 
 // --- Account deletion: emailed-link re-auth --------------------------------

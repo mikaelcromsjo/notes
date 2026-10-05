@@ -3,6 +3,7 @@
 // pre-extraction handlers.
 const { HttpError } = require('./http-error');
 const { resolveNoteAccess } = require('./note-access');
+const history = require('./history');
 
 const now = () => new Date().toISOString();
 const validTs = (v) => typeof v === 'string' && !Number.isNaN(Date.parse(v));
@@ -290,4 +291,74 @@ function arrive(db, userId, id) {
   return { armed: true };
 }
 
-module.exports = { list, create, update, remove, ack, snooze, schedule, arrive, encryptGeo };
+// --- Undo history -----------------------------------------------------------
+// Create/edit/remove each record one 'reminder' history entry holding the
+// whole raw row before and after (null = didn't exist), which
+// routes/history.js's setReminderState writes back on undo/redo. Ack /
+// snooze / schedule are routine and stay out of history.
+const rawRow = (db, id, userId) => db.prepare('SELECT * FROM reminders WHERE id = ? AND user_id = ?').get(id, userId);
+
+// The user-chosen settings of a raw row — what the alarm editor fills in.
+function settingsOf(r) {
+  return {
+    kind: r.kind || 'time',
+    time: r.time,
+    days: r.days ? r.days.split(',').map(Number) : [],
+    date: r.date,
+    lat: r.lat,
+    lon: r.lon,
+    radiusM: r.radius_m,
+    geo: r.geo,
+    windowStart: r.window_start,
+    windowEnd: r.window_end,
+  };
+}
+
+function recordReminder(db, userId, before, after, verb) {
+  const row = after || before;
+  const note = db.prepare('SELECT title FROM notes WHERE id = ?').get(row.note_id);
+  return history.record(
+    userId,
+    'reminder',
+    { id: row.id, noteId: row.note_id, before: before || null, after: after || null },
+    `${verb} reminder on "${note ? note.title : 'a note'}"`
+  );
+}
+
+function createRecorded(db, userId, body) {
+  const out = create(db, userId, body);
+  const historyId = recordReminder(db, userId, null, rawRow(db, out.id, userId), 'Set');
+  return { ...out, historyId };
+}
+
+function updateRecorded(db, userId, id, body) {
+  const before = rawRow(db, id, userId);
+  const out = update(db, userId, id, body);
+  const after = rawRow(db, id, userId);
+  const changed = JSON.stringify(settingsOf(before)) !== JSON.stringify(settingsOf(after));
+  const historyId = changed ? recordReminder(db, userId, before, after, 'Changed') : null;
+  return { ...out, historyId };
+}
+
+// Also remembers the removed reminder's settings on its note
+// (notes.last_reminder) for the next "add reminder" on it.
+function removeRecorded(db, userId, id) {
+  const before = rawRow(db, id, userId);
+  if (!before) throw new HttpError(404, 'not found');
+  remove(db, userId, id);
+  db.prepare('UPDATE notes SET last_reminder = ? WHERE id = ?').run(JSON.stringify(settingsOf(before)), before.note_id);
+  return { ok: true, historyId: recordReminder(db, userId, before, null, 'Removed') };
+}
+
+module.exports = {
+  list,
+  create: createRecorded,
+  update: updateRecorded,
+  remove: removeRecorded,
+  ack,
+  snooze,
+  schedule,
+  arrive,
+  encryptGeo,
+  settingsOf,
+};
