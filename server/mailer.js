@@ -40,4 +40,27 @@ async function sendMail({ to, subject, text, html }) {
   return transporter.sendMail({ from: FROM, to, subject, text, html });
 }
 
-module.exports = { sendMail, configured, FROM };
+// Same mailbox, read side — server/mail-ingest.js polls it over IMAP with the
+// same credentials (a Gmail app password covers both). `ingestAddresses`
+// defaults to the account's own `+notes` and `+note` aliases (`+note` was the
+// old mailrouter address); MAIL_INGEST_ADDRESS / `ingestAddress` may be a
+// comma-separated list. `ingestAddress` = the first one, for display.
+function imapConfig() {
+  if (!user || !pass) return null;
+  const [local, domain] = String(user).split('@');
+  const ingestAddresses = String(
+    process.env.MAIL_INGEST_ADDRESS ||
+    fileCfg.ingestAddress ||
+    `${local}+notes@${domain},${local}+note@${domain}`
+  ).split(',').map((a) => a.trim().toLowerCase()).filter(Boolean);
+  return {
+    host: process.env.IMAP_HOST || fileCfg.imapHost || 'imap.gmail.com',
+    port: Number(process.env.IMAP_PORT || fileCfg.imapPort || 993),
+    user,
+    pass,
+    ingestAddress: ingestAddresses[0],
+    ingestAddresses,
+  };
+}
+
+module.exports = { sendMail, configured, imapConfig, FROM };

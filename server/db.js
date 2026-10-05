@@ -641,4 +641,33 @@ if (!linksCols.some((c) => c.name === 'kind')) {
   db.exec('ALTER TABLE links ADD COLUMN kind TEXT');
 }
 
+// Mail-in (server/mail-ingest.js): one row per inbound message seen at the
+// ingest address, keyed by Gmail's stable X-GM-MSGID so a restart/re-poll
+// never imports the same mail twice. status: 'created' (note_id set) |
+// 'pending' (sender couldn't be authenticated — a confirm link was mailed to
+// the account's own address; token_hash = sha256 of that link's secret, same
+// idiom as login_tokens) | 'ignored' (unknown sender / rate limited, reason
+// says which) | 'failed'. The message itself is never stored here: a
+// confirmed pending row re-fetches it from IMAP. The '__cursor__' row's
+// received_at is the instant ingest was first enabled — older mail is never
+// imported.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mail_ingest (
+    message_key TEXT PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    from_addr TEXT,
+    subject TEXT,
+    status TEXT NOT NULL,
+    reason TEXT,
+    note_id INTEGER,
+    token_hash TEXT,
+    received_at TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    consumed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_ingest_token ON mail_ingest (token_hash);
+  CREATE INDEX IF NOT EXISTS idx_mail_ingest_user ON mail_ingest (user_id, created_at);
+`);
+
 module.exports = db;

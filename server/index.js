@@ -32,6 +32,8 @@ const sharesRouter = require('./routes/shares');
 const accountRouter = require('./routes/account');
 const alarmScheduler = require('./alarm-scheduler');
 const digestScheduler = require('./digest-scheduler');
+const mailIngest = require('./mail-ingest');
+const mailInRouter = require('./routes/mail-in');
 
 const app = express();
 const PORT = process.env.PORT || 8040;
@@ -140,6 +142,10 @@ app.use('/api/account', accountRouter);
 // cookie gate, so the whole router does, same reasoning as accountRouter.
 app.use('/api/shares', sharesRouter);
 
+// Mail-in confirm link (server/mail-ingest.js) — authed by its emailed
+// one-time token, so it sits above the cookie gate like accountRouter.
+app.use('/api/mail-in', mailInRouter);
+
 // Everything below the session endpoint needs a user.
 app.use('/api', (req, res, next) => {
   if (!req.userId) return res.status(401).json({ error: 'no active session' });
@@ -172,3 +178,4 @@ app.listen(PORT, HOST, () => {
 
 alarmScheduler.start();
 digestScheduler.start();
+mailIngest.start();

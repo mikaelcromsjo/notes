@@ -113,4 +113,12 @@ function diskUpload() {
   });
 }
 
-module.exports = { uploadsDir, IMAGE_EXT, AUDIO_EXT, FILE_EXT, diskUpload };
+module.exports = {
+  uploadsDir,
+  IMAGE_EXT,
+  AUDIO_EXT,
+  FILE_EXT,
+  safeFileExt,
+  isExecutableMime,
+  diskUpload,
+};

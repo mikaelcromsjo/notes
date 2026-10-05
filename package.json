@@ -11,6 +11,8 @@
     "adm-zip": "^0.5.18",
     "better-sqlite3": "^11.10.0",
     "express": "^4.19.2",
+    "imapflow": "^2.2.5",
+    "mailparser": "^3.9.35",
     "multer": "^2.3.0",
     "nodemailer": "^10.0.1",
     "web-push": "^3.6.7"
