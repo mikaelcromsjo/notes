@@ -168,22 +168,22 @@ function searchScoped(db, scope, { q, limit: limitRaw }, encrypted) {
     const rows = encrypted
       ? db
           .prepare(
-            `SELECT n.id, n.title, n.type
+            `SELECT n.id, n.title, n.type, n.status
              FROM notes_fts
              JOIN notes n ON n.id = notes_fts.rowid
              WHERE notes_fts MATCH ? AND ${scopeCond.sql} AND n.status != 'deleted'
-             ORDER BY bm25(notes_fts, 5.0, 1.0)
+             ORDER BY n.status = 'done', bm25(notes_fts, 5.0, 1.0)
              LIMIT ?`
           )
           .all(`{title} : (${match})`, ...scopeCond.params, limit)
       : db
           .prepare(
-            `SELECT n.id, n.title, n.type,
+            `SELECT n.id, n.title, n.type, n.status,
                     snippet(notes_fts, 1, '[', ']', '…', 12) AS snippet
              FROM notes_fts
              JOIN notes n ON n.id = notes_fts.rowid
              WHERE notes_fts MATCH ? AND ${scopeCond.sql} AND n.status != 'deleted'
-             ORDER BY bm25(notes_fts, 5.0, 1.0)
+             ORDER BY n.status = 'done', bm25(notes_fts, 5.0, 1.0)
              LIMIT ?`
           )
           .all(match, ...scopeCond.params, limit);

@@ -106,7 +106,7 @@ router.get('/', (req, res) => {
       .prepare(
         `SELECT r.id, r.note_id, r.tz, r.snooze_until, r.next_at, n.title
          FROM reminders r JOIN notes n ON n.id = r.note_id
-         WHERE r.user_id = ? AND r.kind = 'anytime' AND n.status != 'deleted'
+         WHERE r.user_id = ? AND r.kind = 'anytime' AND n.status NOT IN ('deleted', 'done')
            AND COALESCE(r.snooze_until, r.next_at) IS NOT NULL`
       )
       .all(user.id);

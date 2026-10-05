@@ -8,11 +8,14 @@ const { extractTags } = require('./tags');
 // calendar, so it takes an IANA zone: an explicit one, else the zone stored on
 // most of the user's reminders, else UTC.
 
+// 'done' notes are excluded from every agenda list below (and the digest/
+// widget built on it): finished business, nothing left to act on.
+
 const remindersStmt = db.prepare(
   `SELECT r.id, r.note_id, r.kind, r.time, r.days, r.date, r.radius_m,
           r.window_start, r.window_end, r.tz, r.snooze_until, r.next_at, n.title
    FROM reminders r JOIN notes n ON n.id = r.note_id
-   WHERE r.user_id = ? AND n.status != 'deleted'`
+   WHERE r.user_id = ? AND n.status NOT IN ('deleted', 'done')`
 );
 
 // Every note this user can see, personal or shared: their own personal notes
@@ -36,7 +39,7 @@ const VISIBLE_NOTES = `((n.user_id = ? AND n.share_id IS NULL) OR n.share_id IN 
 // no crypto of its own and so is *meant* to just show nothing here.
 const taskNotesStmt = db.prepare(
   `SELECT id, title, content, updated_at FROM notes n
-   WHERE ${VISIBLE_NOTES} AND n.status != 'deleted' AND n.content LIKE '%[ ]%'`
+   WHERE ${VISIBLE_NOTES} AND n.status NOT IN ('deleted', 'done') AND n.content LIKE '%[ ]%'`
 );
 
 // Notes the user flagged as an open thing to do (the center-cell status button's
@@ -64,7 +67,7 @@ const OPEN_TASKS_LIMIT = 20;
 // by this user, still has a link and must not show as orphaned.
 const orphansStmt = db.prepare(
   `SELECT n.id, n.title FROM notes n
-   WHERE ${VISIBLE_NOTES} AND n.status != 'deleted'
+   WHERE ${VISIBLE_NOTES} AND n.status NOT IN ('deleted', 'done')
      AND NOT EXISTS (SELECT 1 FROM links l WHERE l.note_a = n.id OR l.note_b = n.id)
    ORDER BY n.updated_at DESC LIMIT 20`
 );

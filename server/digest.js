@@ -63,7 +63,7 @@ const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const allRemindersStmt = db.prepare(
   `SELECT r.id, r.note_id, r.time, r.days, r.date, r.snooze_until, r.next_at, n.title
    FROM reminders r JOIN notes n ON n.id = r.note_id
-   WHERE r.user_id = ? AND n.status != 'deleted' AND r.kind != 'anytime'
+   WHERE r.user_id = ? AND n.status NOT IN ('deleted', 'done') AND r.kind != 'anytime'
    ORDER BY r.time ASC, n.title ASC`
 );
 

@@ -166,6 +166,8 @@ body.header-hidden .pinbar { display: none; }
 }
 .search-results .result-parent,
 .picker-results .result-parent { font-style: italic; }
+.search-results .result.dimmed,
+.picker-results .result.dimmed { opacity: 0.45; }
 
 .wiki-menu {
   position: fixed;

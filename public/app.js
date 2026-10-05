@@ -970,13 +970,16 @@
         scored.push({ n, titleHit, content: n.content });
       }
       scored.sort((a, b) => {
+        // 'done' notes sink below everything else, same as the server search.
+        const ad = a.n.status === 'done', bd = b.n.status === 'done';
+        if (ad !== bd) return ad ? 1 : -1;
         if (a.titleHit !== b.titleHit) return a.titleHit ? -1 : 1;
         return String(b.n.updated_at).localeCompare(String(a.n.updated_at));
       });
 
       const results = scored.slice(0, 12).map(({ n, content }) => {
         const snippet = snippetFor(content, terms);
-        return { id: n.id, title: n.title, type: n.type, snippet };
+        return { id: n.id, title: n.title, type: n.type, status: n.status, snippet };
       });
 
       // A result with no content snippet (title-only match, or an attachment
@@ -6931,7 +6934,7 @@
     // `⏰ ${a.time} ${a.title}` would read as a broken chip with a blank time.
     // They're surfaced via the map/toast/agenda instead, not this time-based bar.
     const scheduled = alarms.filter(
-      (a) => a.kind !== 'location' && a.kind !== 'anytime' && underHere.has(a.noteId)
+      (a) => a.kind !== 'location' && a.kind !== 'anytime' && underHere.has(a.noteId) && !noteIsDone(a.noteId)
     );
     alarmbar.classList.toggle('hidden', scheduled.length === 0 || !barPrefs.alarms);
 
@@ -7019,7 +7022,13 @@
   // the 30s background poll.
   async function checkAlarms({ popup = true, nudge = false } = {}) {
     const ref = new Date();
-    alarms = (await api.listAlarms()).map((a) => ({ ...a, triggered: alarmTriggered(a, ref) }));
+    // A reminder on a 'done' note is silenced: never `triggered`, so no popup,
+    // notification, nudge toast, tint or badge. Its next_at still rolls forward
+    // below, so un-doning the note picks the schedule straight back up.
+    alarms = (await api.listAlarms()).map((a) => ({
+      ...a,
+      triggered: !noteIsDone(a.noteId) && alarmTriggered(a, ref),
+    }));
 
     // Grid / tab / pin tint is keyed by NOTE id — a note glows if any of its
     // reminders is ringing.
@@ -7355,6 +7364,7 @@
     const openTasks = [];
     for (const n of notesArr) {
       if (n.content == null) continue; // not cached, or locked — can't scan it
+      if (n.status === 'done' || n.status === 'deleted') continue; // same as server/agenda.js
       const open = (n.content.match(CLIENT_OPEN_TASK_RE) || []).length;
       if (open > 0) openTasks.push({ noteId: n.id, title: n.title, open, updatedAt: n.updated_at });
     }
@@ -7375,11 +7385,18 @@
     return { openTasks: openTasks.slice(0, CLIENT_OPEN_TASKS_LIMIT), todos };
   }
 
+  // 'done' notes are finished business: the agenda (reminders, to-dos, open
+  // tasks, orphans) leaves them out, matching server/agenda.js.
+  function noteIsDone(id) {
+    const n = allNotesCache.find((x) => x.id === id);
+    return !!n && n.status === 'done';
+  }
+
   async function openAgenda() {
     agendaOverlay.classList.remove('hidden');
     agendaBody.textContent = 'Loading…';
     const ref = new Date();
-    const list = (await api.listAlarms()).map((a) => ({
+    const list = (await api.listAlarms()).filter((a) => !noteIsDone(a.noteId)).map((a) => ({
       ...a,
       triggered: alarmTriggered(a, ref),
       fireAt: effectiveNextFire(a, ref),
@@ -7881,7 +7898,7 @@
   // the two searches look and read the same.
   function buildResultRow(n) {
     const div = document.createElement('div');
-    div.className = 'result';
+    div.className = 'result' + (n.status === 'done' ? ' dimmed' : '');
     // isCross (the link modal's cross-scope candidates only — never set on
     // a header-search result) means picking this row creates a reference,
     // not a real link — the 🔗 and subtitle make that clear before you tap it.
@@ -7909,6 +7926,11 @@
     return div;
   }
 
+  // Both searches list 'done' notes last (stable — relative order kept).
+  function sinkDone(list) {
+    return [...list].sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0));
+  }
+
   function renderSearchResults(list) {
     searchResults.innerHTML = '';
     list.forEach((n) => {
@@ -7933,7 +7955,7 @@
     // Instant first paint from the local title cache…
     const ql = q.toLowerCase();
     renderSearchResults(
-      allNotesCache.filter((n) => (n.title || '').toLowerCase().includes(ql)).slice(0, 8)
+      sinkDone(allNotesCache.filter((n) => (n.title || '').toLowerCase().includes(ql))).slice(0, 8)
     );
     // …then replace with ranked full-text results from the server.
     const seq = ++searchSeq;
@@ -8390,7 +8412,7 @@
       ? linkCrossCandidates.filter((n) => (n.title || '').toLowerCase().includes(q))
       : linkCrossCandidates
     ).filter((n) => n.id !== linkTarget);
-    const matches = [...sameScope, ...crossScope].slice(0, 8);
+    const matches = sinkDone([...sameScope, ...crossScope]).slice(0, 8);
 
     linkResults.innerHTML = '';
     matches.forEach((n) => {
