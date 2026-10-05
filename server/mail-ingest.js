@@ -161,10 +161,21 @@ for (const map of [IMAGE_EXT, AUDIO_EXT]) {
   for (const [mime, ext] of Object.entries(map)) if (!MIME_BY_EXT[ext]) MIME_BY_EXT[ext] = mime;
 }
 
-// Real attachments only: inline cid: images (signature logos etc.) are part
-// of the HTML body, not something the sender attached.
+// Real attachments, plus inline cid: images big enough to be a photo. Small
+// inline images (signature logos etc.) are part of the HTML body, not
+// something the sender attached.
 function attachmentsOf(parsed) {
-  return (parsed.attachments || []).filter((a) => !a.related && a.content && a.content.length);
+  return (parsed.attachments || []).filter(
+    (a) => a.content && a.content.length && (!a.related || isPastedImage(a))
+  );
+}
+
+// Gmail (esp. mobile) sends a pasted/inserted photo as an inline cid: image,
+// not an attachment. Keep those; signature logos and tracking pixels are far
+// smaller than any real photo.
+const INLINE_IMAGE_MIN = 20 * 1024;
+function isPastedImage(a) {
+  return /^image\//i.test(a.contentType || '') && a.content.length >= INLINE_IMAGE_MIN;
 }
 
 function parseVcard(text) {
