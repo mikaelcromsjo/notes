@@ -52,6 +52,7 @@
   const pickerCurrentAttachmentLabel = document.getElementById('picker-current-attachment-label');
   const pickerRemoveAttachmentBtn = document.getElementById('picker-remove-attachment-btn');
   const pickerStyleRow = document.getElementById('picker-style-row');
+  const pickerScopeRow = document.getElementById('picker-scope-row');
   const pickerPhotoRow = document.getElementById('picker-photo-row');
   const pickerPhotoInput = document.getElementById('picker-photo-input');
   const pickerCameraInput = document.getElementById('picker-camera-input');
@@ -2983,7 +2984,11 @@
   // browsing a space fails fast with a clear message instead of silently
   // queuing something that can never be replayed correctly.
   function assertSpaceOnline() {
-    if (currentSpace && !navigator.onLine) {
+    assertScopeOnline(currentSpace ? currentSpace.id : null);
+  }
+
+  function assertScopeOnline(shareId) {
+    if (shareId != null && !navigator.onLine) {
       toast('This needs a connection while browsing a shared space.');
       throw httpErr(0, 'offline');
     }
@@ -3129,11 +3134,14 @@
     // Writes: online, hit the server and mirror the result; on a genuine HTTP
     // error, surface it; on a network drop (or when already offline), apply the
     // change locally and queue it (see the write-queue section above).
-    createNote: async (data) => {
-      assertSpaceOnline();
+    // `opts.shareId` (null = personal) overrides the current scope — the
+    // create picker's scope row can file a note into any space you're in.
+    createNote: async (data, opts = {}) => {
+      const scopeId = opts.shareId !== undefined ? opts.shareId : currentSpace ? currentSpace.id : null;
+      assertScopeOnline(scopeId);
       const loc = await getLocation();
       const geo = loc ? await encryptGeoOutgoing(loc.lat, loc.lon) : null;
-      const spaced = currentSpace ? { ...data, shareId: currentSpace.id } : data;
+      const spaced = scopeId != null ? { ...data, shareId: scopeId } : data;
       const body = loc ? (geo ? { ...spaced, geo } : { ...spaced, lat: loc.lat, lon: loc.lon }) : spaced;
       if (navigator.onLine) {
         try {
@@ -3141,7 +3149,7 @@
           const note = await postJson('/api/notes', wireBody);
           note.content = await decryptIncoming(note.content);
           await decryptNoteGeo(note);
-          if (!currentSpace) await cache.putNote(note);
+          if (scopeId == null) await cache.putNote(note);
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
@@ -3151,14 +3159,15 @@
           // against /api/notes, not this space's own notes endpoint), so a
           // shared-space create can't be queued at all; surface the failure
           // instead of silently misfiling it into the personal graph later.
-          if (currentSpace) throw httpErr(0, 'offline');
+          if (scopeId != null) throw httpErr(0, 'offline');
         }
       }
       return queueCreateNote(body);
     },
-    createAttachment: async (parentId, formData) => {
-      assertSpaceOnline();
-      if (currentSpace) formData.set('shareId', String(currentSpace.id));
+    createAttachment: async (parentId, formData, opts = {}) => {
+      const scopeId = opts.shareId !== undefined ? opts.shareId : currentSpace ? currentSpace.id : null;
+      assertScopeOnline(scopeId);
+      if (scopeId != null) formData.set('shareId', String(scopeId));
       const loc = await getLocation();
       if (loc) {
         const geo = await encryptGeoOutgoing(loc.lat, loc.lon);
@@ -3183,12 +3192,12 @@
           const note = await res.json();
           if (note && note.id != null) {
             await decryptNoteGeo(note);
-            if (!currentSpace) await cache.putNote(note);
+            if (scopeId == null) await cache.putNote(note);
           }
           return note;
         } catch (err) {
           if (err.httpStatus) throw err;
-          if (currentSpace) throw httpErr(0, 'offline'); // see createNote's same comment
+          if (scopeId != null) throw httpErr(0, 'offline'); // see createNote's same comment
         }
       }
       if (inline) {
@@ -6558,21 +6567,14 @@
     } else {
       const title = document.createElement('div');
       title.className = 'neighbor-title';
-      // 🔗 marks a reference (server/shares.js's personal_refs) whose
-      // *target* is the shared note — that's the side worth flagging as
-      // "leads to a shared space". A reference viewed from inside that
-      // space, pointing back at an ordinary personal note, gets no badge:
-      // that note isn't shared, only the note it's referenced from is.
+      // 🔗 marks a reference (server/shares.js's personal_refs) either way:
+      // from a personal note into a space, or from inside a space back out
+      // to a personal note — both cross a scope boundary. (Only the
+      // shared-target side also gets the .ref-link card styling above.)
       // 🚫 overrides that for a noAccess ref (the space it pointed into was
       // dissolved, or this member was removed from it) — its title is
       // already the "No access to..." placeholder, not a real note title.
-      const icon = neighbor.isRef
-        ? neighbor.noAccess
-          ? '🚫'
-          : neighbor.refTargetIsShared
-          ? '🔗'
-          : null
-        : TYPE_ICON[neighbor.type];
+      const icon = neighbor.isRef ? (neighbor.noAccess ? '🚫' : '🔗') : TYPE_ICON[neighbor.type];
       const base = icon ? `${icon} ${neighbor.title}` : neighbor.title;
       title.textContent = (isBack ? '↩ ' : '') + base;
       cell.appendChild(title);
@@ -7966,6 +7968,7 @@
   // search-and-connect to an existing one). 'attach' = editing the currently
   // open note's *own* attachment instead — see openPicker's mode option.
   let pickerMode = 'create';
+  let pickerScope = null; // create target: null = personal, else a share id
   let pickerAttachTarget = null; // the note id 'attach' mode edits
   let pickerHasAttachment = false; // that note already carries one, going in
   let pickerRecorder = null;
@@ -8123,8 +8126,12 @@
   // both explicitly about the centered note). Attachment styles need a note to
   // hang off of the same way "Create & connect" does — reflect pendingLinkTarget.
   function syncPickerConnectUI() {
+    // Across two different spaces there's nothing to connect with (a
+    // reference always has one personal side) — see linkAcrossScopes.
+    const here = currentSpace ? currentSpace.id : null;
+    const canConnect = pendingLinkTarget && (pickerScope === here || here == null || pickerScope == null);
     pickerCreateBtn.textContent =
-      pickerMode === 'attach' ? 'Save attachment' : pendingLinkTarget ? 'Create & connect' : 'Create';
+      pickerMode === 'attach' ? 'Save attachment' : canConnect ? 'Create & connect' : 'Create';
   }
 
   const ATTACHABLE_TYPES = new Set(['image', 'audio', 'file', 'contact', 'app']);
@@ -8179,8 +8186,10 @@
       pickerAppUri.value = currentNote.attachment_path || '';
     }
 
+    pickerScope = currentSpace ? currentSpace.id : null;
     syncPickerConnectUI();
     applyPickerStyleVisibility();
+    renderPickerScopeRow();
 
     pickerOverlay.classList.remove('hidden');
     if (mode !== 'attach') {
@@ -8188,6 +8197,59 @@
       // already-selected style row instead.
       pickerNewTitle.focus();
       pickerNewTitle.select();
+    }
+  }
+
+  // Where a new note lands: null = personal, else a share id. One button
+  // each — Personal, the current space (the default), then every other space
+  // you're a member of. Spaces are online-only (getMyShares is [] offline),
+  // so offline this collapses to just the current scope and hides itself.
+  let pickerScopeSeq = 0;
+  async function renderPickerScopeRow() {
+    pickerScope = currentSpace ? currentSpace.id : null;
+    pickerScopeRow.innerHTML = '';
+    pickerScopeRow.classList.add('hidden');
+    if (pickerMode !== 'create') return;
+    const seq = ++pickerScopeSeq;
+    const shares = await api.getMyShares();
+    if (seq !== pickerScopeSeq) return;
+    const options = [{ id: null, label: '👤 Personal' }];
+    if (currentSpace) options.push({ id: currentSpace.id, label: `📂 ${currentSpace.title}` });
+    for (const sh of shares) {
+      if (currentSpace && sh.id === currentSpace.id) continue;
+      options.push({ id: sh.id, label: `📂 ${sh.title}` });
+    }
+    if (options.length < 2) return;
+    for (const o of options) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'picker-style-btn' + (o.id === pickerScope ? ' active' : '');
+      b.textContent = o.label;
+      b.addEventListener('click', () => {
+        pickerScope = o.id;
+        pickerScopeRow.querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b));
+        syncPickerConnectUI();
+      });
+      pickerScopeRow.appendChild(b);
+    }
+    pickerScopeRow.classList.remove('hidden');
+  }
+
+  // A real link can't span scopes, so creating into a different scope than
+  // the note it was opened from creates it unlinked and then, where one side
+  // is personal, a cross-scope reference instead (server/shares.js's addRef).
+  function pickerCrossScope() {
+    const here = currentSpace ? currentSpace.id : null;
+    return pickerScope !== here;
+  }
+
+  async function linkAcrossScopes(fromId, newNote) {
+    const fromSpace = currentSpace ? currentSpace.id : null;
+    try {
+      if (fromSpace == null && pickerScope != null) await api.addRef(pickerScope, fromId, newNote.id);
+      else if (fromSpace != null && pickerScope == null) await api.addRef(fromSpace, newNote.id, fromId);
+    } catch {
+      /* best effort — the note itself was created */
     }
   }
 
@@ -8419,6 +8481,22 @@
     pickerCreating = true;
     pickerCreateBtn.disabled = true;
     try {
+      if (pickerCrossScope()) {
+        const fromId = pendingLinkTarget;
+        const scope = { shareId: pickerScope };
+        let note;
+        if (pickerStyle === 'text') {
+          note = await api.createNote({ title }, scope);
+        } else {
+          if (title) formData.set('title', title);
+          note = await api.createAttachment(null, formData, scope);
+        }
+        closePicker();
+        if (fromId != null && note && note.id != null) await linkAcrossScopes(fromId, note);
+        toast('Created.');
+        await goTo(note.id, 'new');
+        return;
+      }
       if (pickerStyle === 'text') {
         const note = await api.createNote(
           pendingLinkTarget ? { title, linkTo: pendingLinkTarget } : { title }
