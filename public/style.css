@@ -2723,3 +2723,45 @@ html.has-bg body { background: transparent; }
 .action-menu-item:hover { background: var(--bg); filter: none; }
 .action-menu-item.active { background: var(--accent); color: var(--accent-contrast); }
 .action-menu-item.active:hover { background: var(--accent); filter: brightness(1.08); }
+
+/* --- Done-cascade dialog (openStatusCascadeDialog) --- */
+.cascade-list {
+  max-height: 45vh;
+  overflow-y: auto;
+  margin: 0 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.3rem 0.5rem;
+}
+.cascade-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  cursor: pointer;
+}
+.picker .cascade-row input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+  flex: none;
+}
+.cascade-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cascade-row.is-guessed .cascade-title {
+  opacity: 0.75;
+  font-style: italic;
+}
+.cascade-guess {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.picker .cascade-notchild {
+  flex: none;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.75rem;
+}

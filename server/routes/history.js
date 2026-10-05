@@ -43,6 +43,23 @@ function removeLink(a, b) {
   db.prepare('DELETE FROM links WHERE note_a = ? AND note_b = ?').run(a, b);
 }
 
+// A 'status' entry's done-cascade (server/notes.js's setStatus): the sub-notes
+// closed or reopened along with p.noteId flip back (undo) or forward (redo)
+// together with it, keeping done_with_note_id/done_prev_status in step so a
+// later reopen still knows which ones were closed with it. A sub-note that's
+// since gone, or whose status was changed on its own afterwards, is left alone.
+function applyStatusCascade(p, dir, uid) {
+  for (const c of p.cascade || []) {
+    const n = ownNote(c.id, uid);
+    const [expect, target, other] = dir === 'undo' ? [c.to, c.from, c.to] : [c.from, c.to, c.from];
+    if (!n || n.status !== expect) continue;
+    const done = target === 'done';
+    db.prepare(
+      'UPDATE notes SET status = ?, done_with_note_id = ?, done_prev_status = ?, updated_at = ? WHERE id = ?'
+    ).run(target, done ? p.noteId : null, done ? other : null, nowIso(), n.id);
+  }
+}
+
 // Shared by the 'link-relation' undo/redo branches below (server/links.js's
 // setRelation) — restores a link's kind AND both its notes'
 // created_from_note_id to a given
@@ -114,6 +131,7 @@ function applyUndo(action, p, uid) {
     const n = ownNote(p.noteId, uid);
     if (!n) throw new Error('that note no longer exists');
     db.prepare('UPDATE notes SET status = ?, updated_at = ? WHERE id = ?').run(p.from, nowIso(), n.id);
+    applyStatusCascade(p, 'undo', uid);
     return { noteId: n.id };
   }
 
@@ -196,6 +214,7 @@ function applyRedo(action, p, uid) {
     const n = ownNote(p.noteId, uid);
     if (!n) throw new Error('that note no longer exists');
     db.prepare('UPDATE notes SET status = ?, updated_at = ? WHERE id = ?').run(p.to, nowIso(), n.id);
+    applyStatusCascade(p, 'redo', uid);
     return { noteId: n.id };
   }
 

@@ -728,9 +728,7 @@
       const center = byId.get(nid);
       let parent = null;
       if (center && center.created_from_note_id) {
-        const fallback = rows.find((r) => r.id === center.created_from_note_id) || null;
-        // 'done' notes sink everywhere else — never surface one as the back-link.
-        parent = fallback && fallback.status !== 'done' ? fallback : null;
+        parent = rows.find((r) => r.id === center.created_from_note_id) || null;
       }
       // Structural fallback: no recorded provenance. First, drop any
       // candidate that's provably this note's child rather than its parent:
@@ -743,40 +741,8 @@
           (r) => r.created_from_note_id !== nid && r.note_created_at !== r.linked_at
         );
         // `rows` (and so `candidates`) is newest-link-first, so the last
-        // non-done entry is the oldest surviving link. But if a done note had
-        // to be skipped to get there, the true oldest link got archived and
-        // the next survivor is often just an incidental note, not a real
-        // parent — prefer the most-linked survivor instead (mirrors the
-        // server's /neighbors logic).
-        let skippedDone = false;
-        let oldestSurvivor = null;
-        for (let i = candidates.length - 1; i >= 0; i--) {
-          if (candidates[i].status === 'done') {
-            skippedDone = true;
-            continue;
-          }
-          oldestSurvivor = candidates[i];
-          break;
-        }
-        if (oldestSurvivor && skippedDone) {
-          const degree = new Map();
-          for (const l of links) {
-            if (l._deleted) continue;
-            degree.set(l.a, (degree.get(l.a) || 0) + 1);
-            degree.set(l.b, (degree.get(l.b) || 0) + 1);
-          }
-          const orderIndex = new Map(rows.map((r, i) => [r.id, i])); // 0 = newest
-          const survivors = candidates.filter((r) => r.status !== 'done');
-          survivors.sort((a, b) => {
-            const da = degree.get(a.id) || 0;
-            const dbDeg = degree.get(b.id) || 0;
-            if (da !== dbDeg) return dbDeg - da;
-            return orderIndex.get(b.id) - orderIndex.get(a.id); // larger index = older = first
-          });
-          parent = survivors[0];
-        } else {
-          parent = oldestSurvivor;
-        }
+        // entry is the oldest link (mirrors the server's /neighbors logic).
+        parent = candidates[candidates.length - 1] || null;
       }
       const parentId = parent ? parent.id : null;
       const ordered = rows.filter((r) => r.id !== parentId);
@@ -824,34 +790,14 @@
         let parent = null;
         if (n.created_from_note_id) {
           const fb = rows.find((r) => r.id === n.created_from_note_id);
-          if (fb && fb.status !== 'done') parent = fb.id;
+          if (fb) parent = fb.id;
         }
         if (parent == null) {
           const candidates = rows.filter(
             (r) => r.created_from_note_id !== n.id && r.created_at !== r.linked_at
           );
-          let skippedDone = false;
-          let oldestSurvivor = null;
-          for (let i = candidates.length - 1; i >= 0; i--) {
-            if (candidates[i].status === 'done') {
-              skippedDone = true;
-              continue;
-            }
-            oldestSurvivor = candidates[i];
-            break;
-          }
-          if (oldestSurvivor && skippedDone) {
-            const survivors = candidates.filter((r) => r.status !== 'done');
-            survivors.sort((a, b) => {
-              const da = degree.get(a.id) || 0;
-              const dbDeg = degree.get(b.id) || 0;
-              if (da !== dbDeg) return dbDeg - da;
-              return a.linked_at < b.linked_at ? -1 : a.linked_at > b.linked_at ? 1 : 0;
-            });
-            parent = survivors[0] ? survivors[0].id : null;
-          } else {
-            parent = oldestSurvivor ? oldestSurvivor.id : null;
-          }
+          const oldest = candidates[candidates.length - 1]; // rows are newest-first
+          parent = oldest ? oldest.id : null;
         }
         parentOf.set(n.id, parent);
       }
@@ -1401,8 +1347,8 @@
         await store.put('outbox', up);
         return refreshPending();
       }
-    } else if (kind === 'note.status') {
-      const prev = find((e) => e.kind === 'note.status' && e.payload.id === payload.id);
+    } else if (kind === 'note.status' && !payload.cascade) {
+      const prev = find((e) => e.kind === 'note.status' && e.payload.id === payload.id && !e.payload.cascade);
       if (prev) {
         prev.payload.status = payload.status;
         await store.put('outbox', prev);
@@ -1612,7 +1558,10 @@
     if (e.kind === 'note.status') {
       const id = idResolve(p.id);
       if (isTmp(id)) throw httpErr(0, 'note not synced yet');
-      await cache.putNote(await putJson(`/api/notes/${id}/status`, { status: p.status }));
+      const cascade = (p.cascade || []).map(idResolve).filter((c) => !isTmp(c));
+      await cache.putNote(
+        await putJson(`/api/notes/${id}/status`, cascade.length ? { status: p.status, cascade } : { status: p.status })
+      );
       return;
     }
 
@@ -3278,11 +3227,15 @@
       }
       return queueUpdateNote(id, data, prev);
     },
-    setStatus: async (id, status) => {
+    // `cascade` (optional): sub-note ids ticked in openStatusCascadeDialog —
+    // closed along with this note, or (when reopening it) restored to what
+    // they were before being closed with it. See server/notes.js's setStatus.
+    setStatus: async (id, status, cascade) => {
       assertSpaceOnline();
+      const body = cascade && cascade.length ? { status, cascade } : { status };
       if (navigator.onLine && !isTmp(id)) {
         try {
-          const note = await putJson(`/api/notes/${id}/status`, { status });
+          const note = await putJson(`/api/notes/${id}/status`, body);
           if (!currentSpace) await cache.putNote(note);
           return note;
         } catch (err) {
@@ -3291,10 +3244,23 @@
         }
       }
       const prev = await localNoteFor(id);
-      const note = { ...prev, id, status, updated_at: new Date().toISOString(), _dirty: true };
+      const now = new Date().toISOString();
+      const note = { ...prev, id, status, done_with_note_id: null, updated_at: now, _dirty: true };
       if (store) await store.put('notes', note);
-      patchListCache(id, { status });
-      await enqueue('note.status', { id, status }, [id]);
+      patchListCache(id, { status, done_with_note_id: null });
+      // Optimistic mirror of the server's cascade rules; the outbox entry
+      // carries the ids so the server applies (and records) the real thing.
+      for (const cid of body.cascade || []) {
+        const c = await localNoteFor(cid);
+        if (c.id == null) continue;
+        const closing = status === 'done';
+        const patch = closing
+          ? { status: 'done', done_with_note_id: id }
+          : { status: (c.done_prev_status && c.done_prev_status !== 'done') ? c.done_prev_status : 'active', done_with_note_id: null };
+        if (store) await store.put('notes', { ...c, ...patch, updated_at: now, _dirty: true });
+        patchListCache(cid, patch);
+      }
+      await enqueue('note.status', body.cascade ? { id, status, cascade: body.cascade } : { id, status }, [id, ...(body.cascade || [])]);
       scheduleFlush();
       return note;
     },
@@ -5774,6 +5740,162 @@
     'auto-cross': 'probable cross-reference',
   };
 
+  // Done-cascade: before a status change, offer to carry it to sub-notes.
+  // Resolves to an array of note ids to pass as setStatus's `cascade` (empty
+  // = just this note), or null if the user cancelled the whole change.
+  //  - Closing (→ done): every still-open note under this one in the
+  //    inferred hierarchy (hierarchyParents — the same map the relation
+  //    icons use, personal or space-scoped). A row is pre-ticked only when
+  //    every link from here down to it is explicit (created_from_note_id);
+  //    guessed ones start unticked and carry a "Not a child" button that
+  //    marks that link a cross-reference (setLinkRelation 'cross'), which
+  //    also fixes the guess for good. Ticking/unticking a row does the same
+  //    to everything under it.
+  //  - Reopening (done → anything but deleted): the notes that were closed
+  //    *with* this one (done_with_note_id) and are still done — all ticked;
+  //    each goes back to its own earlier status, not this note's new one.
+  // No dialog at all when there's nothing to offer.
+  async function openStatusCascadeDialog(note, from, to) {
+    const rowById = new Map(allNotesCache.map((n) => [n.id, n]));
+    let rows = [];
+    let mode;
+    if (to === 'done' && from !== 'done') {
+      mode = 'close';
+      const childrenOf = new Map();
+      for (const [cid, pid] of Object.entries(hierarchyParents)) {
+        if (!childrenOf.has(pid)) childrenOf.set(pid, []);
+        childrenOf.get(pid).push(Number(cid));
+      }
+      const seen = new Set([note.id]);
+      const walk = (pid, depth, explicitChain) => {
+        const kids = (childrenOf.get(pid) || [])
+          .map((id) => rowById.get(id))
+          .filter((n) => n && !seen.has(n.id))
+          .sort((a, b) => String(a.title).localeCompare(String(b.title)));
+        for (const n of kids) {
+          seen.add(n.id);
+          const explicit = explicitChain && n.created_from_note_id === pid;
+          const open = n.status !== 'done' && n.status !== 'deleted';
+          // A done note isn't offered, but whatever's still open under it is.
+          if (open) rows.push({ note: n, parentId: pid, depth, explicit, checked: explicit });
+          walk(n.id, open ? depth + 1 : depth, explicit);
+        }
+      };
+      walk(note.id, 0, true);
+    } else if (from === 'done' && to !== 'done' && to !== 'deleted') {
+      mode = 'reopen';
+      rows = allNotesCache
+        .filter((n) => n.done_with_note_id === note.id && n.status === 'done')
+        .map((n) => ({ note: n, parentId: null, depth: 0, explicit: true, checked: true }));
+    }
+    if (!rows.length) return [];
+
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      const box = document.createElement('div');
+      box.className = 'picker cascade-dialog';
+      const h = document.createElement('h2');
+      h.textContent = mode === 'close' ? 'Also mark these done?' : 'Also reopen these?';
+      const msg = document.createElement('p');
+      msg.className = 'confirm-message';
+      msg.textContent =
+        mode === 'close'
+          ? `Open notes under “${note.title}”. Guessed sub-notes start unticked.`
+          : `These were marked done together with “${note.title}”. Each goes back to the status it had before.`;
+      const list = document.createElement('div');
+      list.className = 'cascade-list';
+      const okBtn = document.createElement('button');
+      const justBtn = document.createElement('button');
+      justBtn.className = 'secondary';
+      justBtn.textContent = 'Just this note';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'secondary';
+      cancelBtn.textContent = 'Cancel';
+
+      // Everything under rows[i] (rows are in depth-first order).
+      const subtreeOf = (i) => {
+        const out = [];
+        for (let j = i + 1; j < rows.length && rows[j].depth > rows[i].depth; j++) out.push(j);
+        return out;
+      };
+      const draw = () => {
+        list.replaceChildren();
+        rows.forEach((r, i) => {
+          const row = document.createElement('label');
+          row.className = 'cascade-row' + (r.explicit ? '' : ' is-guessed');
+          row.style.paddingLeft = `${r.depth * 1.1}rem`;
+          const cb = document.createElement('input');
+          cb.type = 'checkbox';
+          cb.checked = r.checked;
+          cb.addEventListener('change', () => {
+            r.checked = cb.checked;
+            for (const j of subtreeOf(i)) rows[j].checked = cb.checked;
+            draw();
+          });
+          const title = document.createElement('span');
+          title.className = 'cascade-title';
+          const st = r.note.status !== 'active' && mode === 'close' ? ` (${r.note.status})` : '';
+          title.textContent = (r.note.title || 'Untitled') + st;
+          row.append(cb, title);
+          if (!r.explicit) {
+            const tag = document.createElement('span');
+            tag.className = 'cascade-guess';
+            tag.textContent = 'guessed';
+            const notChild = document.createElement('button');
+            notChild.type = 'button';
+            notChild.className = 'secondary cascade-notchild';
+            notChild.textContent = 'Not a child';
+            notChild.title = 'Mark this connection as a cross-reference, not parent → child';
+            notChild.addEventListener('click', async (e) => {
+              e.preventDefault();
+              notChild.disabled = true;
+              try {
+                await api.setLinkRelation(r.parentId, r.note.id, 'cross');
+                const drop = new Set([i, ...subtreeOf(i)]);
+                rows = rows.filter((_, j) => !drop.has(j));
+                if (!rows.length) return done([]);
+                draw();
+              } catch (err) {
+                notChild.disabled = false;
+                toast(err.message || "Couldn't update that connection.");
+              }
+            });
+            row.append(tag, notChild);
+          }
+          list.appendChild(row);
+        });
+        const n = rows.filter((r) => r.checked).length;
+        okBtn.textContent = mode === 'close' ? `Mark ${n + 1} done` : `Reopen ${n + 1}`;
+      };
+
+      const actions = document.createElement('div');
+      actions.className = 'picker-actions';
+      actions.append(okBtn, justBtn, cancelBtn);
+      box.append(h, msg, list, actions);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      draw();
+
+      const done = (val) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(null);
+      };
+      okBtn.addEventListener('click', () => done(rows.filter((r) => r.checked).map((r) => r.note.id)));
+      justBtn.addEventListener('click', () => done([]));
+      cancelBtn.addEventListener('click', () => done(null));
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) done(null);
+      });
+      document.addEventListener('keydown', onKey);
+      okBtn.focus();
+    });
+  }
+
   // The "choose relationship" menu (server/links.js's setRelation) — "mark
   // `other`, as seen from `centerId`, as a child / a parent / a cross-
   // reference", plus "Remove connection" (a plain unlink — no separate ✕
@@ -6230,7 +6352,9 @@
           active: s === curStatus,
           onClick: async () => {
             if (s === curStatus) return;
-            currentNote = await api.setStatus(currentId, s);
+            const cascade = await openStatusCascadeDialog(currentNote, curStatus, s);
+            if (cascade == null) return; // dialog cancelled — change nothing
+            currentNote = await api.setStatus(currentId, s, cascade);
             allNotesCache = await api.listNotes();
             renderPinbar();
             await onRerender();

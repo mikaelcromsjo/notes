@@ -287,7 +287,8 @@ function listShareNotes(db, userId, shareId) {
   requireMember(shareId, userId);
   return db
     .prepare(
-      `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo
+      `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo,
+              created_from_note_id, done_with_note_id
        FROM notes WHERE share_id = ? AND status != 'deleted'
        ORDER BY updated_at DESC`
     )

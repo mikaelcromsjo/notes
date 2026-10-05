@@ -84,7 +84,7 @@ router.delete('/:id/pin', wrap((req) => notesCore.unpin(db, req.userId, req.para
 // is not in the undo history.
 router.put('/:id/theme', wrap((req) => notesCore.setTheme(db, req.userId, req.params.id, req.body)));
 
-router.put('/:id/status', wrap((req) => notesCore.setStatus(db, req.userId, req.params.id, req.body.status)));
+router.put('/:id/status', wrap((req) => notesCore.setStatus(db, req.userId, req.params.id, req.body.status, req.body.cascade)));
 
 // Linked, non-deleted notes ranked by "probable next step", plus the single
 // "probable parent" — recorded provenance, falling back to the oldest link.

@@ -15,7 +15,7 @@ function scopeClause(scope, alias = '') {
 // Builds the inferred parent/child hierarchy over one scope's link graph in
 // one pass — the same "probable parent" rules as GET /notes/:id/neighbors
 // (see that route for the full rationale): explicit created_from_note_id
-// first, else the oldest surviving link, skipping 'done' notes and any
+// first, else the oldest surviving link, skipping any
 // candidate that's provably a child (its own created_from_note_id points
 // back here, or it was born at the exact instant of the link) rather than a
 // parent. Kept as a separate module (rather than refactoring /neighbors to
@@ -41,7 +41,7 @@ function buildHierarchy(scope) {
   const nbClause = scopeClause(scope, 'nb');
   const links = db
     .prepare(
-      `SELECT l.note_a, l.note_b, l.created_at
+      `SELECT l.note_a, l.note_b, l.created_at, l.kind
        FROM links l
        JOIN notes na ON na.id = l.note_a
        JOIN notes nb ON nb.id = l.note_b
@@ -49,18 +49,18 @@ function buildHierarchy(scope) {
     )
     .all(...naClause.params, ...nbClause.params);
 
-  // Degree (hub-ness, for the done-skip tie-break) counts every link in this
+  // Degree (hub-ness, used to break parent cycles below) counts every link in this
   // scope, same as /neighbors' degree query — independent of whether the far
   // end is still around. Candidate rows below are filtered to living
   // neighbors separately.
   const degree = new Map();
   const neighborsOf = new Map(notes.map((n) => [n.id, []]));
-  for (const { note_a, note_b, created_at } of links) {
+  for (const { note_a, note_b, created_at, kind } of links) {
     degree.set(note_a, (degree.get(note_a) || 0) + 1);
     degree.set(note_b, (degree.get(note_b) || 0) + 1);
     if (neighborsOf.has(note_a) && neighborsOf.has(note_b)) {
-      neighborsOf.get(note_a).push({ id: note_b, linked_at: created_at });
-      neighborsOf.get(note_b).push({ id: note_a, linked_at: created_at });
+      neighborsOf.get(note_a).push({ id: note_b, linked_at: created_at, kind });
+      neighborsOf.get(note_b).push({ id: note_a, linked_at: created_at, kind });
     }
   }
 
@@ -70,43 +70,25 @@ function buildHierarchy(scope) {
       .get(n.id)
       .slice()
       .sort((a, b) => (a.linked_at < b.linked_at ? 1 : a.linked_at > b.linked_at ? -1 : 0)) // newest first
-      .map(({ id, linked_at }) => {
+      .map(({ id, linked_at, kind }) => {
         const other = byId.get(id);
-        return other ? { ...other, linked_at } : null;
+        return other ? { ...other, linked_at, link_kind: kind } : null;
       })
       .filter(Boolean);
 
     let parent = null;
     if (n.created_from_note_id) {
       const fb = rows.find((r) => r.id === n.created_from_note_id);
-      if (fb && fb.status !== 'done') parent = fb.id;
+      if (fb) parent = fb.id;
     }
     if (parent == null) {
       const candidates = rows.filter(
-        (r) => r.created_from_note_id !== n.id && r.created_at !== r.linked_at
+        (r) => r.created_from_note_id !== n.id && r.created_at !== r.linked_at && r.link_kind !== 'cross'
       );
-      let skippedDone = false;
-      let oldestSurvivor = null;
-      for (let i = candidates.length - 1; i >= 0; i--) {
-        if (candidates[i].status === 'done') {
-          skippedDone = true;
-          continue;
-        }
-        oldestSurvivor = candidates[i];
-        break;
-      }
-      if (oldestSurvivor && skippedDone) {
-        const survivors = candidates.filter((r) => r.status !== 'done');
-        survivors.sort((a, b) => {
-          const da = degree.get(a.id) || 0;
-          const dbDeg = degree.get(b.id) || 0;
-          if (da !== dbDeg) return dbDeg - da;
-          return a.linked_at < b.linked_at ? -1 : a.linked_at > b.linked_at ? 1 : 0;
-        });
-        parent = survivors[0] ? survivors[0].id : null;
-      } else {
-        parent = oldestSurvivor ? oldestSurvivor.id : null;
-      }
+      // A link the user marked 'cross' is never a guessed parent edge (same
+      // rule as buildRootedTree). rows are newest-link-first, so the last candidate is the oldest link.
+      const oldest = candidates[candidates.length - 1];
+      parent = oldest ? oldest.id : null;
     }
     parentOf.set(n.id, parent);
   }

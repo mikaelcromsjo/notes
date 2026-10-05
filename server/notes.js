@@ -53,7 +53,8 @@ function parseGeo(body) {
 function list(db, userId) {
   return db
     .prepare(
-      `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo, theme, theme_children
+      `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo, theme, theme_children,
+              created_from_note_id, done_with_note_id
        FROM notes WHERE user_id = ? AND share_id IS NULL AND status != 'deleted'
        ORDER BY updated_at DESC`
     )
@@ -451,21 +452,63 @@ const STATUS_VERB = {
   active: 'Reopened',
 };
 
-function setStatus(db, userId, id, status) {
+// Writes one note's status as part of a done-cascade (or its undo/redo):
+// landing on 'done' records `withId` + the status it came from so reopening
+// `withId` can restore it; anything else clears that bookkeeping.
+function applyCascadeStatus(db, noteId, status, otherStatus, withId) {
+  const done = status === 'done';
+  db.prepare(
+    'UPDATE notes SET status = ?, done_with_note_id = ?, done_prev_status = ?, updated_at = ? WHERE id = ?'
+  ).run(status, done ? withId : null, done ? otherStatus : null, now(), noteId);
+}
+
+// `cascade` (optional) = note ids the user ticked in the client's
+// "also mark these done?" / "also reopen these?" dialog. Marking done: each
+// still-open one is closed along with this note. Reopening (any non-done,
+// non-deleted status, from 'done'): each one that was closed *with this
+// note* and is still done goes back to its own pre-cascade status. Ids that
+// don't qualify (other scope, already done/reopened since) are skipped, not
+// an error — the dialog's list can be a few seconds stale.
+function setStatus(db, userId, id, status, cascade) {
   if (!NOTE_STATUSES.has(status)) {
     throw new HttpError(400, `status must be one of: ${[...NOTE_STATUSES].join(', ')}`);
   }
   const { role, note: prev } = resolveNoteAccess(db, userId, id);
   if (!role) throw new HttpError(404, 'not found');
 
-  db.prepare('UPDATE notes SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), id);
+  const cascaded = [];
+  db.transaction(() => {
+    // A direct status change is the note's own decision — it's no longer
+    // "closed along with" anything.
+    db.prepare(
+      'UPDATE notes SET status = ?, done_with_note_id = NULL, done_prev_status = NULL, updated_at = ? WHERE id = ?'
+    ).run(status, now(), id);
+
+    const ids = Array.isArray(cascade) ? [...new Set(cascade.map(Number))].filter((x) => x !== prev.id) : [];
+    const closing = status === 'done' && prev.status !== 'done';
+    const reopening = prev.status === 'done' && status !== 'done' && status !== 'deleted';
+    for (const cid of ids) {
+      if (!Number.isInteger(cid)) continue;
+      const { role: crole, note: c } = resolveNoteAccess(db, userId, cid);
+      if (!crole || c.share_id !== prev.share_id) continue;
+      if (closing && c.status !== 'done' && c.status !== 'deleted') {
+        applyCascadeStatus(db, c.id, 'done', c.status, prev.id);
+        cascaded.push({ id: c.id, from: c.status, to: 'done' });
+      } else if (reopening && c.status === 'done' && c.done_with_note_id === prev.id) {
+        const back = NOTE_STATUSES.has(c.done_prev_status) && c.done_prev_status !== 'done' ? c.done_prev_status : 'active';
+        applyCascadeStatus(db, c.id, back, null, null);
+        cascaded.push({ id: c.id, from: 'done', to: back });
+      }
+    }
+  })();
 
   if (status !== prev.status) {
+    const extra = cascaded.length ? ` + ${cascaded.length} sub-note${cascaded.length === 1 ? '' : 's'}` : '';
     history.record(
       userId,
       'status',
-      { noteId: prev.id, from: prev.status, to: status },
-      `${STATUS_VERB[status] || 'Changed'} "${prev.title}"`
+      { noteId: prev.id, from: prev.status, to: status, cascade: cascaded },
+      `${STATUS_VERB[status] || 'Changed'} "${prev.title}"${extra}`
     );
   }
   return db.prepare('SELECT * FROM notes WHERE id = ?').get(id);

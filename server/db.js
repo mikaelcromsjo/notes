@@ -76,6 +76,16 @@ if (!noteColumns.some((c) => c.name === 'attachment_size')) {
 if (!noteColumns.some((c) => c.name === 'status')) {
   db.exec("ALTER TABLE notes ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
 }
+// Done-cascade bookkeeping (server/notes.js's setStatus): a note marked done
+// *along with* an ancestor (the "also mark these done?" dialog) records that
+// ancestor in done_with_note_id and its own pre-cascade status in
+// done_prev_status, so reopening the ancestor can offer to reopen exactly
+// those notes — back to what each was — and nothing that was already done
+// on its own. Both cleared whenever the note's status is set directly.
+if (!noteColumns.some((c) => c.name === 'done_with_note_id')) {
+  db.exec('ALTER TABLE notes ADD COLUMN done_with_note_id INTEGER');
+  db.exec('ALTER TABLE notes ADD COLUMN done_prev_status TEXT');
+}
 
 // --- Alarms: a note can carry a wake-up. alarm_time is HH:MM in the viewer's
 // timezone. Recurring when alarm_days is a CSV of JS getDay() numbers (0=Sun);
