@@ -3128,7 +3128,10 @@
           // cache (v1 shared spaces are online-only — see currentSpace's
           // doc comment) — it would sit among personal notes in the same
           // store and be reconstructed as part of the personal offline graph.
-          if (!currentSpace) await cache.putNote(n);
+          // Checked on the note itself, not currentSpace: a jump from the
+          // personal view into a space note (to-do/alarm bar, agenda) fetches
+          // it while still in personal scope.
+          if (n.share_id == null) await cache.putNote(n);
         }
         return n || (currentSpace ? null : await cache.cachedNote(id));
       } catch {
@@ -7222,7 +7225,9 @@
 
       const title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = `📋 ${note.title}`;
+      // A to-do pulled in from a space referenced under here (server/notes.js's
+      // crossScopeSubtree) carries its space's name.
+      title.textContent = `📋 ${note.title}` + (note.shareTitle ? ` 🔗${note.shareTitle}` : '');
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(note.id, 'todo'));
@@ -7247,7 +7252,7 @@
     // `⏰ ${a.time} ${a.title}` would read as a broken chip with a blank time.
     // They're surfaced via the map/toast/agenda instead, not this time-based bar.
     const scheduled = alarms.filter(
-      (a) => a.kind !== 'location' && a.kind !== 'anytime' && underHere.has(a.noteId) && !noteIsDone(a.noteId)
+      (a) => a.kind !== 'location' && a.kind !== 'anytime' && underHere.has(a.noteId) && !alarmNoteDone(a)
     );
     alarmbar.classList.toggle('hidden', scheduled.length === 0 || !barPrefs.alarms);
 
@@ -7260,7 +7265,7 @@
 
       const title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = `⏰ ${a.time} ${a.title}`;
+      title.textContent = `⏰ ${a.time} ${a.title}` + (a.shareTitle ? ` 🔗${a.shareTitle}` : '');
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(a.noteId, 'alarm'));
@@ -7340,7 +7345,7 @@
     // below, so un-doning the note picks the schedule straight back up.
     alarms = (await api.listAlarms()).map((a) => ({
       ...a,
-      triggered: !noteIsDone(a.noteId) && alarmTriggered(a, ref),
+      triggered: !alarmNoteDone(a) && alarmTriggered(a, ref),
     }));
 
     // Grid / tab / pin tint is keyed by NOTE id — a note glows if any of its
@@ -7713,12 +7718,18 @@
     const n = allNotesCache.find((x) => x.id === id);
     return !!n && n.status === 'done';
   }
+  // Same for a reminder: its note may be outside allNotesCache (a space note
+  // seen from the personal view), so fall back to the status the server
+  // attached to the reminder (server/reminders.js's serialize).
+  function alarmNoteDone(a) {
+    return noteIsDone(a.noteId) || a.noteStatus === 'done';
+  }
 
   async function openAgenda() {
     agendaOverlay.classList.remove('hidden');
     agendaBody.textContent = 'Loading…';
     const ref = new Date();
-    const list = (await api.listAlarms()).filter((a) => !noteIsDone(a.noteId)).map((a) => ({
+    const list = (await api.listAlarms()).filter((a) => !alarmNoteDone(a)).map((a) => ({
       ...a,
       triggered: alarmTriggered(a, ref),
       fireAt: effectiveNextFire(a, ref),
@@ -7778,9 +7789,17 @@
     // locally instead (see localOpenTasksAndTodos above).
     const extra = await api.agenda();
     if (extra && encryptionActive()) {
+      // Space notes are plaintext (only personal ones are encrypted), so the
+      // server's rows for them — tagged shareId — are right and stay; only
+      // the personal half is swapped for the local recompute.
       const local = await localOpenTasksAndTodos();
-      extra.openTasks = local.openTasks;
-      extra.todos = local.todos;
+      const spaceRows = (rows) => (rows || []).filter((r) => r.shareId != null);
+      extra.openTasks = [...local.openTasks, ...spaceRows(extra.openTasks)]
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+        .slice(0, CLIENT_OPEN_TASKS_LIMIT);
+      extra.todos = [...local.todos, ...spaceRows(extra.todos)].sort((a, b) =>
+        String(b.updatedAt).localeCompare(String(a.updatedAt))
+      );
     }
     const todos = (extra && extra.todos) || [];
     if (todos.length) {
@@ -7789,39 +7808,62 @@
       h.textContent = 'To-do';
       agendaBody.appendChild(h);
 
-      // Group by @context tag (server/tags.js) — a todo with several tags
-      // appears under each one, since it genuinely fits either context. Only
-      // adds grouping once something's actually tagged; with no tags in use
-      // yet this renders exactly like the old flat list.
-      const byTag = new Map();
-      const untagged = [];
+      // Grouped by space first (personal, then each space by name — only
+      // headed once a space to-do is actually present), then within each by
+      // @context tag (server/tags.js) — a todo with several tags appears
+      // under each one, since it genuinely fits either context. With no
+      // spaces or tags in use this renders exactly like a flat list.
+      const bySpace = new Map(); // shareId|null -> { title, items }
       todos.forEach((t) => {
-        const tags = t.tags || [];
-        if (!tags.length) {
-          untagged.push(t);
-          return;
-        }
-        tags.forEach((tag) => {
-          if (!byTag.has(tag)) byTag.set(tag, []);
-          byTag.get(tag).push(t);
+        const key = t.shareId != null ? t.shareId : null;
+        if (!bySpace.has(key)) bySpace.set(key, { title: t.shareTitle || 'Shared space', items: [] });
+        bySpace.get(key).items.push(t);
+      });
+      const spaceKeys = [...bySpace.keys()].sort((a, b) =>
+        a == null ? -1 : b == null ? 1 : bySpace.get(a).title.localeCompare(bySpace.get(b).title)
+      );
+      const showSpaceHeads = spaceKeys.some((k) => k != null);
+      const renderTagGroups = (items) => {
+        const byTag = new Map();
+        const untagged = [];
+        items.forEach((t) => {
+          const tags = t.tags || [];
+          if (!tags.length) {
+            untagged.push(t);
+            return;
+          }
+          tags.forEach((tag) => {
+            if (!byTag.has(tag)) byTag.set(tag, []);
+            byTag.get(tag).push(t);
+          });
         });
-      });
-      [...byTag.keys()].sort().forEach((tag) => {
-        const sub = document.createElement('div');
-        sub.className = 'agenda-subhead';
-        sub.textContent = `@${tag}`;
-        agendaBody.appendChild(sub);
-        byTag.get(tag).forEach((t) => agendaBody.appendChild(todoRow(t)));
-      });
-      if (untagged.length) {
-        if (byTag.size) {
+        [...byTag.keys()].sort().forEach((tag) => {
           const sub = document.createElement('div');
           sub.className = 'agenda-subhead';
-          sub.textContent = 'Other';
+          sub.textContent = `@${tag}`;
+          agendaBody.appendChild(sub);
+          byTag.get(tag).forEach((t) => agendaBody.appendChild(todoRow(t)));
+        });
+        if (untagged.length) {
+          if (byTag.size) {
+            const sub = document.createElement('div');
+            sub.className = 'agenda-subhead';
+            sub.textContent = 'Other';
+            agendaBody.appendChild(sub);
+          }
+          untagged.forEach((t) => agendaBody.appendChild(todoRow(t)));
+        }
+      };
+      spaceKeys.forEach((key) => {
+        const group = bySpace.get(key);
+        if (showSpaceHeads) {
+          const sub = document.createElement('div');
+          sub.className = 'agenda-spacehead';
+          sub.textContent = key == null ? '👤 Personal' : `🔗 ${group.title}`;
           agendaBody.appendChild(sub);
         }
-        untagged.forEach((t) => agendaBody.appendChild(todoRow(t)));
-      }
+        renderTagGroups(group.items);
+      });
     }
     // Waiting: local (allNotesCache already has status for every note) — not
     // server-computed like the others, since it's deliberately left out of

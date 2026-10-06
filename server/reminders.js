@@ -32,11 +32,16 @@ function serialize(r) {
     ackAt: r.ack_at,
     nextAt: r.next_at,
     snoozeUntil: r.snooze_until,
+    // The client's note cache only holds the current scope, so a reminder on
+    // a space note carries what the alarm bar/agenda need about it directly.
+    noteStatus: r.note_status,
+    ...(r.share_id != null ? { shareId: r.share_id, shareTitle: r.share_title } : {}),
   };
 }
 
 const COLS = `r.id, r.note_id, r.kind, r.time, r.days, r.date, r.lat, r.lon, r.radius_m, r.geo,
-              r.window_start, r.window_end, r.tz, r.ack_at, r.next_at, r.snooze_until, n.title`;
+              r.window_start, r.window_end, r.tz, r.ack_at, r.next_at, r.snooze_until, n.title,
+              n.status AS note_status, n.share_id, (SELECT title FROM shares WHERE id = n.share_id) AS share_title`;
 
 function selectOne(db, id, userId) {
   return db

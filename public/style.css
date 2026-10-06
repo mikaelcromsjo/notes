@@ -2351,6 +2351,14 @@ button:hover { filter: brightness(1.05); }
   margin: 0.6rem 0 0.15rem;
 }
 
+.agenda-spacehead {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin: 0.8rem 0 0.1rem;
+  padding-bottom: 0.1rem;
+  border-bottom: 1px solid var(--border);
+}
+
 .agenda-item {
   display: flex;
   align-items: center;

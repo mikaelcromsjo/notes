@@ -38,7 +38,9 @@ const VISIBLE_NOTES = `((n.user_id = ? AND n.share_id IS NULL) OR n.share_id IN 
 // localOpenTasksAndTodos, §3.5) and for the Android widget feed, which has
 // no crypto of its own and so is *meant* to just show nothing here.
 const taskNotesStmt = db.prepare(
-  `SELECT id, title, content, updated_at FROM notes n
+  `SELECT id, title, content, updated_at, share_id,
+          (SELECT title FROM shares WHERE id = n.share_id) AS share_title
+   FROM notes n
    WHERE ${VISIBLE_NOTES} AND n.status NOT IN ('deleted', 'done') AND n.content LIKE '%[ ]%'`
 );
 
@@ -47,7 +49,9 @@ const taskNotesStmt = db.prepare(
 // `content` is only pulled to extract GTD `@context` tags (server/tags.js)
 // for the agenda's by-tag grouping — never sent on to the client as-is.
 const todoNotesStmt = db.prepare(
-  `SELECT id, title, content, updated_at FROM notes n
+  `SELECT id, title, content, updated_at, share_id,
+          (SELECT title FROM shares WHERE id = n.share_id) AS share_title
+   FROM notes n
    WHERE ${VISIBLE_NOTES} AND n.status = 'todo'
    ORDER BY n.updated_at DESC`
 );
@@ -71,6 +75,11 @@ const orphansStmt = db.prepare(
      AND NOT EXISTS (SELECT 1 FROM links l WHERE l.note_a = n.id OR l.note_b = n.id)
    ORDER BY n.updated_at DESC LIMIT 20`
 );
+
+// Space notes are tagged with their shareId so an encrypted account's client,
+// which recomputes the personal half of these lists locally (it can't trust
+// the server's view of ciphertext), knows which server rows to keep.
+const shareOf = (n) => (n.share_id != null ? { shareId: n.share_id, shareTitle: n.share_title } : {});
 
 function validZone(tz) {
   if (typeof tz !== 'string' || !tz) return null;
@@ -161,7 +170,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
   for (const n of taskNotesStmt.all(userId, userId)) {
     const open = (String(n.content || '').match(OPEN_TASK_RE) || []).length;
     if (open > 0) {
-      openTasks.push({ noteId: n.id, title: n.title, open, updatedAt: n.updated_at });
+      openTasks.push({ noteId: n.id, title: n.title, open, updatedAt: n.updated_at, ...shareOf(n) });
     }
   }
   openTasks.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
@@ -171,6 +180,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
     title: n.title,
     updatedAt: n.updated_at,
     tags: [...new Set([...extractTags(n.title), ...extractTags(n.content)])],
+    ...shareOf(n),
   }));
 
   const orphans = orphansStmt.all(userId, userId).map((n) => ({ noteId: n.id, title: n.title }));

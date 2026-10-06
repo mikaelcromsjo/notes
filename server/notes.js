@@ -537,26 +537,69 @@ function neighbors(db, userId, id) {
   return result;
 }
 
-// Every 'todo'-flagged note anywhere under this one in the inferred hierarchy.
+// The center's own subtree plus, for a personal center, every shared space
+// it reaches through this user's personal_refs: a ref from the center or any
+// note under it pulls in the referenced shared note and that note's subtree
+// in the space's own hierarchy. One-way on purpose — a space-scoped center
+// never pulls personal notes in. A ref only counts while the user is still a
+// member of its space. Returns [{ id, note, share }] (share = { id, title } or
+// null), center excluded.
+function crossScopeSubtree(db, userId, center) {
+  const { byId, childrenOf } = buildHierarchy(scopeOf(center));
+  const own = subtreeIds(childrenOf, center.id);
+  const out = own.map((id) => ({ id, note: byId.get(id), share: null }));
+  if (center.share_id != null) return out;
+
+  const local = [center.id, ...own];
+  const refs = db
+    .prepare(
+      `SELECT pr.share_id, pr.shared_note_id, s.title AS share_title
+       FROM personal_refs pr
+       JOIN shares s ON s.id = pr.share_id
+       JOIN share_members m ON m.share_id = pr.share_id AND m.user_id = pr.user_id
+       WHERE pr.user_id = ? AND pr.personal_note_id IN (SELECT value FROM json_each(?))`
+    )
+    .all(userId, JSON.stringify(local));
+
+  const hierarchies = new Map(); // share_id -> buildHierarchy result
+  const seen = new Set(local);
+  for (const r of refs) {
+    if (!hierarchies.has(r.share_id)) hierarchies.set(r.share_id, buildHierarchy({ shareId: r.share_id }));
+    const h = hierarchies.get(r.share_id);
+    if (!h.byId.has(r.shared_note_id)) continue; // deleted, or moved out of the space
+    const share = { id: r.share_id, title: r.share_title };
+    for (const id of [r.shared_note_id, ...subtreeIds(h.childrenOf, r.shared_note_id)]) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ id, note: h.byId.get(id), share });
+    }
+  }
+  return out;
+}
+
+// Every 'todo'-flagged note anywhere under this one in the inferred hierarchy,
+// including referenced spaces (crossScopeSubtree).
 function subtreeTodos(db, userId, id) {
   const { role, note: center } = resolveNoteAccess(db, userId, id);
   if (!role) throw new HttpError(404, 'not found');
 
-  const { byId, childrenOf } = buildHierarchy(scopeOf(center));
-  const todos = subtreeIds(childrenOf, id)
-    .map((nid) => byId.get(nid))
-    .filter((n) => n && n.status === 'todo')
-    .map((n) => ({ id: n.id, title: n.title }));
+  const todos = crossScopeSubtree(db, userId, center)
+    .filter((e) => e.note && e.note.status === 'todo')
+    .map((e) => ({
+      id: e.id,
+      title: e.note.title,
+      ...(e.share ? { shareId: e.share.id, shareTitle: e.share.title } : {}),
+    }));
   return { todos };
 }
 
 // Every note id anywhere under this one, any depth — excludes the note itself.
+// Includes referenced spaces, same as subtreeTodos.
 function subtreeIdsFor(db, userId, id) {
   const { role, note: center } = resolveNoteAccess(db, userId, id);
   if (!role) throw new HttpError(404, 'not found');
 
-  const { childrenOf } = buildHierarchy(scopeOf(center));
-  return { ids: subtreeIds(childrenOf, id) };
+  return { ids: crossScopeSubtree(db, userId, center).map((e) => e.id) };
 }
 
 const ATTACHMENT_TYPES = new Set(['image', 'audio', 'file', 'contact', 'app']);
