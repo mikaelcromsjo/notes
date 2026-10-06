@@ -744,6 +744,18 @@ button:hover { filter: brightness(1.05); }
 
 .cell.neighbor .relation-btn:hover { color: var(--accent); }
 
+/* Grid card info row (app.js buildCardInfoIcons): attachment type, pin,
+   reminder kinds, status — icons only, under the title. */
+.cell .card-info-icons {
+  font-size: 0.8rem;
+  line-height: 1;
+  letter-spacing: 0.15em;
+  white-space: nowrap;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.cell.center .card-info-icons { margin-top: 0.15rem; }
+
 /* A guessed (never explicitly marked) parent/child direction — dimmed so it
    never reads as visually identical to a relationship the user actually
    set. See linkRelationOf/RELATION_ICON in app.js. */

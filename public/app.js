@@ -2655,6 +2655,7 @@
   // --- Alarms ---
   let alarms = [];
   let triggeredAlarmIds = new Set();
+  let reminderKindSig = ''; // see checkAlarms: redraw the grid's info icons when it changes
   const alarmDismissed = new Set(); // "✕" on the popup — clears when it next rings, or on reload
   const alarmNotified = new Set(); // fired a Notification this cycle already
   let alarmEditNote = null;
@@ -6504,6 +6505,7 @@
             currentNote = await api.setStatus(currentId, s, cascade);
             allNotesCache = await api.listNotes();
             renderPinbar();
+            renderAlarmbar();
             await onRerender();
           },
         }))
@@ -6574,6 +6576,8 @@
     }
 
     cell.appendChild(title);
+    const info = buildCardInfoIcons(currentNote);
+    if (info) cell.appendChild(info);
     if (preview) cell.appendChild(preview);
     cell.appendChild(content);
 
@@ -6742,6 +6746,31 @@
     cell.addEventListener('pointercancel', (e) => finish(e, true));
   }
 
+  // A card's at-a-glance info row: attachment type, pin, one icon per kind of
+  // reminder on it, and status (normal shows nothing). Icons only — each one's
+  // meaning is in the row's tooltip. Neighbor rows don't carry `pinned`, so
+  // that comes from the list cache. Null when there's nothing to show.
+  const REMINDER_KIND_ICON = { time: '⏰', anytime: '🌊', location: '📍' };
+  const STATUS_INFO_ICON = { waiting: '⏳', todo: '◑', done: '✅' };
+
+  function buildCardInfoIcons(note) {
+    const cached = allNotesCache.find((n) => n.id === note.id);
+    const parts = [];
+    if (TYPE_ICON[note.type]) parts.push([TYPE_ICON[note.type], note.type]);
+    if (note.pinned || (cached && cached.pinned)) parts.push(['📌', 'pinned']);
+    const kinds = new Set(alarms.filter((a) => a.noteId === note.id).map((a) => a.kind || 'time'));
+    for (const kind of ['time', 'anytime', 'location']) {
+      if (kinds.has(kind)) parts.push([REMINDER_KIND_ICON[kind], `${kind} reminder`]);
+    }
+    if (STATUS_INFO_ICON[note.status]) parts.push([STATUS_INFO_ICON[note.status], note.status]);
+    if (!parts.length) return null;
+    const row = document.createElement('div');
+    row.className = 'card-info-icons';
+    row.textContent = parts.map((p) => p[0]).join('');
+    row.title = parts.map((p) => p[1]).join(' · ');
+    return row;
+  }
+
   // subNeighbors, when given, renders this cell as its own nested 3x3
   // (that neighbor as sub-center + up to 8 of its own neighbors).
   // isBack marks the "probable parent" slot.
@@ -6849,12 +6878,15 @@
       // 🚫 overrides that for a noAccess ref (the space it pointed into was
       // dissolved, or this member was removed from it) — its title is
       // already the "No access to..." placeholder, not a real note title.
-      const icon = neighbor.isRef ? (neighbor.noAccess ? '🚫' : '🔗') : TYPE_ICON[neighbor.type];
+      // A normal note's attachment type lives in the info-icon row instead.
+      const icon = neighbor.isRef ? (neighbor.noAccess ? '🚫' : '🔗') : null;
       const base = icon ? `${icon} ${neighbor.title}` : neighbor.title;
       title.textContent = (isBack ? '↩ ' : '') + base;
       cell.appendChild(title);
 
       if (!neighbor.isRef) {
+        const info = buildCardInfoIcons(neighbor);
+        if (info) cell.appendChild(info);
         const preview = buildAttachmentPreview(neighbor, { compact: true });
         if (preview) cell.appendChild(preview);
       }
@@ -7104,9 +7136,9 @@
     });
   }
 
-  // --- Pin bar: shortcuts to pinned notes ---
+  // --- Pin bar: shortcuts to pinned notes (done ones drop out, like the alarm bar) ---
   function renderPinbar() {
-    const pinned = allNotesCache.filter((n) => n.pinned);
+    const pinned = allNotesCache.filter((n) => n.pinned && n.status !== 'done');
     pinbar.innerHTML = '';
     pinbar.classList.toggle('hidden', pinned.length === 0 || !barPrefs.pins);
 
@@ -7309,6 +7341,11 @@
       nextNotes.size !== triggeredAlarmIds.size ||
       [...nextNotes].some((id) => !triggeredAlarmIds.has(id));
     triggeredAlarmIds = nextNotes;
+    // The grid cards' info icons show each note's reminder kinds, so a reminder
+    // added/removed/re-kinded (or the first load after boot) also redraws.
+    const kindSig = alarms.map((a) => `${a.noteId}:${a.kind || 'time'}`).sort().join(',');
+    const kindsChanged = kindSig !== reminderKindSig;
+    reminderKindSig = kindSig;
 
     // Popup dismiss / notified bookkeeping is keyed by REMINDER id.
     const ringingIds = new Set(alarms.filter((a) => a.triggered).map((a) => a.id));
@@ -7339,7 +7376,11 @@
     if (changed) {
       renderTabbar();
       renderPinbar();
+    }
+    if (changed || kindsChanged) {
       if (currentId) await render();
+    }
+    if (changed) {
       if (!agendaOverlay.classList.contains('hidden')) openAgenda();
     }
 
