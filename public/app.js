@@ -6305,7 +6305,7 @@
     const statusFace = {
       active: { icon: '○', label: 'Normal', cls: '' },
       waiting: { icon: '⏳', label: 'Waiting', cls: ' waiting' },
-      todo: { icon: '◑', label: 'To-do', cls: ' todo' },
+      todo: { icon: '📋', label: 'To-do', cls: ' todo' },
       done: { icon: '✅', label: 'Done', cls: ' active' },
     };
     const curStatus = statusFace[currentNote.status] ? currentNote.status : 'active';
@@ -6576,18 +6576,22 @@
     }
 
     cell.appendChild(title);
-    const info = buildCardInfoIcons(currentNote);
-    if (info) cell.appendChild(info);
     if (preview) cell.appendChild(preview);
     cell.appendChild(content);
 
+    // Lower-right corner: info icons, then the "+N" links badge.
+    const corner = document.createElement('div');
+    corner.className = 'card-corner';
+    const info = buildCardInfoIcons(currentNote);
+    if (info) corner.appendChild(info);
     if (linkCount > LINK_LIST_THRESHOLD) {
       const badge = document.createElement('div');
       badge.className = 'center-link-badge';
       badge.textContent = `+${linkCount - LINK_LIST_THRESHOLD}`;
       badge.title = `${linkCount} links — open the note to manage them`;
-      cell.appendChild(badge);
+      corner.appendChild(badge);
     }
+    if (corner.children.length) cell.appendChild(corner);
 
     cell.addEventListener('click', (e) => {
       if (e.target.closest('a, audio, input, label')) return;
@@ -6751,7 +6755,7 @@
   // meaning is in the row's tooltip. Neighbor rows don't carry `pinned`, so
   // that comes from the list cache. Null when there's nothing to show.
   const REMINDER_KIND_ICON = { time: '⏰', anytime: '🌊', location: '📍' };
-  const STATUS_INFO_ICON = { waiting: '⏳', todo: '◑', done: '✅' };
+  const STATUS_INFO_ICON = { waiting: '⏳', todo: '📋', done: '✅' };
 
   function buildCardInfoIcons(note) {
     const cached = allNotesCache.find((n) => n.id === note.id);
@@ -6885,10 +6889,15 @@
       cell.appendChild(title);
 
       if (!neighbor.isRef) {
-        const info = buildCardInfoIcons(neighbor);
-        if (info) cell.appendChild(info);
         const preview = buildAttachmentPreview(neighbor, { compact: true });
         if (preview) cell.appendChild(preview);
+        const info = buildCardInfoIcons(neighbor);
+        if (info) {
+          const corner = document.createElement('div');
+          corner.className = 'card-corner';
+          corner.appendChild(info);
+          cell.appendChild(corner);
+        }
       }
 
       cell.addEventListener('click', async (e) => {
@@ -7213,7 +7222,7 @@
 
       const title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = `◑ ${note.title}`;
+      title.textContent = `📋 ${note.title}`;
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(note.id, 'todo'));

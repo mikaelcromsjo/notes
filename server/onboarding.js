@@ -47,7 +47,7 @@ const CHAIN = [
     body: "Tap the status button in this note's toolbar (○) — it turns into waiting-on-something.\n\nUse waiting for things stuck on someone or something else, not you — it only shows up in the in-app agenda (🔔), never pushed or emailed.",
   },
   {
-    title: '◑ Flag a to-do',
+    title: '📋 Flag a to-do',
     body: "Tap the status button again — waiting becomes a to-do.\n\nTo-dos are things you mean to act on — they show up both in the agenda's To-do section and the to-do bar under the top bar (turn it on in 👤 → Header rows if it's off).",
   },
   {
