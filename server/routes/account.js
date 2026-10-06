@@ -36,24 +36,9 @@ function rateLimited(key, max, windowMs) {
   return arr.length > max;
 }
 
-function slug(s) {
-  return (
-    String(s || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60) || 'note'
-  );
-}
-
-// Quote a front-matter scalar only when it could otherwise be misread as YAML.
-function yamlScalar(v) {
-  const s = String(v);
-  return /^[\w .,/@()+&']*$/.test(s) && s.trim() === s ? s : JSON.stringify(s);
-}
-
 // Every /uploads/<file> a note points at: its attachment_path plus any inline
-// ![](...) embeds in the markdown.
+// ![](...) embeds in the markdown. Inline embeds are invisible here once the
+// account encrypts content — the client adds those (see POST /attachments).
 function uploadRefs(note) {
   const out = new Set();
   if (note.attachment_path && note.attachment_path.startsWith('/uploads/')) {
@@ -65,220 +50,152 @@ function uploadRefs(note) {
   return [...out];
 }
 
-// --- GET /api/account/export -------------------------------------------------
-// A .zip of the caller's whole account: one Markdown file per note (front-matter
-// + [[wikilink]] "## Links", re-importable via Settings -> Import), the
-// referenced upload files, and data.json (every row, every column).
-router.get('/export', (req, res) => {
+const SAFE_UPLOAD_NAME = /^[A-Za-z0-9._-]+$/;
+const stamp = () => new Date().toISOString().slice(0, 10);
+
+// Backup and export are two downloads each, sharing the second one:
+//   backup = GET  /backup       -> notes-backup-<date>.zip  (account.db, exact,
+//                                  content still encrypted if the account is)
+//   export = client-built          notes-export-<date>.zip  (Markdown, decrypted
+//                                  in the browser — public/app.js's exportNotes)
+//   both   = POST /attachments  -> notes-attachments-<date>.zip (attachments/…)
+// Keeping attachments out of the other two means neither the server nor the
+// browser has to rebuild a big zip around them just to add a small file.
+
+// --- GET /api/account/backup -------------------------------------------------
+router.get('/backup', (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'no active session' });
-  if (rateLimited(`export:${req.userId}`, 3, 60 * 60 * 1000)) {
-    return res.status(429).json({ error: 'too many exports — try again later' });
+  if (rateLimited(`backup:${req.userId}`, 10, 60 * 60 * 1000)) {
+    return res.status(429).json({ error: 'too many backups — try again later' });
   }
+  const zip = new AdmZip();
+  zip.addFile('account.db', snapshots.writeAccountDb(req.userId));
+  const buf = zip.toBuffer();
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="notes-backup-${stamp()}.zip"`);
+  res.setHeader('Content-Length', buf.length);
+  res.end(buf);
+});
 
-  const user = db
-    .prepare(
-      `SELECT id, email, created_at, widget_token,
-              digest_cadence, digest_hour, digest_tz, digest_channel, digest_last_sent_at
-       FROM users WHERE id = ?`
-    )
-    .get(req.userId);
-  if (!user) return res.status(401).json({ error: 'no active session' });
-
-  const notes = db.prepare('SELECT * FROM notes WHERE user_id = ? ORDER BY id').all(user.id);
-  const links = db
-    .prepare('SELECT note_a, note_b, created_at FROM links WHERE user_id = ? ORDER BY note_a, note_b')
-    .all(user.id);
-  const tabs = db
-    .prepare('SELECT note_id, sort_order, is_active, created_at FROM tabs WHERE user_id = ? ORDER BY sort_order')
-    .all(user.id);
-  const reminders = db.prepare('SELECT * FROM reminders WHERE user_id = ? ORDER BY id').all(user.id);
-  const navEvents = db
-    .prepare('SELECT from_note_id, to_note_id, via, created_at FROM nav_events WHERE user_id = ? ORDER BY id')
-    .all(user.id);
-  const history = db
-    .prepare('SELECT action, summary, payload, created_at, undone_at FROM history WHERE user_id = ? ORDER BY id')
-    .all(user.id);
-
-  const titleById = new Map(notes.map((n) => [n.id, n.title]));
-  const neighboursOf = new Map();
-  const addEdge = (a, b) => {
-    if (!neighboursOf.has(a)) neighboursOf.set(a, []);
-    neighboursOf.get(a).push(b);
-  };
-  for (const l of links) {
-    addEdge(l.note_a, l.note_b);
-    addEdge(l.note_b, l.note_a);
+// --- POST /api/account/attachments -------------------------------------------
+// A form post (hidden iframe target, so the browser downloads it without
+// leaving the app). `names` = comma-separated upload basenames the client
+// found inline in decrypted note text, which the server can't see itself;
+// /uploads is already served by name, so a name is all a caller needs anyway.
+router.post('/attachments', express.urlencoded({ extended: false, limit: '2mb' }), (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  if (rateLimited(`attachments:${req.userId}`, 10, 60 * 60 * 1000)) {
+    return res.status(429).json({ error: 'too many downloads — try again later' });
+  }
+  const names = new Set();
+  for (const n of db.prepare('SELECT attachment_path, content FROM notes WHERE user_id = ?').all(req.userId)) {
+    for (const f of uploadRefs(n)) names.add(f);
+  }
+  for (const r of db.prepare('SELECT path FROM theme_images WHERE user_id = ?').all(req.userId)) {
+    names.add(path.basename(r.path));
+  }
+  for (const f of String((req.body && req.body.names) || '').split(',')) {
+    if (f) names.add(f.trim());
   }
 
   const zip = new AdmZip();
-
-  for (const n of notes) {
-    const fm = [
-      '---',
-      `title: ${yamlScalar(n.title)}`,
-      `id: ${n.id}`,
-      `created: ${n.created_at}`,
-      `updated: ${n.updated_at}`,
-      `type: ${n.type}`,
-      `status: ${n.status}`,
-    ];
-    if (n.lat != null && n.lon != null) {
-      fm.push(`lat: ${n.lat}`, `lon: ${n.lon}`);
-    }
-    fm.push('---', '');
-
-    const parts = [fm.join('\n')];
-    // Inline embeds point at the bundled attachments/ folder, not /uploads.
-    parts.push((n.content || '').replace(/\]\(\/uploads\//g, '](attachments/'));
-
-    if (n.attachment_path && n.attachment_path.startsWith('/uploads/')) {
-      const f = path.basename(n.attachment_path);
-      parts.push('', n.type === 'audio' ? `[audio](attachments/${f})` : `![${n.title}](attachments/${f})`);
-    }
-
-    const outs = neighboursOf.get(n.id) || [];
-    if (outs.length) {
-      parts.push('', '## Links', ...outs.map((id) => `- [[${titleById.get(id) || `#${id}`}]]`));
-    }
-
-    zip.addFile(`notes/${n.id}-${slug(n.title)}.md`, Buffer.from(parts.join('\n'), 'utf8'));
-  }
-
-  const bundled = new Set();
-  for (const n of notes) {
-    for (const f of uploadRefs(n)) {
-      if (bundled.has(f)) continue;
-      bundled.add(f);
-      const p = path.join(uploadsDir, f);
-      try {
-        if (fs.existsSync(p)) zip.addLocalFile(p, 'attachments');
-      } catch {
-        /* skip an unreadable file rather than fail the whole export */
-      }
+  for (const f of names) {
+    if (!SAFE_UPLOAD_NAME.test(f)) continue;
+    const p = path.join(uploadsDir, f);
+    try {
+      if (!fs.statSync(p).isFile()) continue;
+      zip.addFile(`attachments/${f}`, fs.readFileSync(p));
+      zip.getEntry(`attachments/${f}`).header.method = 0; // stored: media is already compressed
+    } catch {
+      /* missing or unreadable — skip rather than fail the whole download */
     }
   }
-
-  zip.addFile(
-    'data.json',
-    Buffer.from(
-      JSON.stringify(
-        {
-          exported_at: new Date().toISOString(),
-          user: {
-            id: user.id,
-            email: user.email,
-            created_at: user.created_at,
-            digest: {
-              cadence: user.digest_cadence,
-              hour: user.digest_hour,
-              tz: user.digest_tz,
-              channel: user.digest_channel,
-              last_sent_at: user.digest_last_sent_at,
-            },
-          },
-          notes,
-          links,
-          tabs,
-          reminders,
-          nav_events: navEvents,
-          history,
-        },
-        null,
-        2
-      ),
-      'utf8'
-    )
-  );
-
-  // The exact copy a restore actually uses (server/snapshots.js) — data.json
-  // stays for reading / other tools and for restoring on older builds.
-  zip.addFile('account.db', snapshots.writeAccountDb(user.id));
-
-  zip.addFile(
-    'README.txt',
-    Buffer.from(
-      `Your notes export
-=================
-
-notes/        One Markdown file per note. The YAML front-matter carries the
-              metadata; a "## Links" list names the notes it connects to as
-              [[wikilinks]]. Re-import this folder with Settings -> Import &
-              export -> "Markdown folder" to rebuild the notes and the graph.
-attachments/  The files the notes reference (images, audio, documents).
-account.db    The exact copy (SQLite) that Settings -> Restore from backup uses.
-data.json     The same data as JSON, for reading or other tools.
-
-Generated ${new Date().toISOString()}
-`,
-      'utf8'
-    )
-  );
-
   const buf = zip.toBuffer();
-  const stamp = new Date().toISOString().slice(0, 10);
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="notes-export-${stamp}.zip"`);
+  res.setHeader('Content-Disposition', `attachment; filename="notes-attachments-${stamp()}.zip"`);
   res.setHeader('Content-Length', buf.length);
   res.end(buf);
 });
 
 // --- Restore from a downloaded backup ---------------------------------------
-// POST /import/check (the .zip) stages the upload and reports what a restore
-// would do; POST /import/apply { token } does it. A zip with account.db
-// (every export since it was added) restores exactly through
-// server/snapshots.js and only writes the attachment files this server
-// doesn't already have; older zips / bare data.json fall back to the legacy
-// data.json importer below (not exact). Either way a server snapshot is
-// taken first, so the restore is undoable. 1 GB cap here — nginx's
-// client_max_body_size for this site must allow it too.
+// POST /import/check (the backup .zip, optionally the attachments .zip too)
+// stages the upload(s) and reports what a restore would do; POST
+// /import/apply { token, filesToken } does it, exactly, through
+// server/snapshots.js. Attachment files are only written when missing on
+// this server — so restoring on the same server needs the backup alone. A
+// server snapshot is taken first, so the restore is undoable. 1 GB cap here —
+// nginx's client_max_body_size for this site must allow it too.
 // Uploads land straight in snapshots/staging (same filesystem as the
 // database, so staging is a rename, never a cross-device copy).
 const restoreUpload = multer({
   dest: snapshots.stagingDir,
-  limits: { fileSize: 1024 * 1024 * 1024 },
+  limits: { fileSize: 1024 * 1024 * 1024, files: 2 },
 });
 const RESTORE_FILE_EXT = new Set([...Object.values(IMAGE_EXT), ...Object.values(AUDIO_EXT), ...Object.values(FILE_EXT), '.jpeg']);
-
-// What the legacy importer can't bring back (shown before a legacy restore).
-const LEGACY_LOSSES = [
-  'notes in shared spaces come back as private notes',
-  'cross-space references are dropped',
-  'note themes, nudge time windows, link types and encrypted locations are lost',
-  'attached files other than images/audio are not restored',
-];
 
 function zipOf(filePath) {
   try {
     return new AdmZip(filePath);
   } catch {
-    return null; // not a zip — maybe a bare data.json
+    return null;
   }
 }
 
-router.post('/import/check', restoreUpload.single('file'), (req, res) => {
-  if (!req.userId) return res.status(401).json({ error: 'no active session' });
-  if (!req.file) return res.status(400).json({ error: 'a backup .zip is required' });
-  const token = snapshots.stageUpload(req.userId, req.file.path);
-  const staged = snapshots.stagedPath(req.userId, token);
-  const zip = zipOf(staged);
-  const entry = zip && zip.getEntry('account.db');
-  if (!entry) return res.json({ token, exact: false, losses: LEGACY_LOSSES });
+// attachments/<file> entries we'd be willing to write back (allowlisted
+// extension, plain basename — never trust a path from the archive).
+function restorableFiles(zip) {
+  const out = new Map();
+  if (!zip) return out;
+  for (const e of zip.getEntries()) {
+    if (e.isDirectory || !e.entryName.startsWith('attachments/')) continue;
+    const base = path.basename(e.entryName);
+    if (!SAFE_UPLOAD_NAME.test(base) || !RESTORE_FILE_EXT.has(path.extname(base).toLowerCase())) continue;
+    out.set(base, e);
+  }
+  return out;
+}
 
+router.post('/import/check', restoreUpload.array('files', 2), (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  const uploaded = req.files || [];
+  let token = null;
+  let filesToken = null;
+  const drop = () => {
+    if (token) snapshots.dropStaged(req.userId, token);
+    if (filesToken) snapshots.dropStaged(req.userId, filesToken);
+  };
+  for (const f of uploaded) {
+    const t = snapshots.stageUpload(req.userId, f.path);
+    const zip = zipOf(snapshots.stagedPath(req.userId, t));
+    if (zip && zip.getEntry('account.db') && !token) token = t;
+    else if (zip && restorableFiles(zip).size && !filesToken) filesToken = t;
+    else snapshots.dropStaged(req.userId, t);
+  }
+  if (!token) {
+    drop();
+    return res.status(400).json({ error: 'choose the backup .zip (notes-backup-…) — it holds account.db' });
+  }
+
+  const zip = zipOf(snapshots.stagedPath(req.userId, token));
   const tmp = snapshots.scratchPath('check');
   try {
-    fs.writeFileSync(tmp, entry.getData(), { mode: 0o600 });
+    fs.writeFileSync(tmp, zip.getEntry('account.db').getData(), { mode: 0o600 });
     const analysis = snapshots.analyzeFile(req.userId, tmp);
     const referenced = snapshots.referencedUploads(tmp);
-    const inZip = new Set(zip.getEntries().filter((e) => e.entryName.startsWith('attachments/')).map((e) => path.basename(e.entryName)));
+    const inZip = filesToken ? restorableFiles(zipOf(snapshots.stagedPath(req.userId, filesToken))) : new Map();
     const missingOnServer = [...referenced].filter((f) => !fs.existsSync(path.join(uploadsDir, f)));
     res.json({
       token,
-      exact: true,
+      filesToken,
       ...analysis,
-      files: { referenced: referenced.size, toWrite: missingOnServer.filter((f) => inZip.has(f)).length, unavailable: missingOnServer.filter((f) => !inZip.has(f)).length },
+      files: {
+        referenced: referenced.size,
+        toWrite: [...inZip.keys()].filter((f) => !fs.existsSync(path.join(uploadsDir, f))).length,
+        unavailable: missingOnServer.filter((f) => !inZip.has(f)).length,
+      },
     });
   } catch (err) {
-    snapshots.dropStaged(req.userId, token);
+    drop();
     res.status(400).json({ error: `could not read the backup: ${err.message}` });
   } finally {
     fs.unlink(tmp, () => {});
@@ -287,18 +204,13 @@ router.post('/import/check', restoreUpload.single('file'), (req, res) => {
 
 router.post('/import/apply', express.json(), (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'no active session' });
-  const token = req.body && req.body.token;
+  const { token, filesToken } = req.body || {};
   const staged = snapshots.stagedPath(req.userId, token);
   if (!staged) return res.status(404).json({ error: 'that upload has expired — choose the file again' });
-  const zip = zipOf(staged);
-  const entry = zip && zip.getEntry('account.db');
-
-  if (!entry) {
-    // Legacy: hand the staged file to the data.json importer.
-    req.file = { buffer: fs.readFileSync(staged), originalname: 'backup', mimetype: zip ? 'application/zip' : 'application/json' };
-    snapshots.dropStaged(req.userId, token);
-    return legacyImport(req, res);
-  }
+  const filesStaged = filesToken ? snapshots.stagedPath(req.userId, filesToken) : null;
+  if (filesToken && !filesStaged) return res.status(404).json({ error: 'that upload has expired — choose the files again' });
+  const entry = zipOf(staged)?.getEntry('account.db');
+  if (!entry) return res.status(400).json({ error: 'not a backup .zip' });
 
   const tmp = snapshots.scratchPath('apply');
   try {
@@ -311,14 +223,11 @@ router.post('/import/apply', express.json(), (req, res) => {
       console.error('[account] pre-restore snapshot failed:', err && err.message);
       return res.status(500).json({ error: 'could not save a snapshot of your current notes first — nothing was changed' });
     }
-    // Only files the restored notes point at, only if missing here, only
-    // allowlisted extensions, same name (the notes refer to it by name).
+    // Every allowlisted file the server is missing, same name (the notes
+    // refer to it by name). Not limited to what account.db visibly
+    // references: an encrypted account's inline embeds can't be seen here.
     let filesWritten = 0;
-    const referenced = snapshots.referencedUploads(tmp);
-    for (const e of zip.getEntries()) {
-      if (e.isDirectory || !e.entryName.startsWith('attachments/')) continue;
-      const base = path.basename(e.entryName);
-      if (!referenced.has(base) || !/^[A-Za-z0-9._-]+$/.test(base) || !RESTORE_FILE_EXT.has(path.extname(base).toLowerCase())) continue;
+    for (const [base, e] of restorableFiles(filesStaged && zipOf(filesStaged))) {
       const dest = path.join(uploadsDir, base);
       if (fs.existsSync(dest)) continue;
       fs.writeFileSync(dest, e.getData());
@@ -331,255 +240,16 @@ router.post('/import/apply', express.json(), (req, res) => {
       { before, after: null },
       `Restored backup (${result.restored.notes} notes)`
     );
-    res.json({ ok: true, exact: true, ...result, restored: { ...result.restored, attachments: filesWritten }, historyId });
+    res.json({ ok: true, ...result, restored: { ...result.restored, attachments: filesWritten }, historyId });
   } catch (err) {
     console.error('[account] restore failed:', err && err.message);
     res.status(500).json({ error: `restore failed and was rolled back: ${err.message}` });
   } finally {
     fs.unlink(tmp, () => {});
     snapshots.dropStaged(req.userId, token);
+    if (filesToken) snapshots.dropStaged(req.userId, filesToken);
   }
 });
-
-// Extensions we are willing to write back under /uploads (mirrors the upload
-// allowlist in server/upload-config.js — never trust a path from the archive).
-const RESTORE_EXT = new Set([
-  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif',
-  '.webm', '.ogg', '.mp3', '.m4a', '.aac', '.wav',
-]);
-
-// Column allowlists — a snapshot from a newer build may carry extra keys.
-const NOTE_COLS = [
-  'title', 'content', 'created_at', 'updated_at', 'pinned', 'type', 'lat', 'lon',
-  'attachment_path', 'status',
-  'alarm_time', 'alarm_days', 'alarm_date', 'alarm_last_fired', 'alarm_ack_at',
-  'alarm_next_at', 'alarm_pushed_at',
-];
-const REMINDER_COLS = [
-  'time', 'days', 'date', 'tz', 'next_at', 'ack_at', 'pushed_at', 'snooze_until',
-  'created_at', 'kind', 'lat', 'lon', 'radius_m',
-];
-// Every key in a history payload that holds a note id (see server/routes/history.js).
-const HISTORY_ID_KEYS = ['noteId', 'a', 'b', 'to', 'from', 'card'];
-
-function parseSnapshot(file) {
-  const name = (file.originalname || '').toLowerCase();
-  const attachments = new Map(); // basename -> Buffer
-  let json;
-  if (name.endsWith('.zip') || file.mimetype === 'application/zip') {
-    const zip = new AdmZip(file.buffer);
-    const entry = zip.getEntry('data.json');
-    if (!entry) throw new Error('no data.json in the archive');
-    json = JSON.parse(zip.readAsText(entry));
-    for (const e of zip.getEntries()) {
-      if (e.isDirectory || !e.entryName.startsWith('attachments/')) continue;
-      attachments.set(path.basename(e.entryName), e.getData());
-    }
-  } else {
-    json = JSON.parse(file.buffer.toString('utf8'));
-  }
-  if (!json || !Array.isArray(json.notes)) throw new Error('not a notes export (missing notes[])');
-  return { json, attachments };
-}
-
-// Kept for clients still running the previous build (one-step legacy restore).
-router.post('/import', restoreUpload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'a .zip or data.json file is required' });
-  const tmpPath = req.file.path;
-  req.file.buffer = fs.readFileSync(tmpPath);
-  fs.unlink(tmpPath, () => {});
-  legacyImport(req, res);
-});
-
-// The data.json importer: rebuilds the graph from the JSON with new ids. Not
-// exact (see LEGACY_LOSSES) — only used for backups without account.db.
-function legacyImport(req, res) {
-  if (!req.userId) return res.status(401).json({ error: 'no active session' });
-  if (!req.file) return res.status(400).json({ error: 'a .zip or data.json file is required' });
-
-  let snapshot;
-  try {
-    snapshot = parseSnapshot(req.file);
-  } catch (err) {
-    return res.status(400).json({ error: `could not read the export: ${err.message}` });
-  }
-  const { json, attachments } = snapshot;
-
-  // Undo point: an exact copy of everything as it is right now (see
-  // server/snapshots.js) — the restore is undoable from history.
-  let before;
-  try {
-    before = snapshots.takeSnapshot(req.userId, 'pre-restore');
-  } catch (err) {
-    console.error('[account] pre-restore snapshot failed:', err && err.message);
-    return res.status(500).json({ error: 'could not save a snapshot of your current notes first — nothing was changed' });
-  }
-
-  // Old upload basename -> new one, for every bundled attachment we accept.
-  const fileRenames = new Map();
-  const filesToWrite = []; // { newBase, buf }
-  for (const [base, buf] of attachments) {
-    const ext = path.extname(base).toLowerCase();
-    if (!RESTORE_EXT.has(ext)) continue;
-    const newBase = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
-    fileRenames.set(base, newBase);
-    filesToWrite.push({ newBase, buf });
-  }
-
-  const rewriteUploadRefs = (s) => {
-    if (!s) return s;
-    let out = String(s);
-    for (const [oldBase, newBase] of fileRenames) {
-      out = out.split(`/uploads/${oldBase}`).join(`/uploads/${newBase}`);
-      out = out.split(`attachments/${oldBase}`).join(`/uploads/${newBase}`);
-    }
-    return out;
-  };
-
-  const idMap = new Map();
-  const mapId = (v) => {
-    const n = Number(v);
-    return Number.isInteger(n) && idMap.has(n) ? idMap.get(n) : null;
-  };
-
-  const counts = { notes: 0, links: 0, tabs: 0, reminders: 0, navEvents: 0, history: 0, attachments: 0, attachmentsSkipped: attachments.size - fileRenames.size };
-
-  const insNote = db.prepare(
-    `INSERT INTO notes (${NOTE_COLS.join(', ')}, user_id) VALUES (${NOTE_COLS.map(() => '?').join(', ')}, ?)`
-  );
-
-  try {
-    db.transaction(() => {
-      // Wipe this account's graph (push subscriptions + login tokens are device
-      // / auth state, not part of a graph snapshot — leave them). The home-
-      // note pointer has no ON DELETE, so it must go first.
-      db.prepare('UPDATE users SET root_note_id = NULL WHERE id = ?').run(req.userId);
-      for (const sql of [
-        'DELETE FROM reminders WHERE user_id = ?',
-        'DELETE FROM nav_events WHERE user_id = ?',
-        'DELETE FROM history WHERE user_id = ?',
-        'DELETE FROM tabs WHERE user_id = ?',
-        'DELETE FROM links WHERE user_id = ?',
-        'DELETE FROM notes WHERE user_id = ?',
-      ]) {
-        db.prepare(sql).run(req.userId);
-      }
-
-      // Notes first, building old id -> new id.
-      const deferredParents = [];
-      for (const n of json.notes) {
-        const vals = NOTE_COLS.map((c) => {
-          const v = n[c];
-          if (v === undefined) return null;
-          if (c === 'content' || c === 'attachment_path') return rewriteUploadRefs(v);
-          return v;
-        });
-        const info = insNote.run(...vals, req.userId);
-        idMap.set(Number(n.id), info.lastInsertRowid);
-        counts.notes++;
-        if (n.created_from_note_id) deferredParents.push([n.id, n.created_from_note_id]);
-      }
-      const setParent = db.prepare('UPDATE notes SET created_from_note_id = ? WHERE id = ?');
-      for (const [childOld, parentOld] of deferredParents) {
-        const child = mapId(childOld);
-        const parent = mapId(parentOld);
-        if (child && parent) setParent.run(parent, child);
-      }
-
-      const insLink = db.prepare(
-        'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id) VALUES (?, ?, ?, ?)'
-      );
-      for (const l of json.links || []) {
-        const a = mapId(l.note_a);
-        const b = mapId(l.note_b);
-        if (!a || !b || a === b) continue;
-        insLink.run(Math.min(a, b), Math.max(a, b), l.created_at || new Date().toISOString(), req.userId);
-        counts.links++;
-      }
-
-      const insTab = db.prepare(
-        'INSERT INTO tabs (note_id, sort_order, is_active, created_at, user_id) VALUES (?, ?, ?, ?, ?)'
-      );
-      let order = 0;
-      for (const t of json.tabs || []) {
-        const nid = mapId(t.note_id);
-        if (!nid) continue;
-        insTab.run(nid, t.sort_order != null ? t.sort_order : order++, t.is_active ? 1 : 0, t.created_at || new Date().toISOString(), req.userId);
-        counts.tabs++;
-      }
-
-      const insRem = db.prepare(
-        `INSERT INTO reminders (note_id, user_id, ${REMINDER_COLS.join(', ')})
-         VALUES (?, ?, ${REMINDER_COLS.map(() => '?').join(', ')})`
-      );
-      for (const r of json.reminders || []) {
-        const nid = mapId(r.note_id);
-        if (!nid) continue;
-        insRem.run(nid, req.userId, ...REMINDER_COLS.map((c) => (r[c] === undefined ? null : r[c])));
-        counts.reminders++;
-      }
-
-      const insNav = db.prepare(
-        'INSERT INTO nav_events (user_id, from_note_id, to_note_id, via, created_at) VALUES (?, ?, ?, ?, ?)'
-      );
-      for (const ev of json.nav_events || []) {
-        const to = mapId(ev.to_note_id);
-        if (!to) continue; // to_note_id is NOT NULL — drop events we can't anchor
-        insNav.run(req.userId, mapId(ev.from_note_id), to, ev.via || 'unknown', ev.created_at || new Date().toISOString());
-        counts.navEvents++;
-      }
-
-      const insHist = db.prepare(
-        'INSERT INTO history (user_id, action, summary, payload, created_at, undone_at) VALUES (?, ?, ?, ?, ?, ?)'
-      );
-      for (const h of json.history || []) {
-        let payload = {};
-        try {
-          payload = JSON.parse(h.payload || '{}');
-        } catch {
-          payload = {};
-        }
-        for (const k of HISTORY_ID_KEYS) {
-          if (payload[k] != null) payload[k] = mapId(payload[k]) || payload[k];
-        }
-        insHist.run(req.userId, h.action || 'update', h.summary || '', JSON.stringify(payload), h.created_at || new Date().toISOString(), h.undone_at || null);
-        counts.history++;
-      }
-
-      // Digest prefs travel with the account.
-      if (json.user && json.user.digest) {
-        const d = json.user.digest;
-        db.prepare(
-          `UPDATE users SET digest_cadence = COALESCE(?, digest_cadence),
-             digest_hour = COALESCE(?, digest_hour), digest_tz = COALESCE(?, digest_tz),
-             digest_channel = COALESCE(?, digest_channel) WHERE id = ?`
-        ).run(d.cadence || null, d.hour != null ? d.hour : null, d.tz || null, d.channel || null, req.userId);
-      }
-    })();
-  } catch (err) {
-    console.error('[account] restore failed:', err && err.message);
-    return res.status(500).json({ error: `restore failed and was rolled back: ${err.message}` });
-  }
-
-  // DB committed — now the filesystem. Write the new attachment files. The
-  // replaced graph's own files stay on disk (like replaced attachments do):
-  // undoing the restore brings back notes that point at them.
-  for (const { newBase, buf } of filesToWrite) {
-    try {
-      fs.writeFileSync(path.join(uploadsDir, newBase), buf);
-      counts.attachments++;
-    } catch (err) {
-      console.error('[account] could not write restored upload', newBase, err && err.message);
-    }
-  }
-  const historyId = history.record(
-    req.userId,
-    'restore',
-    { before, after: null },
-    `Restored backup "${req.file.originalname || 'backup'}" (${counts.notes} notes)`
-  );
-  res.json({ ok: true, restored: counts, historyId });
-}
 
 // --- Server backups (exact snapshots, see server/snapshots.js) -------------
 // Unlike the .zip download these are lossless (every column of every row,

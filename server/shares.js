@@ -121,7 +121,11 @@ function candidateLineage(db, userId, rootNoteId) {
 // Moves `noteIds` (all currently personal notes the caller owns) into a new
 // share in one transaction. A move, not a copy: ids, history, nav_events and
 // reminders rows are all untouched, only notes.share_id changes.
-function createShare(db, userId, { title, noteIds }) {
+// `plaintext` (optional): [{id, content, expect}] — the client's decrypted
+// text for any of those notes still stored encrypted with its account key
+// (no other member could read them in the space), written in the same
+// transaction as the move. See encryption.js's convertOne.
+function createShare(db, userId, { title, noteIds, plaintext }) {
   const t = String(title || '').trim();
   if (!t) throw new HttpError(400, 'title is required');
   const ids = [...new Set((Array.isArray(noteIds) ? noteIds : []).map(Number))];
@@ -142,6 +146,7 @@ function createShare(db, userId, { title, noteIds }) {
       'INSERT INTO share_members (share_id, user_id, role, added_at) VALUES (?, ?, ?, ?)'
     ).run(id, userId, 'owner', nowIso());
     droppedLinks = moveNotesIntoShare(db, userId, id, ids);
+    decryptMoved(db, userId, ids, plaintext);
     return id;
   })();
 
@@ -162,7 +167,7 @@ function createShare(db, userId, { title, noteIds }) {
 // misdetect the A↔B link as straddling on the first call (B isn't share-
 // scoped *yet*) and convert it to a personal_ref that then has to be
 // undone — moving them together avoids that entirely.
-function addNoteToShare(db, userId, shareId, noteId) {
+function addNoteToShare(db, userId, shareId, noteId, plaintext) {
   requireMember(shareId, userId);
   const ids = [...new Set((Array.isArray(noteId) ? noteId : [noteId]).map(Number))];
   if (!ids.length) throw new HttpError(400, 'noteId is required');
@@ -170,7 +175,11 @@ function addNoteToShare(db, userId, shareId, noteId) {
     const { role, note } = resolveNoteAccess(db, userId, id);
     if (role !== 'owner' || note.share_id != null) throw new HttpError(404, 'not found');
   }
-  const droppedLinks = db.transaction(() => moveNotesIntoShare(db, userId, shareId, ids))();
+  const droppedLinks = db.transaction(() => {
+    const dropped = moveNotesIntoShare(db, userId, shareId, ids);
+    decryptMoved(db, userId, ids, plaintext);
+    return dropped;
+  })();
   const share = db.prepare('SELECT title FROM shares WHERE id = ?').get(shareId);
   const historyId = history.record(
     userId,
@@ -180,6 +189,15 @@ function addNoteToShare(db, userId, shareId, noteId) {
   );
   const placeholders = ids.map(() => '?').join(',');
   return { notes: db.prepare(`SELECT * FROM notes WHERE id IN (${placeholders})`).all(...ids), historyId };
+}
+
+// createShare/addNoteToShare's `plaintext` — only for notes in this move.
+function decryptMoved(db, userId, ids, plaintext) {
+  if (!Array.isArray(plaintext)) return;
+  const moved = new Set(ids);
+  for (const item of plaintext) {
+    if (item && moved.has(Number(item.id))) encryption.convertOne(db, userId, item);
+  }
 }
 
 // Shared by createShare/addNoteToShare (and redo of a 'share' entry). Caller already validated every id in

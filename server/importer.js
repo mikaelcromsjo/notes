@@ -330,7 +330,11 @@ async function ingest({ userId, format, records, assets, assetsByBase }) {
   return totals;
 }
 
-async function runJob(jobId, buf, opts = {}) {
+// `parts` = [{ buf, single, filename }] — one .md, or one or more .zips
+// merged as if extracted into the same folder (e.g. this app's export: a
+// notes zip whose Markdown points at ../attachments/, plus the attachments
+// zip that holds attachments/).
+async function runJob(jobId, parts) {
   const job = db.prepare('SELECT * FROM import_jobs WHERE id = ?').get(jobId);
   if (!job) return;
   const finish = db.prepare(
@@ -338,15 +342,16 @@ async function runJob(jobId, buf, opts = {}) {
   );
   try {
     db.prepare('UPDATE import_jobs SET status = ? WHERE id = ?').run('running', jobId);
-    let parsed;
-    if (opts.single) {
-      parsed = {
-        records: [buildRecord(opts.filename || 'note.md', buf.toString('utf8'))],
-        assets: new Map(),
-        assetsByBase: new Map(),
-      };
-    } else {
-      parsed = parseArchive(buf);
+    const parsed = { records: [], assets: new Map(), assetsByBase: new Map() };
+    for (const p of parts) {
+      if (p.single) {
+        parsed.records.push(buildRecord(p.filename || 'note.md', p.buf.toString('utf8')));
+        continue;
+      }
+      const a = parseArchive(p.buf);
+      parsed.records.push(...a.records);
+      for (const [k, v] of a.assets) parsed.assets.set(k, v);
+      for (const [k, v] of a.assetsByBase) if (!parsed.assetsByBase.has(k)) parsed.assetsByBase.set(k, v);
     }
     if (parsed.records.length === 0) throw new Error('no .md files found in the upload');
     if (parsed.records.length > MAX_RECORDS) {

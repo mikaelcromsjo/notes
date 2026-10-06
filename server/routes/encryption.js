@@ -34,10 +34,10 @@ router.delete('/setup', wrap((req) => encryption.cancelSetup(db, req.userId), 20
 // content already ciphertext (encrypted client-side with the derived key).
 router.post('/migrate', wrap((req) => encryption.migrate(db, req.userId, req.body && req.body.items)));
 
-// The inverse — body: { items: [{id, content}] }, content already decrypted
-// to plaintext client-side. Used around a server-side writer that can't
-// encrypt on the way in (the Obsidian/Markdown importer); see
-// server/encryption.js's revert() and public/app.js's import wiring.
-router.post('/revert', wrap((req) => encryption.revert(db, req.userId, req.body && req.body.items)));
+// Content-encryption catch-up sweep — see server/encryption.js's pending().
+router.get('/pending', wrap((req) => encryption.pending(db, req.userId)));
+// body: { items: [{id, content, expect}] } — content already converted
+// client-side, expect = the exact text it was converted from.
+router.post('/sweep', wrap((req) => encryption.sweep(db, req.userId, req.body && req.body.items)));
 
 module.exports = router;

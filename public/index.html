@@ -522,13 +522,13 @@
             <h3>Import &amp; export</h3>
 
             <label class="settings-label" for="import-format">Import</label>
-            <p class="settings-desc">Bring notes in from another app. A re-import updates matched notes instead of duplicating them.</p>
+            <p class="settings-desc">Bring notes in from another app. A re-import updates matched notes instead of duplicating them. For this app's own export, pick the notes .zip and the attachments .zip together.</p>
             <div class="settings-inline-row">
               <select id="import-format">
                 <option value="obsidian">Obsidian vault</option>
                 <option value="markdown">Markdown folder</option>
               </select>
-              <input type="file" id="import-file" accept=".zip,.md,.markdown" />
+              <input type="file" id="import-file" accept=".zip,.md,.markdown" multiple />
             </div>
             <p class="settings-desc" id="import-status"></p>
             <div class="settings-btn-row">
@@ -542,12 +542,17 @@
             </div>
             <div class="session-list" id="snapshot-list"></div>
 
-            <label class="settings-label settings-btn-row-spaced" for="export-btn">Download &amp; restore</label>
-            <p class="settings-desc">Download a .zip to keep off this server: an exact copy of your account plus all attachment files, and readable Markdown per note. Restoring it replaces what's here now — exactly, on this server; only files the server is missing are written back. A server backup is taken first, so a restore can be undone. Backups downloaded before this version restore without spaces, references and some settings (you'll be told before anything changes).</p>
+            <label class="settings-label settings-btn-row-spaced" for="backup-btn">Download &amp; restore</label>
+            <p class="settings-desc"><b>Backup</b> is an exact copy of your account (note text stays encrypted if you use encryption) — restore it here. <b>Export</b> is your notes as readable Markdown, decrypted on this device — for other apps (re-import with Import above). Both leave attachment files out: download those separately; one attachments file serves both.</p>
+            <p class="settings-desc">Restoring replaces what's here now. Pick the backup file, plus the attachments file only if this server is missing files (e.g. a new server) — you'll be told. A server backup is taken first, so a restore can be undone.</p>
             <div class="settings-btn-row">
-              <button id="export-btn" class="secondary">Download backup (.zip)</button>
+              <button id="backup-btn" class="secondary">Download backup</button>
+              <button id="export-btn" class="secondary">Export notes (Markdown)</button>
+              <button id="attachments-btn" class="secondary">Download attachments</button>
+            </div>
+            <div class="settings-btn-row">
               <button id="restore-btn" class="secondary danger">Restore from backup…</button>
-              <input type="file" id="restore-file" class="hidden" accept=".zip,.json" />
+              <input type="file" id="restore-file" class="hidden" accept=".zip" multiple />
             </div>
             <p class="settings-desc" id="restore-status"></p>
           </section>
@@ -559,6 +564,7 @@
   <script src="vendor/leaflet.min.js"></script>
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/purify.min.js"></script>
+  <script src="vendor/fflate.min.js"></script>
   <script src="crypto.js"></script>
   <script src="store.js"></script>
   <script src="app.js"></script>

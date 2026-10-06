@@ -95,37 +95,59 @@ function migrate(db, userId, items) {
   return { ok: true, count: items.length };
 }
 
-// The inverse of migrate(): the client decrypts every note back to plaintext
-// (it's the only thing that ever holds the key) and this writes it back, in
-// one transaction, then clears enc_enabled_at — but deliberately *keeps*
-// enc_salt/enc_iterations, so the same recovery key (already cached in this
-// device's IndexedDB) re-enables afterwards with no new ceremony. Exists so
-// a server-side writer that can't encrypt on the way in — the Obsidian/
-// Markdown importer (server/importer.js) writes notes.content directly —
-// can run safely: the client temporarily reverts, imports, then re-runs
-// migrate(). See public/app.js's import wiring.
-function revert(db, userId, items) {
-  const prefs = getPrefs(db, userId);
-  if (!prefs.enabled) throw new HttpError(409, 'encryption is not enabled');
-  if (!Array.isArray(items)) throw new HttpError(400, 'items must be an array');
+// Background catch-up for content written while the server couldn't
+// encrypt (it never holds the key): mail-in notes (server/mail-ingest.js),
+// the Markdown importer, a backup restore of older plaintext rows, notes
+// moved back out of a shared space by someone else or by undo. And the
+// mirror case: notes the account owns inside a shared space must be
+// plaintext (no other member has this key — see public/app.js's
+// encryptOutgoing), so any still-ciphertext one there gets decrypted.
+//
+// pending() lists both sides; sweep() writes back what the client
+// converted. Neither touches updated_at or history — the text itself is
+// unchanged, only its at-rest encoding.
+const PREFIX = 'ncv1:';
+const isCipher = (s) => typeof s === 'string' && s.startsWith(PREFIX);
 
-  const ownedIds = new Set(
-    db.prepare('SELECT id FROM notes WHERE user_id = ?').all(userId).map((r) => r.id)
-  );
-  for (const item of items) {
-    if (!item || !ownedIds.has(Number(item.id)) || typeof item.content !== 'string') {
-      throw new HttpError(400, 'every item must be { id, content } for a note you own');
-    }
-  }
-
-  const updateContent = db.prepare('UPDATE notes SET content = ? WHERE id = ?');
-  const runRevert = db.transaction(() => {
-    for (const item of items) updateContent.run(item.content, Number(item.id));
-    db.prepare('UPDATE users SET enc_enabled_at = NULL WHERE id = ?').run(userId);
-  });
-  runRevert();
-
-  return { ok: true, count: items.length };
+function pending(db, userId) {
+  if (!getPrefs(db, userId).enabled) return { encrypt: [], decrypt: [] };
+  return {
+    encrypt: db
+      .prepare(
+        "SELECT id, content FROM notes WHERE user_id = ? AND share_id IS NULL AND content IS NOT NULL AND content NOT LIKE 'ncv1:%'"
+      )
+      .all(userId),
+    decrypt: db
+      .prepare("SELECT id, content FROM notes WHERE user_id = ? AND share_id IS NOT NULL AND content LIKE 'ncv1:%'")
+      .all(userId),
+  };
 }
 
-module.exports = { getPrefs, setup, cancelSetup, migrate, revert, MIN_ITERATIONS, MAX_ITERATIONS };
+// Writes one converted note, compare-and-set on the exact text the client
+// read (`expect`) so a concurrent real edit always wins. Personal notes may
+// only go plaintext -> ciphertext, space notes only ciphertext -> plaintext.
+// Returns whether it wrote. Caller owns the transaction.
+function convertOne(db, userId, item) {
+  const id = Number(item && item.id);
+  const { content, expect } = item || {};
+  if (!Number.isInteger(id) || typeof content !== 'string' || typeof expect !== 'string') {
+    throw new HttpError(400, 'every item must be { id, content, expect }');
+  }
+  const note = db.prepare('SELECT share_id FROM notes WHERE id = ? AND user_id = ?').get(id, userId);
+  if (!note) return false;
+  const toCipher = note.share_id == null;
+  if (isCipher(content) !== toCipher || isCipher(expect) === toCipher) return false;
+  return db.prepare('UPDATE notes SET content = ? WHERE id = ? AND content = ?').run(content, id, expect).changes > 0;
+}
+
+function sweep(db, userId, items) {
+  if (!getPrefs(db, userId).enabled) throw new HttpError(409, 'encryption is not enabled');
+  if (!Array.isArray(items)) throw new HttpError(400, 'items must be an array');
+  let count = 0;
+  db.transaction(() => {
+    for (const item of items) if (convertOne(db, userId, item)) count++;
+  })();
+  return { ok: true, count };
+}
+
+module.exports = { getPrefs, setup, cancelSetup, migrate, pending, sweep, convertOne, isCipher, MIN_ITERATIONS, MAX_ITERATIONS };

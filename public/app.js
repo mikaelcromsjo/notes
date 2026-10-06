@@ -123,6 +123,8 @@
   const accountSwitchBtn = document.getElementById('account-switch-btn');
   const accountDeleteBtn = document.getElementById('account-delete-btn');
   const exportBtn = document.getElementById('export-btn');
+  const backupBtn = document.getElementById('backup-btn');
+  const attachmentsBtn = document.getElementById('attachments-btn');
   const restoreBtn = document.getElementById('restore-btn');
   const restoreFile = document.getElementById('restore-file');
   const restoreStatus = document.getElementById('restore-status');
@@ -1063,6 +1065,7 @@
     syncThemePrefs();
     warmCache();
     sweepGeoEncryption();
+    sweepContentEncryption();
   }
 
   // --- Warm cache (phase 5): note text is cheap even at thousands of notes,
@@ -1088,6 +1091,35 @@
     }
     await warmAttachmentCache();
     await warmThemeImages();
+  }
+
+  // Background catch-up sweep for note *content* (server/encryption.js's
+  // pending()): whatever the server wrote while it couldn't encrypt — mail-in
+  // notes, imports, restores of plaintext rows, notes moved back out of a
+  // shared space — gets encrypted; this account's own notes sitting in a
+  // space still as ciphertext (no other member has the key) get decrypted.
+  // Compare-and-set on the text read, so a concurrent edit always wins; the
+  // IndexedDB mirror holds plaintext either way, so nothing to update there.
+  async function sweepContentEncryption() {
+    if (!encryptionActive() || !navigator.onLine) return;
+    try {
+      const p = await fetch('/api/encryption/pending').then((r) => (r.ok ? r.json() : null));
+      if (!p) return;
+      const items = [];
+      for (const n of p.encrypt) {
+        items.push({ id: n.id, expect: n.content, content: await window.NicoCrypto.encryptText(encKey, n.content) });
+      }
+      for (const n of p.decrypt) {
+        try {
+          items.push({ id: n.id, expect: n.content, content: await window.NicoCrypto.decryptText(encKey, n.content) });
+        } catch {
+          /* not this key's ciphertext — leave it */
+        }
+      }
+      if (items.length) await postJson('/api/encryption/sweep', { items });
+    } catch {
+      /* next run (next open / reconnect) retries */
+    }
   }
 
   // Background catch-up sweep for location encryption (see server/db.js's
@@ -3707,18 +3739,6 @@
       if (!r.ok) throw httpErr(r.status, j.error || `HTTP ${r.status}`);
       return j;
     },
-    // The inverse of migrateEncryption — see server/encryption.js's revert()
-    // and the import wiring below (near importRunBtn).
-    async revertEncryption(items) {
-      const r = await fetch('/api/encryption/revert', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items }),
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw httpErr(r.status, j.error || `HTTP ${r.status}`);
-      return j;
-    },
     // Location-geo catch-up sweep (see sweepGeoEncryption below) — three
     // small write-back endpoints, one per table, each { items: [{id, geo}] }.
     encryptNoteGeo: (items) =>
@@ -3754,8 +3774,9 @@
     getMyShares: () => fetch('/api/shares').then((r) => (r.ok ? r.json() : [])).catch(() => []),
     getShareCandidates: (rootNoteId) =>
       reqJson(`/api/shares/candidates?rootNoteId=${rootNoteId}`, 'GET'),
-    createShare: (title, noteIds) => postJson('/api/shares', { title, noteIds }),
-    addNoteToShare: (shareId, noteId) => postJson(`/api/shares/${shareId}/notes`, { noteId }),
+    // `plaintext` = plaintextForShare's decrypted text for notes moving in.
+    createShare: (title, noteIds, plaintext) => postJson('/api/shares', { title, noteIds, plaintext }),
+    addNoteToShare: (shareId, noteId, plaintext) => postJson(`/api/shares/${shareId}/notes`, { noteId, plaintext }),
     removeNoteFromShare: (shareId, noteId) => reqJson(`/api/shares/${shareId}/notes/${noteId}`, 'DELETE'),
     inviteShareEditor: (shareId, email) => postJson(`/api/shares/${shareId}/invite`, { email }),
     // Idempotent — returns the existing link if one's already live, mints
@@ -4040,6 +4061,26 @@
   // comment for why); this lists exactly what's about to move before
   // asking for a name, so nothing moves without the user actually seeing
   // the list first.
+  // A note moving into a space must be stored as plaintext — no other
+  // member has this account's key (see encryptOutgoing). The server can't
+  // decrypt, so the notes' decrypted text goes along with the move request
+  // (server/shares.js's decryptMoved, same transaction). Throws when this
+  // device can't decrypt them, so nothing moves half-readable.
+  async function plaintextForShare(ids) {
+    if (!(encPrefs && encPrefs.enabled)) return [];
+    if (!encKey) throw new Error('Unlock this device first (Settings → Privacy) — your notes are encrypted.');
+    const want = new Set(ids.map(Number));
+    const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : Promise.reject(new Error('Could not load the notes to share.'))));
+    const out = [];
+    for (const r of rows) {
+      if (!want.has(r.id) || !window.NicoCrypto.isEncrypted(r.content)) continue;
+      const content = await decryptIncoming(r.content);
+      if (content == null) throw new Error(`Could not decrypt note ${r.id} — nothing was shared.`);
+      out.push({ id: r.id, content, expect: r.content });
+    }
+    return out;
+  }
+
   async function openShareFlow(anchor, note) {
     let candidates;
     try {
@@ -4076,7 +4117,7 @@
           const picked = await openShareDialog(note, candidates, null);
           if (!picked) return;
           try {
-            const share = await api.createShare(picked.title, picked.ids);
+            const share = await api.createShare(picked.title, picked.ids, await plaintextForShare(picked.ids));
             await finish({ id: share.id, title: share.title, role: 'owner' }, share.historyId, picked.ids.length);
           } catch (e) {
             toast(e.message || "Couldn't create the shared space.");
@@ -4089,7 +4130,7 @@
           const picked = await openShareDialog(note, candidates, s);
           if (!picked) return;
           try {
-            const res = await api.addNoteToShare(s.id, picked.ids);
+            const res = await api.addNoteToShare(s.id, picked.ids, await plaintextForShare(picked.ids));
             await finish({ id: s.id, title: s.title, role: s.role }, res.historyId, picked.ids.length);
           } catch (e) {
             toast(e.message || "Couldn't add this note to that space.");
@@ -4138,7 +4179,10 @@
       const msg = document.createElement('p');
       msg.className = 'confirm-message';
       msg.textContent =
-        'These notes move into the space (they leave your personal notes). Untick any that should stay private.';
+        'These notes move into the space (they leave your personal notes). Untick any that should stay private.' +
+        (encPrefs && encPrefs.enabled
+          ? ' Notes in a space are not encrypted (other members have no key), so the server can read these until they move back out.'
+          : '');
       let nameInput = null;
       if (!share) {
         nameInput = document.createElement('input');
@@ -5378,6 +5422,7 @@
       await checkAlarms({ nudge: true });
       warmCache(); // background; never blocks first render
       sweepGeoEncryption(); // background; also catches up an account encrypted before this feature existed
+      sweepContentEncryption(); // background; mail-in / imported / un-shared notes the server stored as plaintext
     } catch (err) {
       // Any unhandled throw in this chain (most likely an offline edge case)
       // used to leave the page stuck on the bare shell forever, nothing ever
@@ -11197,30 +11242,182 @@
     location.reload();
   });
 
-  exportBtn.addEventListener('click', () => {
-    // Same-origin GET; the response is Content-Disposition: attachment so the
-    // browser downloads it without navigating away from the app.
-    exportBtn.disabled = true;
+  // Server-built downloads go through a hidden iframe: the response is
+  // Content-Disposition: attachment, so the browser saves it without
+  // navigating away from the app. `fields` (optional) turns it into a form
+  // POST targeting that iframe.
+  function serverDownload(btn, url, fields) {
+    btn.disabled = true;
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
-    iframe.src = '/api/account/export';
+    iframe.name = `dl-${Date.now()}`;
     document.body.appendChild(iframe);
-    toast('Preparing your export…');
+    if (fields) {
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = url;
+      form.target = iframe.name;
+      form.style.display = 'none';
+      for (const [k, v] of Object.entries(fields)) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = k;
+        input.value = v;
+        form.append(input);
+      }
+      document.body.appendChild(form);
+      form.submit();
+      form.remove();
+    } else {
+      iframe.src = url;
+    }
     setTimeout(() => {
       iframe.remove();
-      exportBtn.disabled = false;
+      btn.disabled = false;
     }, 8000);
+  }
+
+  function saveBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  const exportStamp = () => new Date().toISOString().slice(0, 10);
+
+  // Every personal note's text, decrypted on this device. Throws when any
+  // can't be (a locked device) rather than export ciphertext as "text".
+  async function fullDecryptedNotes() {
+    if (encryptionLocked()) throw new Error('Unlock this device first (Settings → Privacy) — your notes are encrypted.');
+    const r = await fetch('/api/notes/full');
+    if (!r.ok) throw new Error('Could not load your notes — are you online?');
+    const rows = await r.json();
+    for (const row of rows) {
+      const content = await decryptIncoming(row.content);
+      if (content == null) throw new Error(`Could not decrypt note ${row.id}.`);
+      row.content = content;
+    }
+    return rows;
+  }
+
+  const uploadNamesIn = (text) => [...String(text || '').matchAll(/\/uploads\/([A-Za-z0-9._-]+)/g)].map((m) => m[1]);
+
+  backupBtn.addEventListener('click', () => {
+    serverDownload(backupBtn, '/api/account/backup');
+    toast('Preparing your backup…');
+  });
+
+  // The server lists attachment_path files itself, but can't see inline
+  // ![](/uploads/…) embeds in encrypted text — this device adds those.
+  attachmentsBtn.addEventListener('click', async () => {
+    let names = [];
+    if (encPrefs && encPrefs.enabled) {
+      try {
+        names = [...new Set((await fullDecryptedNotes()).flatMap((n) => uploadNamesIn(n.content)))];
+      } catch (e) {
+        toast(e.message);
+        return;
+      }
+    }
+    serverDownload(attachmentsBtn, '/api/account/attachments', { names: names.join(',') });
+    toast('Preparing your attachments…');
+  });
+
+  function exportSlug(s) {
+    return (
+      String(s || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60) || 'note'
+    );
+  }
+
+  // Quote a front-matter scalar only when it could otherwise be misread as YAML.
+  function yamlScalar(v) {
+    const s = String(v);
+    return /^[\w .,/@()+&']*$/.test(s) && s.trim() === s ? s : JSON.stringify(s);
+  }
+
+  // The readable export, built here (not on the server) because only this
+  // device can decrypt. One Markdown file per personal note, front-matter +
+  // a "## Links" list of [[wikilinks]]; files are linked as
+  // ../attachments/<name>, so extracting this zip and the attachments zip
+  // into one folder gives a working vault — and server/importer.js reads
+  // the pair back the same way.
+  exportBtn.addEventListener('click', async () => {
+    if (!window.fflate) return toast('Export is unavailable — reload the app and try again.');
+    exportBtn.disabled = true;
+    try {
+      const [rows, list, links] = await Promise.all([
+        fullDecryptedNotes(),
+        api.listNotes(),
+        fetch('/api/links').then((r) => (r.ok ? r.json() : Promise.reject(new Error('Could not load your links.')))),
+      ]);
+      const meta = new Map(list.map((n) => [n.id, n]));
+      const titleById = new Map(list.map((n) => [n.id, n.title]));
+      const neighbours = new Map();
+      for (const l of links) {
+        for (const [x, y] of [[l.a, l.b], [l.b, l.a]]) {
+          if (!neighbours.has(x)) neighbours.set(x, []);
+          neighbours.get(x).push(y);
+        }
+      }
+      const enc = window.fflate.strToU8;
+      const files = {};
+      for (const row of rows) {
+        const n = { ...meta.get(row.id), ...row };
+        const fm = ['---', `title: ${yamlScalar(n.title || 'Untitled')}`, `id: ${n.id}`];
+        if (n.created_at) fm.push(`created: ${n.created_at}`);
+        if (n.updated_at) fm.push(`updated: ${n.updated_at}`);
+        fm.push(`type: ${n.type || 'text'}`, `status: ${n.status || 'normal'}`);
+        if (n.lat != null && n.lon != null) fm.push(`lat: ${n.lat}`, `lon: ${n.lon}`);
+        fm.push('---', '');
+        const parts = [fm.join('\n'), (n.content || '').replace(/\]\(\/uploads\//g, '](../attachments/')];
+        if (n.attachment_path && n.attachment_path.startsWith('/uploads/')) {
+          const f = n.attachment_path.slice('/uploads/'.length);
+          parts.push('', n.type === 'image' ? `![${n.title || ''}](../attachments/${f})` : `[${n.type}: ${f}](../attachments/${f})`);
+        } else if (n.attachment_path) {
+          parts.push('', `<${n.attachment_path}>`);
+        }
+        const outs = (neighbours.get(n.id) || []).filter((id) => titleById.has(id));
+        if (outs.length) parts.push('', '## Links', ...outs.map((id) => `- [[${titleById.get(id)}]]`));
+        files[`notes/${n.id}-${exportSlug(n.title)}.md`] = enc(parts.join('\n'));
+      }
+      files['README.txt'] = enc(
+        `Your notes export
+=================
+
+notes/        One Markdown file per note (your personal notes; shared spaces
+              are not included). The YAML front-matter carries the metadata;
+              a "## Links" list names the notes it connects to as [[wikilinks]].
+attachments/  Not in this file — "Download attachments" gives a second zip.
+              Extract both into the same folder and the links resolve.
+
+Re-import: Settings -> Import & export -> Import, picking both zips.
+For an exact restore use "Download backup" instead.
+
+Generated ${new Date().toISOString()}
+`
+      );
+      saveBlob(new Blob([window.fflate.zipSync(files, { level: 6 })], { type: 'application/zip' }), `notes-export-${exportStamp()}.zip`);
+    } catch (e) {
+      toast((e && e.message) || 'Export failed.');
+    } finally {
+      exportBtn.disabled = false;
+    }
   });
 
   restoreBtn.addEventListener('click', () => restoreFile.click());
   // Warnings for a restore, from the server's analysis (server/snapshots.js's
-  // analyze, or the legacy importer's `losses`) — one line each.
+  // analyze) — one line each.
   function restoreWarnings(a) {
     const out = [];
-    if (!a.exact && a.losses) {
-      out.push(`This is an older backup without an exact copy, so it is NOT restored exactly: ${a.losses.join('; ')}.`);
-      return out;
-    }
     const cols = Object.entries(a.missingColumns || {}).map(([t, c]) => `${t}: ${c.join(', ')}`);
     if (cols.length || (a.missingTables || []).length) {
       out.push(
@@ -11232,21 +11429,29 @@
     }
     if (a.leavingSpaces) out.push(`${a.leavingSpaces} note(s) were in shared spaces you're no longer in — they come back as private notes.`);
     if (a.remap) out.push('This backup is from another account or server: notes get new ids and the undo history in it is not restored.');
-    if (a.files && a.files.unavailable) out.push(`${a.files.unavailable} attachment file(s) are neither in the backup nor on the server — those notes will show the file as missing.`);
+    if (a.files && a.files.unavailable) {
+      out.push(
+        `${a.files.unavailable} attachment file(s) are missing on this server` +
+          (a.filesToken ? ' and not in the attachments file' : ' — cancel and pick the attachments .zip together with the backup') +
+          ', or those notes will show the file as missing.'
+      );
+    }
     return out;
   }
 
-  // .zip restore: upload once to check (the server stages it and says what
-  // the restore would do), confirm with those warnings, then apply.
+  // .zip restore: upload once to check (the server stages the backup — and
+  // the attachments zip, if picked too — and says what the restore would
+  // do), confirm with those warnings, then apply.
   restoreFile.addEventListener('change', async () => {
-    const file = restoreFile.files[0];
-    if (!file) return;
+    const picked = [...restoreFile.files].slice(0, 2);
+    if (!picked.length) return;
     restoreFile.value = '';
+    const file = picked.find((f) => !/attachments/i.test(f.name)) || picked[0];
     restoreBtn.disabled = true;
-    restoreStatus.textContent = `Uploading “${file.name}”…`;
+    restoreStatus.textContent = `Uploading ${picked.map((f) => `“${f.name}”`).join(' and ')}…`;
     try {
       const fd = new FormData();
-      fd.set('file', file);
+      for (const f of picked) fd.append('files', f);
       const res = await fetch('/api/account/import/check', { method: 'POST', body: fd });
       const check = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -11268,7 +11473,7 @@
       const ar = await fetch('/api/account/import/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: check.token }),
+        body: JSON.stringify({ token: check.token, filesToken: check.filesToken }),
       });
       const body = await ar.json().catch(() => ({}));
       if (!ar.ok) {
@@ -11360,69 +11565,33 @@
 
   importRunBtn.addEventListener('click', async () => {
     if (importBusy) return;
-    const file = importFile.files[0];
-    if (!file) {
+    const files = [...importFile.files];
+    if (!files.length) {
       importStatus.textContent = 'Choose a .zip or .md file first.';
       return;
     }
-
-    // server/importer.js writes note content straight into the DB
-    // server-side and has no way to encrypt on the way in — see
-    // decryptAllNotes/encryptAllNotes above. Temporarily revert to
-    // plaintext, import, then re-encrypt with the same (already-cached) key.
-    const wasEncrypted = Boolean(encPrefs && encPrefs.enabled);
-    if (wasEncrypted && !encKey) {
-      importStatus.textContent =
-        'This device needs to unlock encryption first — Settings → Privacy → Unlock this device.';
+    if (files.length > 2) {
+      importStatus.textContent = 'At most two files: the notes .zip and its attachments .zip.';
       return;
-    }
-    if (wasEncrypted) {
-      const ok = await confirmDialog(
-        'Importing needs your notes temporarily decrypted on the server, then re-encrypts ' +
-          'everything automatically when it\'s done (including whatever was just imported). ' +
-          'If this is interrupted partway through, your account is left unencrypted until you ' +
-          'click "Encrypt my notes now" again in Settings → Privacy.',
-        { confirmLabel: 'Import' }
-      );
-      if (!ok) return;
     }
 
     importBusy = true;
     importRunBtn.disabled = true;
-    let reverted = false;
     try {
-      if (wasEncrypted) {
-        importStatus.textContent = 'Decrypting your notes…';
-        await decryptAllNotes();
-        reverted = true;
-        renderEncryptionPanel();
-      }
-
       importStatus.textContent = 'Uploading…';
       const fd = new FormData();
       fd.set('format', importFormat.value);
-      fd.set('file', file);
+      for (const f of files) fd.append('files', f);
       const res = await fetch('/api/import', { method: 'POST', body: fd });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `upload failed (${res.status})`);
       await pollImport(data.jobId);
+      // server/importer.js writes plaintext (it never has the key) — encrypt
+      // what it wrote now rather than waiting for the next app open.
+      await sweepContentEncryption();
     } catch (e) {
       importStatus.textContent = `Import failed: ${e.message}`;
     } finally {
-      if (reverted) {
-        const prevMsg = importStatus.textContent;
-        try {
-          importStatus.textContent = `${prevMsg} Re-encrypting…`;
-          await encryptAllNotes();
-          renderEncryptionPanel();
-          importStatus.textContent = `${prevMsg} Re-encrypted.`;
-        } catch {
-          importStatus.textContent =
-            `${prevMsg} ⚠️ Could not re-encrypt — your account is NOT encrypted right now. ` +
-            'Open Settings → Privacy and click "Encrypt my notes now".';
-          toast('Re-encryption failed — your notes are temporarily unencrypted.', { duration: 6000 });
-        }
-      }
       importBusy = false;
       importRunBtn.disabled = false;
     }
@@ -11590,9 +11759,7 @@
 
   // Fetches every note's plaintext, encrypts each with this device's key, and
   // migrates the account — the one-time "Encrypt my notes now" action
-  // (§3.4), also reused verbatim after a temporary revert (see
-  // reencryptAllNotes's caller in the import wiring below). Throws on
-  // failure; updates encPrefs on success. Requires encKey.
+  // (§3.4). Throws on failure; updates encPrefs on success. Requires encKey.
   async function encryptAllNotes() {
     if (!encKey) throw new Error('this device is missing its key');
     const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : []));
@@ -11603,25 +11770,6 @@
       }))
     );
     await api.migrateEncryption(items);
-    encPrefs = await api.getEncryptionPrefs();
-  }
-
-  // The inverse — fetches every note's ciphertext, decrypts each with this
-  // device's key, and reverts the account back to plaintext server-side
-  // (keeping the salt/iterations, so encryptAllNotes can re-run with the
-  // same key afterwards — see server/encryption.js's revert()). Used only
-  // around the Obsidian/Markdown importer, which writes content directly and
-  // has no way to encrypt on the way in.
-  async function decryptAllNotes() {
-    if (!encKey) throw new Error('this device is missing its key');
-    const rows = await fetch('/api/notes/full').then((r) => (r.ok ? r.json() : []));
-    const items = await Promise.all(
-      rows.map(async (r) => ({ id: r.id, content: await decryptIncoming(r.content) }))
-    );
-    if (items.some((it) => it.content == null)) {
-      throw new Error('could not decrypt every note — aborting rather than risk data loss');
-    }
-    await api.revertEncryption(items);
     encPrefs = await api.getEncryptionPrefs();
   }
 
@@ -11685,6 +11833,7 @@
       allNotesCache = await api.listNotes();
       warmCache();
       sweepGeoEncryption(); // this device can now read (and so encrypt) whatever was pending
+      sweepContentEncryption();
       if (currentId != null) {
         currentNote = await api.getNote(currentId);
         await render();

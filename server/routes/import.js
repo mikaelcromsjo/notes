@@ -6,10 +6,12 @@ const importer = require('../importer');
 
 const router = express.Router();
 
-// Whole archive is held in memory and handed straight to the runner.
+// Whole archive(s) held in memory and handed straight to the runner. Up to
+// two files: a notes .zip (or one .md) plus, optionally, the matching
+// attachments .zip (this app's export comes as that pair).
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 30 * 1024 * 1024 },
+  limits: { fileSize: 300 * 1024 * 1024, files: 2 },
 });
 
 const FORMATS = new Set(['markdown', 'obsidian']);
@@ -54,22 +56,24 @@ router.get('/:jobId', (req, res) => {
   res.json(shape(job));
 });
 
-router.post('/', upload.single('file'), (req, res) => {
+router.post('/', upload.array('files', 2), (req, res) => {
   const format = String(req.body.format || '').toLowerCase();
   if (!FORMATS.has(format)) {
     return res.status(400).json({ error: `format must be one of: ${[...FORMATS].join(', ')}` });
   }
-  if (!req.file) return res.status(400).json({ error: 'a .zip or .md file is required' });
+  const files = req.files || [];
+  if (!files.length) return res.status(400).json({ error: 'a .zip or .md file is required' });
 
-  const name = (req.file.originalname || '').toLowerCase();
-  const single =
-    name.endsWith('.md') || name.endsWith('.markdown') || req.file.mimetype === 'text/markdown';
-  const zipish =
-    name.endsWith('.zip') ||
-    req.file.mimetype === 'application/zip' ||
-    req.file.mimetype === 'application/x-zip-compressed';
-  if (!single && !zipish) {
-    return res.status(400).json({ error: 'file must be a .zip archive or a single .md file' });
+  const parts = [];
+  for (const f of files) {
+    const name = (f.originalname || '').toLowerCase();
+    const single = name.endsWith('.md') || name.endsWith('.markdown') || f.mimetype === 'text/markdown';
+    const zipish =
+      name.endsWith('.zip') || f.mimetype === 'application/zip' || f.mimetype === 'application/x-zip-compressed';
+    if (!single && !zipish) {
+      return res.status(400).json({ error: 'files must be .zip archives or a single .md file' });
+    }
+    parts.push({ buf: f.buffer, single, filename: f.originalname });
   }
 
   const id = crypto.randomUUID();
@@ -77,8 +81,7 @@ router.post('/', upload.single('file'), (req, res) => {
     'INSERT INTO import_jobs (id, user_id, format, status, created_at) VALUES (?, ?, ?, ?, ?)'
   ).run(id, req.userId, format, 'pending', now());
 
-  const buf = req.file.buffer;
-  setImmediate(() => importer.runJob(id, buf, { single, filename: req.file.originalname }));
+  setImmediate(() => importer.runJob(id, parts));
   res.status(202).json({ jobId: id });
 });
 

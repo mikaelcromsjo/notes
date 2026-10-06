@@ -13,7 +13,7 @@
 //
 // Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
 // a byte change to this file is itself what makes the browser re-run install.
-const CACHE_VERSION = 'v94';
+const CACHE_VERSION = 'v95';
 const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [
@@ -46,6 +46,7 @@ const VENDOR_ASSETS = [
   '/vendor/leaflet.min.css',
   '/vendor/marked.min.js',
   '/vendor/purify.min.js',
+  '/vendor/fflate.min.js',
   '/vendor/images/layers.png',
   '/vendor/images/layers-2x.png',
   '/vendor/images/marker-icon.png',

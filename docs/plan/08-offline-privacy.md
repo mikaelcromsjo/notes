@@ -35,25 +35,17 @@ Notes for whoever picks this up next:
   (99 real notes, full round-trip verified byte-for-byte) — it only ever runs
   when a signed-in user clicks through the ceremony themselves. It has since
   been run for real by `alf.cromsjo@gmail.com` on this checkout.
-- **Known gap found after the above went live: export and the Obsidian/
-  Markdown importer are server-side-only and never touch the client's key.**
-  `GET /api/account/export` bundles `notes.content` straight from the DB, so
-  an encrypted account's backup .zip/`data.json` holds ciphertext instead of
-  readable Markdown (restoring that same export back still works — the bytes
-  round-trip — it just isn't human-readable). `server/importer.js` writes
-  freshly-parsed content directly into the DB with no encryption pass at all,
-  so importing into an encrypted account would have silently left the
-  imported notes in plaintext. **Fixed** via `server/encryption.js`'s
-  `revert()` (the inverse of `migrate()`: decrypts everything back to
-  plaintext server-side but keeps `enc_salt`/`enc_iterations`, so the same
-  cached key re-enables with no new ceremony) + `POST /api/encryption/revert`
-  + `public/app.js`'s import-button wiring (`decryptAllNotes` →
-  run the import → `encryptAllNotes`, all user-confirmed up front, with an
-  explicit warning if re-encryption fails partway). Rehearsed end to end
-  against a `DB_PATH` copy including a simulated import. **The export gap
-  itself (unreadable ciphertext in the backup .zip) is still open** — lower
-  priority since restore-to-self still works; a real fix needs export moved
-  client-side (no zip library is currently vendored for the browser).
+- **Server-side writers vs. the key (2026-10-06).** Export, the Markdown
+  importer, mail-in and space moves all run where the key isn't. Resolved
+  without ever decrypting the whole account server-side (the old
+  `revert()` round-trip around imports is gone): a client-side catch-up
+  sweep (`GET /api/encryption/pending` + `POST /api/encryption/sweep`,
+  run on app open/reconnect/unlock/after import) encrypts any plaintext
+  personal note and decrypts any of the account's own notes sitting in a
+  shared space; moving notes into a space sends their decrypted text with
+  the move. Export is now built in the browser (decrypted Markdown), the
+  exact backup is a separate `account.db`-only zip, and attachments are a
+  third download both share — see CLAUDE.md's Content encryption and Undo coverage bullets.
 - **Scope extended beyond content: location is now encrypted too**
   (`notes.lat/lon`, `reminders.lat/lon/radius_m` for kind='location'
   geofences, and `location_log`, the GPS trail). Originally out of scope —

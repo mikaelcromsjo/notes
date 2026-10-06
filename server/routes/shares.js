@@ -215,7 +215,7 @@ router.get(
 router.post(
   '/:id/notes',
   requireSession,
-  wrap((req) => sharesCore.addNoteToShare(db, req.userId, Number(req.params.id), req.body.noteId), 201)
+  wrap((req) => sharesCore.addNoteToShare(db, req.userId, Number(req.params.id), req.body.noteId, req.body.plaintext), 201)
 );
 
 // Moves one note back to its author's personal graph — see
