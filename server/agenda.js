@@ -13,7 +13,8 @@ const { extractTags } = require('./tags');
 
 const remindersStmt = db.prepare(
   `SELECT r.id, r.note_id, r.kind, r.time, r.days, r.date, r.radius_m,
-          r.window_start, r.window_end, r.tz, r.snooze_until, r.next_at, n.title
+          r.window_start, r.window_end, r.tz, r.snooze_until, r.next_at, n.title, n.share_id,
+          (SELECT title FROM shares WHERE id = n.share_id) AS share_title
    FROM reminders r JOIN notes n ON n.id = r.note_id
    WHERE r.user_id = ? AND n.status NOT IN ('deleted', 'done')`
 );
@@ -70,15 +71,17 @@ const OPEN_TASKS_LIMIT = 20;
 // links.js's list() doc comment): a shared note linked by a collaborator, not
 // by this user, still has a link and must not show as orphaned.
 const orphansStmt = db.prepare(
-  `SELECT n.id, n.title FROM notes n
+  `SELECT n.id, n.title, n.share_id, (SELECT title FROM shares WHERE id = n.share_id) AS share_title
+   FROM notes n
    WHERE ${VISIBLE_NOTES} AND n.status NOT IN ('deleted', 'done')
      AND NOT EXISTS (SELECT 1 FROM links l WHERE l.note_a = n.id OR l.note_b = n.id)
    ORDER BY n.updated_at DESC LIMIT 20`
 );
 
-// Space notes are tagged with their shareId so an encrypted account's client,
-// which recomputes the personal half of these lists locally (it can't trust
-// the server's view of ciphertext), knows which server rows to keep.
+// Every row on a space note is tagged with its space, so each consumer can
+// group by space (personal first — public/app.js's openAgenda, digest.js's
+// bySpace) and an encrypted account's client, which recomputes the personal
+// to-do/task lists locally, knows which server rows to keep.
 const shareOf = (n) => (n.share_id != null ? { shareId: n.share_id, shareTitle: n.share_title } : {});
 
 function validZone(tz) {
@@ -139,6 +142,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
       windowEnd: r.window_end,
       dueAt: dueIso,
       snoozed: !!snoozed,
+      ...shareOf(r),
     };
 
     // kind='anytime' has no committed clock time (a day pattern + window,
@@ -183,7 +187,7 @@ function buildAgenda(userId, { tz, now = new Date() } = {}) {
     ...shareOf(n),
   }));
 
-  const orphans = orphansStmt.all(userId, userId).map((n) => ({ noteId: n.id, title: n.title }));
+  const orphans = orphansStmt.all(userId, userId).map((n) => ({ noteId: n.id, title: n.title, ...shareOf(n) }));
 
   return {
     generatedAt: now.toISOString(),

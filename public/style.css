@@ -2352,12 +2352,13 @@ button:hover { filter: brightness(1.05); }
 }
 
 .agenda-spacehead {
-  font-size: 0.85rem;
+  font-size: 1rem;
   font-weight: 700;
-  margin: 0.8rem 0 0.1rem;
-  padding-bottom: 0.1rem;
+  margin: 1.4rem 0 0.2rem;
+  padding-bottom: 0.15rem;
   border-bottom: 1px solid var(--border);
 }
+.agenda-spacehead:first-child { margin-top: 0; }
 
 .agenda-item {
   display: flex;

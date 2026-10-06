@@ -7735,54 +7735,6 @@
       fireAt: effectiveNextFire(a, ref),
     }));
 
-    const buckets = { overdue: [], today: [], week: [], later: [] };
-    for (const a of list) {
-      // kind='anytime' has no committed clock time to bucket by — showing it
-      // as "Overdue"/"Today" would misrepresent a reminder that was
-      // deliberately left untimed. It gets its own section at the end instead
-      // (see the 'Nudges' block below), whether due or not.
-      if (a.kind === 'anytime') continue;
-      if (a.triggered) {
-        buckets.overdue.push(a);
-        continue;
-      }
-      if (!a.fireAt) continue; // acked one-shot in the past — nothing to show
-      const dd = Math.round((startOfDay(a.fireAt) - startOfDay(ref)) / 86400000);
-      if (dd <= 0) buckets.today.push(a);
-      else if (dd < 7) buckets.week.push(a);
-      else buckets.later.push(a);
-    }
-    for (const k of Object.keys(buckets)) {
-      buckets[k].sort((x, y) => (x.fireAt || 0) - (y.fireAt || 0));
-    }
-
-    agendaBody.innerHTML = '';
-    const groups = [
-      ['Overdue', buckets.overdue],
-      ['Today', buckets.today],
-      ['This week', buckets.week],
-      ['Later', buckets.later],
-    ];
-    let any = false;
-    for (const [label, items] of groups) {
-      if (!items.length) continue;
-      any = true;
-      const h = document.createElement('h3');
-      h.textContent = label;
-      agendaBody.appendChild(h);
-      items.forEach((a) => agendaBody.appendChild(agendaRow(a, label === 'Overdue')));
-    }
-
-    // Standing geofence reminders that aren't currently ringing.
-    const places = list.filter((a) => a.kind === 'location' && !a.triggered);
-    if (places.length) {
-      any = true;
-      const h = document.createElement('h3');
-      h.textContent = 'Places';
-      agendaBody.appendChild(h);
-      places.forEach((a) => agendaBody.appendChild(placeRow(a)));
-    }
-
     // Secondary lists (server-computed): notes flagged to-do, then notes
     // carrying open `- [ ]` tasks in their body. Once this account's content
     // is encrypted, the server can't compute these any more — recompute
@@ -7801,113 +7753,167 @@
         String(b.updatedAt).localeCompare(String(a.updatedAt))
       );
     }
-    const todos = (extra && extra.todos) || [];
-    if (todos.length) {
-      any = true;
-      const h = document.createElement('h3');
-      h.textContent = 'To-do';
-      agendaBody.appendChild(h);
+    // Everything is grouped by space — personal first, then each space by
+    // name — with the usual sections inside each (server/digest.js's bySpace
+    // does the same for the digest). Space headings only appear once
+    // something actually comes from a space, so a personal-only agenda reads
+    // exactly as before. Reminders, to-dos, tasks and orphans carry
+    // shareId/shareTitle from the server; waiting comes from allNotesCache,
+    // i.e. whichever scope is open.
+    const groups = new Map();
+    const groupFor = (key, title) => {
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          title: key == null ? 'Personal' : title || 'Shared space',
+          buckets: { overdue: [], today: [], week: [], later: [] },
+          places: [],
+          todos: [],
+          waiting: [],
+          openTasks: [],
+          orphans: [],
+          nudges: [],
+        });
+      }
+      return groups.get(key);
+    };
+    const groupOf = (r) => groupFor(r.shareId != null ? r.shareId : null, r.shareTitle);
 
-      // Grouped by space first (personal, then each space by name — only
-      // headed once a space to-do is actually present), then within each by
-      // @context tag (server/tags.js) — a todo with several tags appears
-      // under each one, since it genuinely fits either context. With no
-      // spaces or tags in use this renders exactly like a flat list.
-      const bySpace = new Map(); // shareId|null -> { title, items }
-      todos.forEach((t) => {
-        const key = t.shareId != null ? t.shareId : null;
-        if (!bySpace.has(key)) bySpace.set(key, { title: t.shareTitle || 'Shared space', items: [] });
-        bySpace.get(key).items.push(t);
-      });
-      const spaceKeys = [...bySpace.keys()].sort((a, b) =>
-        a == null ? -1 : b == null ? 1 : bySpace.get(a).title.localeCompare(bySpace.get(b).title)
-      );
-      const showSpaceHeads = spaceKeys.some((k) => k != null);
-      const renderTagGroups = (items) => {
-        const byTag = new Map();
-        const untagged = [];
-        items.forEach((t) => {
-          const tags = t.tags || [];
-          if (!tags.length) {
-            untagged.push(t);
-            return;
-          }
-          tags.forEach((tag) => {
-            if (!byTag.has(tag)) byTag.set(tag, []);
-            byTag.get(tag).push(t);
-          });
-        });
-        [...byTag.keys()].sort().forEach((tag) => {
-          const sub = document.createElement('div');
-          sub.className = 'agenda-subhead';
-          sub.textContent = `@${tag}`;
-          agendaBody.appendChild(sub);
-          byTag.get(tag).forEach((t) => agendaBody.appendChild(todoRow(t)));
-        });
-        if (untagged.length) {
-          if (byTag.size) {
-            const sub = document.createElement('div');
-            sub.className = 'agenda-subhead';
-            sub.textContent = 'Other';
-            agendaBody.appendChild(sub);
-          }
-          untagged.forEach((t) => agendaBody.appendChild(todoRow(t)));
-        }
-      };
-      spaceKeys.forEach((key) => {
-        const group = bySpace.get(key);
-        if (showSpaceHeads) {
-          const sub = document.createElement('div');
-          sub.className = 'agenda-spacehead';
-          sub.textContent = key == null ? '👤 Personal' : `🔗 ${group.title}`;
-          agendaBody.appendChild(sub);
-        }
-        renderTagGroups(group.items);
-      });
+    for (const a of list) {
+      const g = groupOf(a);
+      // kind='anytime' has no committed clock time to bucket by — showing it
+      // as "Overdue"/"Today" would misrepresent a reminder that was
+      // deliberately left untimed. It gets its own section at the end instead
+      // (see 'Nudges' below), whether due or not.
+      if (a.kind === 'anytime') {
+        g.nudges.push(a);
+        continue;
+      }
+      if (a.triggered) {
+        g.buckets.overdue.push(a);
+        continue;
+      }
+      // Standing geofence reminders that aren't currently ringing.
+      if (a.kind === 'location') g.places.push(a);
+      if (!a.fireAt) continue; // acked one-shot in the past — nothing to show
+      const dd = Math.round((startOfDay(a.fireAt) - startOfDay(ref)) / 86400000);
+      if (dd <= 0) g.buckets.today.push(a);
+      else if (dd < 7) g.buckets.week.push(a);
+      else g.buckets.later.push(a);
     }
+    ((extra && extra.todos) || []).forEach((t) => groupOf(t).todos.push(t));
+    ((extra && extra.openTasks) || []).forEach((t) => groupOf(t).openTasks.push(t));
+    ((extra && extra.orphans) || []).forEach((o) => groupOf(o).orphans.push(o));
     // Waiting: local (allNotesCache already has status for every note) — not
     // server-computed like the others, since it's deliberately left out of
     // buildAgenda/the digest (blocked on someone else isn't something to
     // act on yet, so it shouldn't be pushed/emailed as if it were).
-    const waiting = allNotesCache.filter((n) => n.status === 'waiting');
-    if (waiting.length) {
-      any = true;
-      const h = document.createElement('h3');
-      h.textContent = 'Waiting';
-      agendaBody.appendChild(h);
-      waiting.forEach((n) => agendaBody.appendChild(todoRow({ noteId: n.id, title: n.title })));
-    }
-    const openTasks = (extra && extra.openTasks) || [];
-    if (openTasks.length) {
-      any = true;
-      const h = document.createElement('h3');
-      h.textContent = 'Open tasks';
-      agendaBody.appendChild(h);
-      openTasks.forEach((t) => agendaBody.appendChild(openTaskRow(t)));
-    }
-    // Structurally disconnected notes (no links at all) — easy to forget since
-    // nothing points at them and they never turn up while navigating the grid.
-    const orphans = (extra && extra.orphans) || [];
-    if (orphans.length) {
-      any = true;
-      const h = document.createElement('h3');
-      h.textContent = 'Orphaned notes';
-      agendaBody.appendChild(h);
-      orphans.forEach((o) => agendaBody.appendChild(todoRow(o)));
-    }
+    allNotesCache
+      .filter((n) => n.status === 'waiting')
+      .forEach((n) =>
+        groupFor(n.share_id != null ? n.share_id : null, currentSpace && currentSpace.title).waiting.push({
+          noteId: n.id,
+          title: n.title,
+        })
+      );
 
-    // "Anytime" nudges — deliberately last: due ones ring no differently from
-    // upcoming ones here (no popup/push either, see checkAlarms), so there's
-    // nothing urgent about their position, unlike everything above.
-    const nudges = list
-      .filter((a) => a.kind === 'anytime')
-      .sort((x, y) => y.triggered - x.triggered || (x.fireAt || 0) - (y.fireAt || 0));
-    if (nudges.length) {
+    agendaBody.innerHTML = '';
+    let any = false;
+    const heading = (text) => {
       any = true;
       const h = document.createElement('h3');
-      h.textContent = 'Nudges';
+      h.textContent = text;
       agendaBody.appendChild(h);
-      nudges.forEach((a) => agendaBody.appendChild(agendaRow(a, false)));
+    };
+    const renderTagGroups = (items) => {
+      const byTag = new Map();
+      const untagged = [];
+      items.forEach((t) => {
+        const tags = t.tags || [];
+        if (!tags.length) {
+          untagged.push(t);
+          return;
+        }
+        tags.forEach((tag) => {
+          if (!byTag.has(tag)) byTag.set(tag, []);
+          byTag.get(tag).push(t);
+        });
+      });
+      [...byTag.keys()].sort().forEach((tag) => {
+        const sub = document.createElement('div');
+        sub.className = 'agenda-subhead';
+        sub.textContent = `@${tag}`;
+        agendaBody.appendChild(sub);
+        byTag.get(tag).forEach((t) => agendaBody.appendChild(todoRow(t)));
+      });
+      if (untagged.length) {
+        if (byTag.size) {
+          const sub = document.createElement('div');
+          sub.className = 'agenda-subhead';
+          sub.textContent = 'Other';
+          agendaBody.appendChild(sub);
+        }
+        untagged.forEach((t) => agendaBody.appendChild(todoRow(t)));
+      }
+    };
+
+    // A group can end up empty (its only reminder was an acked one-shot).
+    const nonEmpty = (g) =>
+      Object.values(g.buckets).some((l) => l.length) ||
+      [g.places, g.todos, g.waiting, g.openTasks, g.orphans, g.nudges].some((l) => l.length);
+    const ordered = [...groups.values()]
+      .filter(nonEmpty)
+      .sort((a, b) => (a.key == null ? -1 : b.key == null ? 1 : a.title.localeCompare(b.title)));
+    const showSpaceHeads = ordered.some((g) => g.key != null);
+    for (const g of ordered) {
+      if (showSpaceHeads) {
+        const sub = document.createElement('div');
+        sub.className = 'agenda-spacehead';
+        sub.textContent = g.key == null ? `👤 ${g.title}` : `🔗 ${g.title}`;
+        agendaBody.appendChild(sub);
+      }
+      for (const [label, items] of [
+        ['Overdue', g.buckets.overdue],
+        ['Today', g.buckets.today],
+        ['This week', g.buckets.week],
+        ['Later', g.buckets.later],
+      ]) {
+        if (!items.length) continue;
+        items.sort((x, y) => (x.fireAt || 0) - (y.fireAt || 0));
+        heading(label);
+        items.forEach((a) => agendaBody.appendChild(agendaRow(a, label === 'Overdue')));
+      }
+      if (g.places.length) {
+        heading('Places');
+        g.places.forEach((a) => agendaBody.appendChild(placeRow(a)));
+      }
+      // To-dos are further grouped by @context tag (server/tags.js).
+      if (g.todos.length) {
+        heading('To-do');
+        renderTagGroups(g.todos);
+      }
+      if (g.waiting.length) {
+        heading('Waiting');
+        g.waiting.forEach((t) => agendaBody.appendChild(todoRow(t)));
+      }
+      if (g.openTasks.length) {
+        heading('Open tasks');
+        g.openTasks.forEach((t) => agendaBody.appendChild(openTaskRow(t)));
+      }
+      // Structurally disconnected notes (no links at all) — easy to forget since
+      // nothing points at them and they never turn up while navigating the grid.
+      if (g.orphans.length) {
+        heading('Orphaned notes');
+        g.orphans.forEach((o) => agendaBody.appendChild(todoRow(o)));
+      }
+      // "Anytime" nudges — deliberately last: due ones ring no differently from
+      // upcoming ones here (no popup/push either, see checkAlarms), so there's
+      // nothing urgent about their position, unlike everything above.
+      if (g.nudges.length) {
+        g.nudges.sort((x, y) => y.triggered - x.triggered || (x.fireAt || 0) - (y.fireAt || 0));
+        heading('Nudges');
+        g.nudges.forEach((a) => agendaBody.appendChild(agendaRow(a, false)));
+      }
     }
 
     if (!any) {

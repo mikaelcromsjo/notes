@@ -61,7 +61,8 @@ const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // rhythm to report (reminderRhythm below would just show blank/bare days) and
 // already get their own page section, sourced from buildDigest's `nudges`.
 const allRemindersStmt = db.prepare(
-  `SELECT r.id, r.note_id, r.time, r.days, r.date, r.snooze_until, r.next_at, n.title
+  `SELECT r.id, r.note_id, r.time, r.days, r.date, r.snooze_until, r.next_at, n.title, n.share_id,
+          (SELECT title FROM shares WHERE id = n.share_id) AS share_title
    FROM reminders r JOIN notes n ON n.id = r.note_id
    WHERE r.user_id = ? AND n.status NOT IN ('deleted', 'done') AND r.kind != 'anytime'
    ORDER BY r.time ASC, n.title ASC`
@@ -81,6 +82,7 @@ function buildDigestPage(userId, { tz, now = new Date() } = {}) {
     title: r.title,
     rhythm: reminderRhythm(r),
     snoozed: !!(r.snooze_until && Date.parse(r.snooze_until) > now.getTime()),
+    ...(r.share_id != null ? { shareId: r.share_id, shareTitle: r.share_title } : {}),
   }));
   return { ...d, allReminders };
 }
@@ -116,6 +118,34 @@ function digestSubject(d, cadence) {
   return `${cadence === 'weekly' ? 'Your week' : 'Your day'}: ${summaryLine(d, cadence)}`;
 }
 
+// Every renderer below groups by space: personal first, then each space by
+// name, the usual sections inside each (same order as public/app.js's
+// openAgenda). `head` is null when nothing comes from a space, so a
+// personal-only digest renders exactly as it did before spaces existed.
+const SPACE_LISTS = ['overdue', 'today', 'week', 'todos', 'openTasks', 'allReminders', 'nudges', 'orphans'];
+function bySpace(d) {
+  const groups = new Map();
+  for (const list of SPACE_LISTS) {
+    for (const r of d[list] || []) {
+      const key = r.shareId != null ? r.shareId : null;
+      if (!groups.has(key)) {
+        const g = { key, title: key == null ? 'Personal' : r.shareTitle || 'Shared space' };
+        for (const l of SPACE_LISTS) g[l] = [];
+        groups.set(key, g);
+      }
+      groups.get(key)[list].push(r);
+    }
+  }
+  const out = [...groups.values()].sort((a, b) =>
+    a.key == null ? -1 : b.key == null ? 1 : a.title.localeCompare(b.title)
+  );
+  const headed = out.some((g) => g.key != null);
+  return out.map((g) => ({ ...g, head: headed ? (g.key == null ? `👤 ${g.title}` : `🔗 ${g.title}`) : null }));
+}
+
+// " 🔗Space" suffix for the push body, which is too short for headings.
+const spaceTag = (r) => (r.shareId != null ? ` 🔗${r.shareTitle || 'Shared space'}` : '');
+
 function section(title, rows) {
   if (!rows.length) return '';
   return `${title}\n${rows.map((r) => `  • ${r}`).join('\n')}\n\n`;
@@ -124,19 +154,22 @@ function section(title, rows) {
 function digestText(d, cadence, { viewUrl } = {}) {
   const origin = publicOrigin();
   let out = `${summaryLine(d, cadence)}\n\n`;
-  out += section('Overdue', d.overdue.map((r) => `${r.title} — ${whenLabel(r)}  ${origin}/#${r.noteId}`));
-  out += section('Today', d.today.map((r) => `${r.title} — ${r.time || ''}  ${origin}/#${r.noteId}`));
-  if (cadence === 'weekly') {
-    out += section('This week', d.week.map((r) => `${r.title} — ${whenLabel(r)}  ${origin}/#${r.noteId}`));
+  // A handful of orphans, not the whole list — this goes out on a schedule and
+  // the set barely changes day to day; the view-online page has the rest.
+  for (const g of bySpace({ ...d, orphans: d.orphans.slice(0, 5) })) {
+    if (g.head) out += `== ${g.head} ==\n\n`;
+    out += section('Overdue', g.overdue.map((r) => `${r.title} — ${whenLabel(r)}  ${origin}/#${r.noteId}`));
+    out += section('Today', g.today.map((r) => `${r.title} — ${r.time || ''}  ${origin}/#${r.noteId}`));
+    if (cadence === 'weekly') {
+      out += section('This week', g.week.map((r) => `${r.title} — ${whenLabel(r)}  ${origin}/#${r.noteId}`));
+    }
+    out += section('To-do', g.todos.map((t) => `${t.title}  ${origin}/#${t.noteId}`));
+    out += section(
+      'Open tasks',
+      g.openTasks.map((t) => `${t.title} (${t.open} open)  ${origin}/#${t.noteId}`)
+    );
+    out += section('Orphaned notes', g.orphans.map((o) => `${o.title}  ${origin}/#${o.noteId}`));
   }
-  out += section('To-do', d.todos.map((t) => `${t.title}  ${origin}/#${t.noteId}`));
-  out += section(
-    'Open tasks',
-    d.openTasks.map((t) => `${t.title} (${t.open} open)  ${origin}/#${t.noteId}`)
-  );
-  // A handful, not the whole list — this goes out on a schedule and the set of
-  // orphans barely changes day to day; the view-online page has the rest.
-  out += section('Orphaned notes', d.orphans.slice(0, 5).map((o) => `${o.title}  ${origin}/#${o.noteId}`));
   if (viewUrl) out += `See everything — every reminder, orphaned notes, insights:\n  ${viewUrl}\n\n`;
   out += `${origin}/  ·  Change or turn off this digest in the app.`;
   return out.trim();
@@ -162,12 +195,20 @@ function digestHtml(d, cadence, { viewUrl } = {}) {
     (label ? ` <span style="color:#666">— ${esc(label)}</span>` : '');
   const body =
     `<p style="font:600 15px system-ui;margin:0 0 8px">${esc(summaryLine(d, cadence))}</p>` +
-    htmlList('Overdue', d.overdue.map((r) => link(r, whenLabel(r)))) +
-    htmlList('Today', d.today.map((r) => link(r, r.time || ''))) +
-    (cadence === 'weekly' ? htmlList('This week', d.week.map((r) => link(r, whenLabel(r)))) : '') +
-    htmlList('To-do', d.todos.map((t) => link({ noteId: t.noteId, title: t.title }, ''))) +
-    htmlList('Open tasks', d.openTasks.map((t) => link({ noteId: t.noteId, title: t.title }, `${t.open} open`))) +
-    htmlList('Orphaned notes', d.orphans.slice(0, 5).map((o) => link({ noteId: o.noteId, title: o.title }, ''))) +
+    bySpace({ ...d, orphans: d.orphans.slice(0, 5) })
+      .map(
+        (g) =>
+          (g.head
+            ? `<h2 style="margin:22px 0 2px;font:700 15px system-ui;border-bottom:1px solid #ddd;padding-bottom:2px">${esc(g.head)}</h2>`
+            : '') +
+          htmlList('Overdue', g.overdue.map((r) => link(r, whenLabel(r)))) +
+          htmlList('Today', g.today.map((r) => link(r, r.time || ''))) +
+          (cadence === 'weekly' ? htmlList('This week', g.week.map((r) => link(r, whenLabel(r)))) : '') +
+          htmlList('To-do', g.todos.map((t) => link({ noteId: t.noteId, title: t.title }, ''))) +
+          htmlList('Open tasks', g.openTasks.map((t) => link({ noteId: t.noteId, title: t.title }, `${t.open} open`))) +
+          htmlList('Orphaned notes', g.orphans.map((o) => link({ noteId: o.noteId, title: o.title }, '')))
+      )
+      .join('') +
     (viewUrl
       ? `<p style="margin:16px 0 0;font:14px system-ui"><a href="${esc(viewUrl)}" style="color:#2563eb">See everything →</a> <span style="color:#888">every reminder, orphaned notes, insights</span></p>`
       : '') +
@@ -181,9 +222,9 @@ function digestPush(d, cadence, { url } = {}) {
   const lines = [];
   const room = () => 4 - lines.length;
   const push = (arr, fmt) => arr.slice(0, Math.max(0, room())).forEach((r) => lines.push(fmt(r)));
-  push(d.overdue, (r) => `⚠ ${r.title} — ${whenLabel(r)}`);
-  push(d.today, (r) => `${r.title}${r.time ? ` — ${r.time}` : ''}`);
-  if (cadence === 'weekly') push(d.week, (r) => `${r.title} — ${whenLabel(r)}`);
+  push(d.overdue, (r) => `⚠ ${r.title}${spaceTag(r)} — ${whenLabel(r)}`);
+  push(d.today, (r) => `${r.title}${spaceTag(r)}${r.time ? ` — ${r.time}` : ''}`);
+  if (cadence === 'weekly') push(d.week, (r) => `${r.title}${spaceTag(r)} — ${whenLabel(r)}`);
   const shown = lines.length;
   const dueTotal = d.counts.overdue + d.counts.today + (cadence === 'weekly' ? d.counts.week : 0);
   if (dueTotal > shown) lines.push(`+${dueTotal - shown} more`);
@@ -222,28 +263,30 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
   const heading = cadence === 'weekly' ? 'Your week' : 'Your day';
   const generated = new Date(page.generatedAt).toLocaleString('en-GB', { timeZone: page.tz });
 
-  const sections =
-    pageSection('Overdue', page.overdue.map((r) => L(r, whenLabel(r)))) +
-    pageSection('Today', page.today.map((r) => L(r, r.time || ''))) +
-    pageSection('This week', page.week.map((r) => L(r, whenLabel(r)))) +
-    pageSection('To-do', page.todos.map((t) => L({ noteId: t.noteId, title: t.title }, ''))) +
-    pageSection(
-      'Open tasks',
-      page.openTasks.map((t) => L({ noteId: t.noteId, title: t.title }, `${t.open} open`))
-    ) +
-    pageSection(
-      'All reminders',
-      (page.allReminders || []).map((r) => L(r, r.snoozed ? `${r.rhythm} · snoozed` : r.rhythm))
-    ) +
-    // "Nudges" — kind='anytime' reminders, kept separate from the sections
-    // above for the same reason the in-app agenda splits them out (see
-    // public/app.js's openAgenda): no committed clock time to be "Overdue"/
-    // "Today"/rhythm-labelled about.
-    pageSection('Nudges', (page.nudges || []).map((r) => L(r, nudgeLabel(r)))) +
-    pageSection(
-      'Orphans',
-      (page.orphans || []).map((o) => L({ noteId: o.noteId, title: o.title }, ''))
-    );
+  const sections = bySpace(page)
+    .map(
+      (g) =>
+        (g.head ? `<h2 class="space">${esc(g.head)}</h2>` : '') +
+        pageSection('Overdue', g.overdue.map((r) => L(r, whenLabel(r)))) +
+        pageSection('Today', g.today.map((r) => L(r, r.time || ''))) +
+        pageSection('This week', g.week.map((r) => L(r, whenLabel(r)))) +
+        pageSection('To-do', g.todos.map((t) => L({ noteId: t.noteId, title: t.title }, ''))) +
+        pageSection(
+          'Open tasks',
+          g.openTasks.map((t) => L({ noteId: t.noteId, title: t.title }, `${t.open} open`))
+        ) +
+        pageSection(
+          'All reminders',
+          g.allReminders.map((r) => L(r, r.snoozed ? `${r.rhythm} · snoozed` : r.rhythm))
+        ) +
+        // "Nudges" — kind='anytime' reminders, kept separate from the sections
+        // above for the same reason the in-app agenda splits them out (see
+        // public/app.js's openAgenda): no committed clock time to be "Overdue"/
+        // "Today"/rhythm-labelled about.
+        pageSection('Nudges', g.nudges.map((r) => L(r, nudgeLabel(r)))) +
+        pageSection('Orphans', g.orphans.map((o) => L({ noteId: o.noteId, title: o.title }, '')))
+    )
+    .join('');
 
   return `<!doctype html>
 <html lang="en">
@@ -261,6 +304,7 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
   .sub { color: #666; font-size: 0.85rem; margin: 0 0 20px; }
   .summary { font-weight: 600; margin: 0 0 18px; }
   section { margin: 0 0 22px; }
+  h2.space { font-size: 1.05rem; text-transform: none; letter-spacing: 0; color: inherit; margin: 30px 0 12px; padding-bottom: 4px; border-bottom: 1px solid #d0d0d5; }
   h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: #888; margin: 0 0 8px; }
   ul { list-style: none; margin: 0; padding: 0; }
   li { padding: 8px 0; border-top: 1px solid #e3e3e6; }
@@ -272,7 +316,7 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
   .empty { color: #666; }
   @media (prefers-color-scheme: dark) {
     body { background: #16161a; color: #e9e9ec; }
-    li { border-color: #2c2c33; }
+    li, h2.space { border-color: #2c2c33; }
     a { color: #6ea8fe; }
     .actions a { background: #1f1f25; border-color: #35353d; }
     .sub, h2, .meta, .empty { color: #9a9aa4; }
