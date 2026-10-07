@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const express = require('express');
 const db = require('../db');
 const sessions = require('../sessions');
-const { ensureWidgetToken } = require('../widget-token');
+const { ensureWidgetToken, ensureCalendarToken } = require('../widget-token');
 const encryption = require('../encryption');
 
 const router = express.Router();
@@ -13,12 +13,16 @@ const LEGACY_COOKIE = 'nico_uid';
 // Also hands back the widget feed token, minting one on first read.
 router.get('/', (req, res) => {
   if (!req.userId) return res.json({ user: null });
-  const user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(req.userId);
+  const user = db.prepare('SELECT id, email, calendar_fetched_at FROM users WHERE id = ?').get(req.userId);
   if (!user) return res.json({ user: null });
 
   res.json({
     user: { id: user.id, email: user.email },
     widgetToken: ensureWidgetToken(user.id),
+    // Calendar subscription feed (routes/calendar.js). calendarFetchedAt =
+    // when a calendar app last polled it — the client's "is it set up" signal.
+    calendarToken: ensureCalendarToken(user.id),
+    calendarFetchedAt: user.calendar_fetched_at || null,
     // Not secret — see server/encryption.js. Lets the client know on boot
     // whether this account's note content is ciphertext, and (if so) whether
     // *this* device still needs the recovery key re-entered to unlock it.
@@ -40,6 +44,18 @@ router.delete('/widget-token', (req, res) => {
   if (!req.userId) return res.status(401).json({ error: 'no active session' });
   db.prepare('UPDATE users SET widget_token = NULL WHERE id = ?').run(req.userId);
   res.status(204).end();
+});
+
+// Rotate the calendar feed token — every existing subscription stops updating
+// (the calendar keeps its last copy) and has to be re-added with the new URL.
+router.post('/calendar-token', (req, res) => {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare('UPDATE users SET calendar_token = ?, calendar_fetched_at = NULL WHERE id = ?').run(
+    token,
+    req.userId
+  );
+  res.json({ calendarToken: token });
 });
 
 // Legacy unauthenticated "log in with just an email" — removed. A session is

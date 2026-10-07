@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const history = require('./history');
 const { uploadsDir } = require('./upload-config');
+const { uploadedFileType } = require('./attachment-kind');
 const {
   buildHierarchy,
   hierarchyParentsMap,
@@ -634,11 +635,15 @@ function createAttachmentNote(db, userId, parentId, body, file) {
     scopedShareId = Number(body.shareId);
   }
 
-  const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = body;
+  const { contactName, contactPhone, contactEmail, appUri, appLabel } = body;
+  let { type } = body;
   if (!ATTACHMENT_TYPES.has(type)) {
     if (file) fs.unlink(file.path, () => {});
     throw new HttpError(400, `type must be one of: ${[...ATTACHMENT_TYPES].join(', ')}`);
   }
+  // A "file" that is really a photo/recording becomes that type (same rule
+  // as a lone mail-in attachment — server/attachment-kind.js).
+  if (type === 'file') type = uploadedFileType(file);
 
   let attachmentPath = null;
   let attachmentSize = null;
@@ -646,7 +651,9 @@ function createAttachmentNote(db, userId, parentId, body, file) {
 
   if (type === 'image' || type === 'audio' || type === 'file') {
     if (!file) throw new HttpError(400, 'a supported file is required');
-    if (type !== 'file') {
+    // An upgraded 'file' was judged by its stored extension, which may have
+    // come from the filename under a generic MIME — nothing to cross-check.
+    if (type !== 'file' && body.type !== 'file') {
       const kind = file.mimetype.split('/')[0];
       if (kind !== type) {
         fs.unlink(file.path, () => {});
@@ -742,11 +749,15 @@ function replaceAttachment(db, userId, id, body, file) {
     throw new HttpError(404, 'not found');
   }
 
-  const { type, contactName, contactPhone, contactEmail, appUri, appLabel } = body;
+  const { contactName, contactPhone, contactEmail, appUri, appLabel } = body;
+  let { type } = body;
   if (!ATTACHMENT_TYPES.has(type)) {
     if (file) fs.unlink(file.path, () => {});
     throw new HttpError(400, `type must be one of: ${[...ATTACHMENT_TYPES].join(', ')}`);
   }
+  // A "file" that is really a photo/recording becomes that type (same rule
+  // as a lone mail-in attachment — server/attachment-kind.js).
+  if (type === 'file') type = uploadedFileType(file);
 
   let attachmentPath = null;
   let attachmentSize = null;

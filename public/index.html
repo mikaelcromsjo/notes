@@ -469,6 +469,16 @@
               <a id="account-apk-link" class="secondary" href="/downloads/notes.apk" download>Download APK</a>
             </div>
 
+            <label class="settings-label settings-btn-row-spaced" for="calendar-feed-url">Calendar subscription</label>
+            <p class="settings-desc">Every timed reminder (not nudges or place reminders) as a live calendar your phone's calendar app rings natively, repeats included — edits follow along. Calendar apps refresh slowly (Google: every 8–24 h), so keep the app's own alarms for anything due soon. Note titles are sent to whichever calendar you add it to.</p>
+            <input type="text" id="calendar-feed-url" readonly />
+            <p class="settings-desc" id="calendar-feed-status"></p>
+            <div class="settings-btn-row">
+              <a id="calendar-google-btn" class="secondary" target="_blank" rel="noopener">Add to Google Calendar</a>
+              <button id="calendar-copy-btn" class="secondary">Copy URL</button>
+              <button id="calendar-reset-btn" class="secondary">Reset URL</button>
+            </div>
+
             <label class="settings-label settings-btn-row-spaced" for="digest-cadence">Agenda digest</label>
             <p class="settings-desc">A scheduled push or email of your agenda — what's overdue, due soon, flagged to-do, and open tasks.</p>
             <div class="settings-inline-row">

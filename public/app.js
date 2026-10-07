@@ -205,7 +205,10 @@
   // `onClick` (the nudge toast) makes it tappable and gives it longer to be
   // noticed than a plain fire-and-forget toast; `duration` overrides the
   // default dismiss delay.
-  function toast(msg, { onClick, duration = 2600 } = {}) {
+  // `onClick` adds an action button (label `action`, default "Open"): only the
+  // button takes taps — the rest of the toast, like a plain one, lets them
+  // through to whatever is underneath (#toast-host is pointer-events:none).
+  function toast(msg, { onClick, action = 'Open', duration = 2600 } = {}) {
     let host = document.getElementById('toast-host');
     if (!host) {
       host = document.createElement('div');
@@ -213,24 +216,37 @@
       document.body.appendChild(host);
     }
     const el = document.createElement('div');
-    el.className = 'toast' + (onClick ? ' toast-tap' : '');
-    el.textContent = msg;
+    el.className = 'toast' + (onClick ? ' toast-action' : '');
+    const text = document.createElement('span');
+    text.textContent = msg;
+    el.appendChild(text);
     const dismiss = () => {
       el.classList.remove('show');
       setTimeout(() => el.remove(), 200);
     };
-    if (onClick) el.addEventListener('click', () => { dismiss(); onClick(); });
+    if (onClick) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = action;
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dismiss();
+        onClick();
+      });
+      el.appendChild(btn);
+    }
     host.appendChild(el);
     requestAnimationFrame(() => el.classList.add('show'));
     setTimeout(dismiss, duration);
   }
 
-  // "<msg> — tap to undo" for an action the server recorded as history entry
+  // "<msg> [Undo]" for an action the server recorded as history entry
   // `historyId` (null/undefined = nothing to undo, e.g. it was queued
   // offline: just the plain message). `after` runs once the undo landed.
   function undoToast(msg, historyId, after) {
     if (historyId == null) return toast(msg);
-    toast(`${msg} — tap to undo`, {
+    toast(msg, {
+      action: 'Undo',
       duration: 7000,
       onClick: async () => {
         const u = await api.undoHistory(historyId);
@@ -1066,6 +1082,7 @@
     warmCache();
     sweepGeoEncryption();
     sweepContentEncryption();
+    flushPendingShares();
   }
 
   // --- Warm cache (phase 5): note text is cheap even at thousands of notes,
@@ -2175,6 +2192,11 @@
   let saveTimer = null;
   let currentUser = null;
   let widgetToken = null;
+  // Calendar subscription feed (GET /calendar.ics?token=, server/routes/
+  // calendar.js) — token + when a calendar app last polled it, from
+  // GET /api/session. See calendarFeedLive().
+  let calendarToken = null;
+  let calendarFetchedAt = null;
   // Zero-knowledge note-content encryption (docs/plan/08-offline-privacy.md
   // §3.3/§3.4) — see the "Encryption" block below (near the api object) for
   // the actual encrypt/decrypt seam. encPrefs mirrors GET /api/session's
@@ -3118,6 +3140,8 @@
     },
     rotateWidgetToken: () =>
       fetch('/api/session/widget-token', { method: 'POST' }).then((r) => r.json()),
+    rotateCalendarToken: () =>
+      fetch('/api/session/calendar-token', { method: 'POST' }).then((r) => r.json()),
     getNote: async (id) => {
       try {
         const n = await fetch(`/api/notes/${id}`).then((r) => (r.ok ? r.json() : null));
@@ -3461,33 +3485,38 @@
         return store ? store.meta('tabs', []) : [];
       }
     },
-    // Tab state is online-best-effort (see CLAUDE.md): offline, these are soft
-    // no-ops that hand back the tabs we already have so navigation still works;
-    // the server reconciles on the next successful listTabs().
-    openTab: (noteId) => {
-      if (!navigator.onLine) return Promise.resolve(tabs);
-      return fetch('/api/tabs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note_id: noteId }),
-      }).then((r) => r.json());
-    },
-    moveTab: (tabId, noteId) => {
-      if (!navigator.onLine) return Promise.resolve(tabs);
-      return fetch(`/api/tabs/${tabId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note_id: noteId }),
-      }).then((r) => r.json());
-    },
-    activateTab: (tabId) => {
-      if (!navigator.onLine) return Promise.resolve(tabs);
-      return fetch(`/api/tabs/${tabId}/activate`, { method: 'PUT' }).then((r) => r.json());
-    },
-    closeTab: (tabId) => {
-      if (!navigator.onLine) return Promise.resolve(tabs);
-      return fetch(`/api/tabs/${tabId}`, { method: 'DELETE' }).then((r) => r.json());
-    },
+    // Tab state is online-best-effort: offline (or when the request drops),
+    // the change is applied to the local `tabs` list instead — so switching,
+    // moving, opening and closing still visibly work — and mirrored to
+    // meta['tabs'] for an offline boot. The server's list wins again on the
+    // next successful call / listTabs().
+    openTab: (noteId) =>
+      tabRequest('/api/tabs', 'POST', { note_id: noteId }, () => {
+        const order = tabs.reduce((m, t) => Math.max(m, t.sort_order ?? -1), -1) + 1;
+        return [
+          ...tabs.map((t) => ({ ...t, is_active: 0 })),
+          { id: `ltab:${Date.now()}`, ...tabNoteFields(noteId), sort_order: order, is_active: 1 },
+        ];
+      }),
+    moveTab: (tabId, noteId) =>
+      tabRequest(`/api/tabs/${tabId}`, 'PUT', { note_id: noteId }, () =>
+        tabs.map((t) => (t.id === tabId ? { ...t, ...tabNoteFields(noteId) } : t))
+      ),
+    activateTab: (tabId) =>
+      tabRequest(`/api/tabs/${tabId}/activate`, 'PUT', null, () =>
+        tabs.map((t) => ({ ...t, is_active: t.id === tabId ? 1 : 0 }))
+      ),
+    closeTab: (tabId) =>
+      tabRequest(`/api/tabs/${tabId}`, 'DELETE', null, () => {
+        const i = tabs.findIndex((t) => t.id === tabId);
+        if (i < 0) return tabs;
+        const rest = tabs.filter((t) => t.id !== tabId);
+        if (tabs[i].is_active && rest.length) {
+          const next = rest[Math.min(i, rest.length - 1)];
+          return rest.map((t) => ({ ...t, is_active: t === next ? 1 : 0 }));
+        }
+        return rest;
+      }),
     logNav: (from, to, via) => {
       if (!to) return;
       const queue = () => {
@@ -3875,6 +3904,37 @@
     history.replaceState(null, '', `#${id}`);
   }
 
+  // A local tab id (`ltab:` — made by an offline openTab) means nothing to
+  // the server, so anything touching one stays local too.
+  async function tabRequest(url, method, body, applyLocally) {
+    const local = () => {
+      const next = applyLocally();
+      if (store) store.setMeta('tabs', next).catch(() => {});
+      return next;
+    };
+    if (!navigator.onLine || /ltab:|\/local(\/|$)/.test(url)) return local();
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) return res.status >= 500 ? local() : tabs;
+      const list = await res.json();
+      if (store) store.setMeta('tabs', list).catch(() => {});
+      return list;
+    } catch {
+      return local();
+    }
+  }
+
+  // The display fields a tab row carries for its note (server/tabs.js's list()).
+  function tabNoteFields(noteId) {
+    const n =
+      (currentNote && currentNote.id === noteId && currentNote) || allNotesCache.find((x) => x.id === noteId);
+    return { note_id: noteId, title: n ? n.title : '', share_id: n && n.share_id != null ? n.share_id : null };
+  }
+
   // Applies a fresh tabs list from the server: shows whichever tab is
   // flagged active, promotes a tab to active if none is flagged, or opens
   // a tab on the most recent note (or shows the empty state) if none exist.
@@ -3882,8 +3942,8 @@
     tabs = Array.isArray(tabsList) ? tabsList : [];
     let active = tabs.find((t) => t.is_active);
 
-    // No tab flagged active: promote the first. Offline, api.activateTab is a
-    // no-op that returns `tabs` unchanged, so pick locally instead of recursing.
+    // No tab flagged active: promote the first (only worth a server round
+    // trip online; otherwise just pick it here).
     if (!active && tabs.length > 0) {
       if (net.online) {
         const activated = await api.activateTab(tabs[0].id);
@@ -3911,6 +3971,9 @@
         await goTo(currentNote.id, 'tab');
         return;
       }
+      // …and the reverse: a personal tab picked while a space is showing has
+      // to leave the space, or the grid draws it against the space's notes.
+      if (currentNote) await ensureScope(null);
       if (!currentNote) {
         // Offline and this note was never cached — fall back to something we have.
         if (allNotesCache.length > 0) {
@@ -3998,6 +4061,7 @@
     const note = await api.getNote(id);
     if (!note) return;
     await ensureScope(note.share_id != null ? note.share_id : null);
+    if (note.share_id == null) lastPersonalNoteId = note.id;
     const from = currentId;
     currentId = note.id;
     currentNote = note;
@@ -4095,14 +4159,15 @@
     }
     const existing = (await api.getMyShares()).filter((s) => s.role === 'owner' || s.role === 'editor');
 
-    // Share, then land in the space with a "tap to undo" toast — undo moves
+    // Share, then land in the space with an Undo toast — undo moves
     // the notes straight back (routes/history.js's undoShare) and returns
     // here to the note in personal notes.
     const finish = async (share, historyId, count) => {
       closeNoteFullscreen();
       await switchSpace(share.id, share);
       const label = count === 1 ? '1 note' : `${count} notes`;
-      toast(`Shared ${label} into “${share.title}” — tap to undo`, {
+      toast(`Shared ${label} into “${share.title}”`, {
+        action: 'Undo',
         duration: 8000,
         onClick: async () => {
           const u = await api.undoHistory(historyId);
@@ -5398,6 +5463,8 @@
     }
     currentUser = sess.user;
     widgetToken = sess.widgetToken || null;
+    calendarToken = sess.calendarToken || null;
+    calendarFetchedAt = sess.calendarFetchedAt || null;
     encPrefs = sess.encryption || null;
     await loadEncKeyFromStore();
     accountBtn.title = `Signed in as ${currentUser.email}`;
@@ -5427,6 +5494,7 @@
       warmCache(); // background; never blocks first render
       sweepGeoEncryption(); // background; also catches up an account encrypted before this feature existed
       sweepContentEncryption(); // background; mail-in / imported / un-shared notes the server stored as plaintext
+      flushPendingShares(); // background; share-sheet items parked by sw.js while offline
     } catch (err) {
       // Any unhandled throw in this chain (most likely an offline edge case)
       // used to leave the page stuck on the bare shell forever, nothing ever
@@ -5478,11 +5546,15 @@
   //                                mistaken for nothing having happened.
   //   a `nico_share` cookie      — text handed over by POST /share while logged
   //                                out (see server/routes/share.js)
+  //   /?shared=queued            — sw.js parked an offline share (flushPendingShares)
+  //   /?d=integrate              — "Add phone alarm"'s fallback when the Android
+  //                                companion app isn't installed (alarmIntentUrl)
   // Consume whatever we act on so a reload is clean.
   function handleDeepLink() {
     const params = new URLSearchParams(location.search);
     const d = params.get('d');
-    const handledD = d === 'agenda' || d === 'insights';
+    const handledD = d === 'agenda' || d === 'insights' || d === 'integrate';
+    const sharedQueued = params.get('shared') === 'queued';
     const wantsCompose = params.get('compose') === '1';
     const isFresh = params.get('fresh') === '1';
     const wantsBegin = params.get('ob') === 'begin';
@@ -5494,7 +5566,11 @@
     const wantsSpace = spaceParam != null && spaceParam !== 'invalid';
     if (spaceParam === 'invalid') toast('That invite link is invalid or has expired.');
 
-    if (!handledD && !wantsCompose && !isFresh && !wantsBegin && !wantsPreview && !shared && !spaceParam) return;
+    if (
+      !handledD && !wantsCompose && !isFresh && !wantsBegin && !wantsPreview && !shared && !spaceParam &&
+      !sharedQueued
+    )
+      return;
 
     const url = new URL(location.href);
     if (handledD) url.searchParams.delete('d');
@@ -5503,10 +5579,17 @@
     if (wantsBegin) url.searchParams.delete('ob');
     if (wantsPreview) url.searchParams.delete('preview');
     if (spaceParam != null) url.searchParams.delete('space');
+    if (sharedQueued) url.searchParams.delete('shared');
     history.replaceState(null, '', url.pathname + url.search + url.hash);
 
     if (d === 'agenda') openAgenda();
     else if (d === 'insights') openInsights();
+    else if (d === 'integrate') {
+      accountBtn.click();
+      showSettingsSection('integrate');
+      toast('Phone alarms need the Android companion app — download it below.', { duration: 6000 });
+    }
+    if (sharedQueued) toast("You're offline — the shared item will be added once you're back online.", { duration: 5000 });
 
     if (wantsSpace) switchSpace(Number(spaceParam));
     else if (shared) createSharedNote(shared);
@@ -5548,6 +5631,55 @@
     } catch {
       toast('Could not save the shared note.');
     }
+  }
+
+  // Share-sheet items made while offline: sw.js parks each share-target POST
+  // body in the 'nico-pending-shares' cache; replay them oldest first to
+  // POST /share?json=1. Network failure / 5xx / 401 stops and keeps the rest
+  // for the next try (app open, reconnect); any other 4xx will never succeed,
+  // so that item is dropped.
+  let shareFlushing = false;
+  async function flushPendingShares() {
+    if (shareFlushing || !navigator.onLine || !currentUser || !('caches' in window)) return;
+    shareFlushing = true;
+    let made = 0;
+    let lastId = null;
+    try {
+      if (!(await caches.has('nico-pending-shares'))) return;
+      const cache = await caches.open('nico-pending-shares');
+      const keys = (await cache.keys()).sort((a, b) => a.url.localeCompare(b.url));
+      for (const req of keys) {
+        const saved = await cache.match(req);
+        if (!saved) continue;
+        let res;
+        try {
+          res = await fetch('/share?json=1', {
+            method: 'POST',
+            headers: { 'Content-Type': saved.headers.get('Content-Type') || '' },
+            body: await saved.blob(),
+          });
+        } catch {
+          break;
+        }
+        if (res.status >= 500 || res.status === 401) break;
+        await cache.delete(req);
+        if (res.ok) {
+          made += 1;
+          lastId = (await res.json().catch(() => ({}))).id || lastId;
+        }
+      }
+    } catch {
+      /* Cache Storage unavailable — nothing to replay */
+    } finally {
+      shareFlushing = false;
+    }
+    if (!made) return;
+    allNotesCache = await api.listNotes();
+    renderPinbar();
+    sweepContentEncryption();
+    const msg = made === 1 ? 'Added the item you shared while offline' : `Added ${made} items you shared while offline`;
+    if (lastId) toast(msg, { duration: 6000, onClick: () => goTo(lastId, 'share') });
+    else toast(`${msg}.`);
   }
 
   function renderEmptyState() {
@@ -5636,7 +5768,9 @@
   // `compact` (the grid center cell) caps it at one button — tap-to-view/play
   // stays, but "extra" actions like Download drop out; the fullscreen editor
   // passes nothing and gets the full set.
-  function buildAttachmentPreview(note, { compact = false } = {}) {
+  // `editable` (the fullscreen editor only) adds an inline ✏️ Edit to a
+  // contact card — see buildContactEditForm.
+  function buildAttachmentPreview(note, { compact = false, editable = false } = {}) {
     if (note.type === 'image' && note.attachment_path) {
       // Wrap the image in a link (`display: contents` in CSS, so the <img>
       // stays the actual flex item — see style.css) so a click opens the
@@ -5726,7 +5860,18 @@
       vcardLink.textContent = '📇 Open in Contacts';
       box.appendChild(vcardLink);
 
-      return box.childElementCount ? box : null;
+      if (editable) {
+        const editBtn = document.createElement('a');
+        editBtn.href = '#';
+        editBtn.textContent = '✏️ Edit';
+        editBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          box.replaceWith(buildContactEditForm(note, contact));
+        });
+        box.appendChild(editBtn);
+      }
+
+      return box;
     }
     if (note.type === 'app' && note.attachment_path) {
       const link = document.createElement('a');
@@ -5736,6 +5881,66 @@
       return link;
     }
     return null;
+  }
+
+  // Inline name/phone/email form that replaces a contact card in place. Saves
+  // through the same PUT /:id/attachment route as the picker's 'attach' mode
+  // (so it's undoable as an 'attach' history entry, and online-only). A title
+  // still equal to the old contact name follows the rename; a custom one stays.
+  function buildContactEditForm(note, contact) {
+    const form = document.createElement('form');
+    form.className = 'center-attachment-contact-edit';
+    const field = (value, placeholder, type) => {
+      const input = document.createElement('input');
+      input.type = type;
+      input.value = value || '';
+      input.placeholder = placeholder;
+      form.appendChild(input);
+      return input;
+    };
+    const name = field(contact.name, 'Contact name', 'text');
+    const phone = field(contact.phone, 'Phone (optional)', 'tel');
+    const email = field(contact.email, 'Email (optional)', 'email');
+    const actions = document.createElement('div');
+    actions.className = 'center-attachment-contact-edit-actions';
+    const save = document.createElement('button');
+    save.type = 'submit';
+    save.textContent = 'Save';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'secondary';
+    cancel.textContent = 'Cancel';
+    actions.append(save, cancel);
+    form.appendChild(actions);
+
+    cancel.addEventListener('click', () => form.replaceWith(buildAttachmentPreview(note, { editable: true })));
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const newName = name.value.trim();
+      if (!newName) {
+        toast('Contact name is required.');
+        name.focus();
+        return;
+      }
+      const formData = new FormData();
+      formData.set('type', 'contact');
+      formData.set('contactName', newName);
+      formData.set('contactPhone', phone.value.trim());
+      formData.set('contactEmail', email.value.trim());
+      if (note.title === (contact.name || '')) formData.set('title', newName);
+      save.disabled = true;
+      try {
+        const updated = await api.setNoteAttachment(note.id, formData);
+        if (updated.id === currentId) currentNote = updated;
+        toast('Contact saved.');
+        await afterAttach();
+      } catch (err) {
+        if (err.httpStatus) toast(err.message || "Couldn't save the contact.");
+        save.disabled = false;
+      }
+    });
+    setTimeout(() => name.focus(), 0);
+    return form;
   }
 
   // Small metadata line: when the note was created, where (GPS), and — if it
@@ -6145,7 +6350,7 @@
   function buildNoteEditor({ onRerender, afterDelete, startPreview }) {
     const frag = document.createDocumentFragment();
 
-    const preview = buildAttachmentPreview(currentNote);
+    const preview = buildAttachmentPreview(currentNote, { editable: true });
     if (preview) frag.appendChild(preview);
 
     const title = document.createElement('input');
@@ -6336,7 +6541,7 @@
     alarmBtn.className = 'alarm-btn' + (hasAlarm ? ' active' : '');
     alarmBtn.textContent = '⏰';
     alarmBtn.title = hasAlarm ? 'Edit alarm' : 'Set alarm';
-    alarmBtn.addEventListener('click', () => openAlarmEditor(currentNote));
+    alarmBtn.addEventListener('click', () => onAlarmButton(alarmBtn, currentNote));
 
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'delete-btn';
@@ -6353,6 +6558,7 @@
         { label: '📝 Create a note', onClick: () => openPicker() },
         { label: '📎 Add / remove attachment', onClick: () => openPicker({ mode: 'attach' }) },
         { label: '🔗 Connect to note', onClick: () => openLinkModal() },
+        { label: '📲 Share to app…', onClick: () => shareNoteToApp(currentNote) },
         // "Share this note…" only outside a space — a shared note is already
         // shared; moving notes between two different shares isn't supported.
         ...(!currentSpace ? [{ label: '🔗 Share this note…', onClick: () => openShareFlow(addBtn, currentNote) }] : []),
@@ -7128,11 +7334,38 @@
   // Shared spaces panel are the other ways in). Fire-and-forget — a fetch,
   // never awaited by rendering (same convention as warmCache); it just
   // paints in whenever it resolves. ---
+  // Where the spaces bar's 👤 Personal chip returns to: the last personal
+  // note centred (set in goTo), else the graph root.
+  let lastPersonalNoteId = null;
+  async function backToPersonal() {
+    if (!currentSpace) return;
+    let id = lastPersonalNoteId;
+    if (id == null) {
+      const root = await api.getRootNote().catch(() => null);
+      id = root && root.note ? root.note.id : null;
+    }
+    if (id == null) {
+      const root = await api.getProbableRoot().catch(() => null);
+      id = root ? root.id : null;
+    }
+    if (id != null) await goTo(id, 'tab');
+    else await switchSpace(null);
+  }
+
   async function renderSpacesbar() {
     if (!spacesbar) return;
     const shares = await api.getMyShares();
     spacesbar.innerHTML = '';
     spacesbar.classList.toggle('hidden', shares.length === 0 || !barPrefs.spaces);
+
+    const personal = document.createElement('div');
+    personal.className = 'tab' + (currentSpace ? '' : ' active');
+    const personalTitle = document.createElement('span');
+    personalTitle.className = 'tab-title';
+    personalTitle.textContent = '👤 Personal';
+    personal.appendChild(personalTitle);
+    personal.addEventListener('click', backToPersonal);
+    spacesbar.appendChild(personal);
 
     shares.forEach((share) => {
       const chip = document.createElement('div');
@@ -7210,8 +7443,14 @@
   async function renderTodobar() {
     const gen = ++todobarGen;
     const root = currentId;
-    const todos = root != null ? await api.getSubtreeTodos(root) : [];
+    const fetched = root != null ? await api.getSubtreeTodos(root) : [];
     if (gen !== todobarGen) return; // a newer call already landed — drop this one
+    // Personal to-dos first, then each space's grouped by space name (same
+    // order as the agenda's bySpace grouping); stable within a group.
+    const todos = [...fetched].sort((a, b) => {
+      if (!a.shareId !== !b.shareId) return a.shareId ? 1 : -1;
+      return (a.shareTitle || '').localeCompare(b.shareTitle || '');
+    });
 
     todobar.innerHTML = '';
     todobar.classList.toggle('hidden', todos.length === 0 || !barPrefs.todos);
@@ -7301,7 +7540,7 @@
 
   // The soft surface for kind='anytime' reminders: at app start/foreground-resume
   // (see checkAlarms' `nudge` param), a random pick among whatever's due *and*
-  // outside its own note's 30-min cooldown, tap-to-open. If every due nudge is
+  // outside its own note's 30-min cooldown, as a plain toast. If every due nudge is
   // still on cooldown, shows nothing this time rather than repeating one —
   // "exhausted" is a quiet outcome, not a fallback to spam the same note.
   // Skipped while the note editor is open so it can never interrupt
@@ -7321,14 +7560,9 @@
     if (!eligible.length) return; // every due nudge was shown within the last 30 min
     const pick = eligible[Math.floor(Math.random() * eligible.length)];
     markNudgeShown(pick.noteId);
-    toast(`🌊 ${pick.title}?`, {
-      duration: 6000,
-      onClick: async () => {
-        await api.ackAlarm(pick.id, isoOrNull(nextAlarmOccurrence(pick, new Date())));
-        await checkAlarms({ popup: false });
-        jumpTo(pick.noteId, 'nudge');
-      },
-    });
+    // Plain, button-less: a nudge is a passing thought, not a call to action —
+    // the note stays reachable from the alarm bar and the 🔔 agenda.
+    toast(`🌊 ${pick.title}?`, { duration: 6000 });
   }
 
   // Fetch alarms, decide (in the viewer's timezone) which are ringing, repaint
@@ -7551,6 +7785,51 @@
     }
   }
 
+  // ✅ on an agenda to-do / waiting / open-task row (reminder rows have 🔕
+  // instead): close that note (status → done), same as the editor's
+  // status menu — including its done-cascade dialog when the note belongs to
+  // the scope currently open (hierarchyParents/allNotesCache only cover that
+  // one). A note from the other scope (a space row while personal is open)
+  // goes straight to the server: online-only, no cascade, and never mirrored
+  // into this scope's cache. Done notes drop out of the agenda (and their
+  // reminders stop ringing), so the list simply redraws without it.
+  function agendaDoneButton(noteId, shareId) {
+    const b = document.createElement('button');
+    b.className = 'agenda-done';
+    b.textContent = '✅';
+    b.title = 'Mark the note done';
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const inScope = (shareId == null ? null : shareId) === (currentSpace ? currentSpace.id : null);
+        const note = inScope ? allNotesCache.find((n) => n.id === noteId) : null;
+        if (note) {
+          const cascade = await openStatusCascadeDialog(note, note.status, 'done');
+          if (cascade == null) {
+            b.disabled = false;
+            return; // dialog cancelled
+          }
+          const updated = await api.setStatus(noteId, 'done', cascade);
+          if (currentNote && currentNote.id === noteId) currentNote = updated;
+          allNotesCache = await api.listNotes();
+        } else {
+          await putJson(`/api/notes/${noteId}/status`, { status: 'done' });
+        }
+      } catch {
+        b.disabled = false;
+        toast(navigator.onLine ? "Couldn't mark it done." : 'Space notes need a connection.');
+        return;
+      }
+      renderPinbar();
+      await checkAlarms({ popup: false });
+      renderAlarmbar();
+      render();
+      openAgenda();
+      toast('Marked done');
+    });
+    return b;
+  }
+
   function agendaRow(a, overdue) {
     const row = document.createElement('div');
     row.className = 'agenda-item' + (overdue ? ' agenda-overdue' : '');
@@ -7590,9 +7869,40 @@
       openAgenda();
     });
 
+    // Remove the reminder outright (not just this ring) — undoable via the
+    // toast, so no confirm.
+    const remove = document.createElement('button');
+    remove.className = 'agenda-remove';
+    remove.textContent = '🔕';
+    remove.title = 'Remove this reminder';
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      let r = null;
+      try {
+        r = await api.removeAlarm(a.id);
+      } catch {
+        remove.disabled = false;
+        toast("Couldn't remove the reminder.");
+        return;
+      }
+      // Same as the alarm editor's Remove: remember the settings in
+      // last_reminder so re-adding one starts from them.
+      const { kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd } = a;
+      const last = JSON.stringify({ kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd });
+      const cached = allNotesCache.find((n) => n.id === a.noteId);
+      if (cached) cached.last_reminder = last;
+      if (currentNote && currentNote.id === a.noteId) currentNote.last_reminder = last;
+      await afterAlarmChange();
+      openAgenda();
+      undoToast('Reminder removed', r && r.historyId);
+    });
+
     row.appendChild(info);
     row.appendChild(snooze);
-    row.appendChild(ok);
+    // ✓ only quiets a reminder that's actually going off right now — on one
+    // that hasn't rung yet there's nothing to acknowledge.
+    if (a.triggered) row.appendChild(ok);
+    row.appendChild(remove);
     return row;
   }
 
@@ -7616,6 +7926,7 @@
     info.appendChild(title);
     info.appendChild(w);
     row.appendChild(info);
+    row.appendChild(agendaDoneButton(t.noteId, t.shareId));
     return row;
   }
 
@@ -7650,8 +7961,10 @@
     return row;
   }
 
-  // A note the user flagged to-do via the center-cell status button.
-  function todoRow(t) {
+  // A note the user flagged to-do via the center-cell status button (also
+  // used for waiting and orphaned notes — `withDone` false for orphans, which
+  // aren't tasks, just notes nothing links to).
+  function todoRow(t, withDone = true) {
     const row = document.createElement('div');
     row.className = 'agenda-item agenda-task';
     const info = document.createElement('div');
@@ -7665,6 +7978,7 @@
     });
     info.appendChild(title);
     row.appendChild(info);
+    if (withDone) row.appendChild(agendaDoneButton(t.noteId, t.shareId));
     return row;
   }
 
@@ -7814,6 +8128,7 @@
         groupFor(n.share_id != null ? n.share_id : null, currentSpace && currentSpace.title).waiting.push({
           noteId: n.id,
           title: n.title,
+          shareId: n.share_id,
         })
       );
 
@@ -7904,7 +8219,7 @@
       // nothing points at them and they never turn up while navigating the grid.
       if (g.orphans.length) {
         heading('Orphaned notes');
-        g.orphans.forEach((o) => agendaBody.appendChild(todoRow(o)));
+        g.orphans.forEach((o) => agendaBody.appendChild(todoRow(o, false)));
       }
       // "Anytime" nudges — deliberately last: due ones ring no differently from
       // upcoming ones here (no popup/push either, see checkAlarms), so there's
@@ -7992,6 +8307,174 @@
     alarmTimeInput.classList.toggle('hidden', alarmKind === 'anytime');
     alarmWindowFields.classList.toggle('hidden', alarmKind !== 'anytime');
     if (alarmKind === 'location') refreshAlarmLocReadout();
+  }
+
+  // --- Note → other apps (editor ➕ → "Share to app…") ---
+  // The OS share sheet (Web Share API) with this note: its (decrypted) text,
+  // or the attachment file itself. Without a share sheet (desktop Firefox),
+  // the text goes to the clipboard instead.
+  function plainShareText(note) {
+    // [[Title]] / [[#id]] mean nothing outside the app — keep just the title.
+    return String(note.content || '')
+      .replace(/\[\[([^\][\n]+?)\]\]/g, (m, target) => {
+        const hit = wikiResolve(target);
+        return hit ? hit.title : target.replace(/^#/, '');
+      })
+      .trim();
+  }
+
+  async function shareNoteToApp(note) {
+    const title = note.title || '';
+    const text = plainShareText(note);
+    const data = { title };
+    if (note.type === 'app' && note.attachment_path) {
+      data.url = new URL(note.attachment_path, location.href).href;
+      if (text) data.text = text;
+    } else if (note.type === 'contact') {
+      let c = {};
+      try {
+        c = JSON.parse(note.attachment_path || '{}');
+      } catch {}
+      data.text = [c.name || title, c.phone, c.email, text].filter(Boolean).join('\n');
+    } else if ((note.type === 'image' || note.type === 'audio' || note.type === 'file') && note.attachment_path) {
+      // navigator.share() has to run within a few seconds of the tap, so
+      // prefer the offline copy (instant), else fetch; a slow fetch gets a
+      // second tap via the toast instead of failing silently.
+      const started = Date.now();
+      let blob = null;
+      try {
+        const rec = store ? await store.get('assets', note.attachment_path) : null;
+        blob = rec && rec.blob ? rec.blob : null;
+        if (!blob && navigator.onLine) {
+          const r = await fetch(note.attachment_path);
+          if (r.ok) blob = await r.blob();
+        }
+      } catch {
+        blob = null;
+      }
+      if (blob) {
+        const name = note.attachment_path.split('/').pop();
+        const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          const fileData = { files: [file], title };
+          if (text) fileData.text = text;
+          if (Date.now() - started < 3000) return runShare(fileData);
+          toast('File ready', { action: 'Share', duration: 8000, onClick: () => runShare(fileData) });
+          return;
+        }
+      }
+      if (!text) {
+        toast(navigator.onLine ? "This file can't be shared from here." : 'Not available offline.');
+        return;
+      }
+      data.text = text;
+    } else {
+      if (note.content == null) {
+        toast('Not available offline.');
+        return;
+      }
+      data.text = text;
+    }
+    return runShare(data);
+  }
+
+  async function runShare(data) {
+    if (navigator.share) {
+      try {
+        await navigator.share(data);
+      } catch (err) {
+        if (err && err.name !== 'AbortError') toast("Couldn't open the share sheet.");
+      }
+      return;
+    }
+    const plain = [data.title, data.text, data.url].filter(Boolean).join('\n\n');
+    try {
+      await navigator.clipboard.writeText(plain);
+      toast('Copied to clipboard');
+    } catch {
+      toast("Sharing isn't supported in this browser.");
+    }
+  }
+
+  // --- Reminder → phone (⏰ in the note editor, when the note has a timed
+  // reminder): "Add to calendar" (Google Calendar event template, offered
+  // only while no calendar subscription is polling the feed) and
+  // "Add phone alarm" (Android clock app, via the companion APK's
+  // SetAlarmActivity — Chrome won't launch the clock's own SET_ALARM intent
+  // from a page). Both are one-way copies: later edits here don't follow.
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const CALENDAR_LIVE_MS = 3 * 24 * 60 * 60 * 1000;
+
+  function calendarFeedLive() {
+    return !!calendarFetchedAt && Date.now() - Date.parse(calendarFetchedAt) < CALENDAR_LIVE_MS;
+  }
+
+  function calendarFeedUrl() {
+    return calendarToken ? `${location.origin}/calendar.ics?token=${calendarToken}` : '';
+  }
+
+  const ICS_BYDAY = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+  const compactLocal = (d) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}T` +
+    `${String(d.getHours()).padStart(2, '0')}${String(d.getMinutes()).padStart(2, '0')}00`;
+
+  // A Google Calendar "new event" link for a kind='time' reminder, in the
+  // viewer's zone (same wall-clock semantics the reminder itself has).
+  function googleCalendarEventUrl(a, title) {
+    let start = nextAlarmOccurrence(a, new Date());
+    if (!start && a.date) {
+      start = new Date(`${a.date}T${a.time}:00`);
+    }
+    if (!start) return null;
+    const end = new Date(start.getTime() + 15 * 60 * 1000);
+    const p = new URLSearchParams({
+      action: 'TEMPLATE',
+      text: title || 'Reminder',
+      dates: `${compactLocal(start)}/${compactLocal(end)}`,
+      details: `${location.origin}/#${a.noteId}`,
+    });
+    try {
+      p.set('ctz', Intl.DateTimeFormat().resolvedOptions().timeZone);
+    } catch {}
+    if (a.days && a.days.length) p.set('recur', `RRULE:FREQ=WEEKLY;BYDAY=${a.days.map((d) => ICS_BYDAY[d]).join(',')}`);
+    return `https://calendar.google.com/calendar/render?${p}`;
+  }
+
+  // A clock alarm is a time of day + weekdays, no date: fine for a repeating
+  // reminder, or a one-time one within the next 24 h — anything further out
+  // would ring on the wrong day.
+  function phoneAlarmFits(a) {
+    if (a.kind !== 'time' || !/^\d{2}:\d{2}$/.test(a.time || '')) return false;
+    if (a.days && a.days.length) return true;
+    const next = nextAlarmOccurrence(a, new Date());
+    return !!next && next.getTime() - Date.now() < 24 * 60 * 60 * 1000;
+  }
+
+  // intent: URL for the companion APK's SetAlarmActivity (notes-android). If
+  // the app (or a build with that activity) isn't installed, Chrome follows
+  // browser_fallback_url instead — the Integrate section, to download it.
+  function alarmIntentUrl(a, title) {
+    const [h, m] = a.time.split(':').map(Number);
+    const q = new URLSearchParams({ hour: String(h), minutes: String(m), label: (title || 'Reminder').slice(0, 100) });
+    if (a.days && a.days.length) q.set('days', a.days.join(','));
+    const fallback = encodeURIComponent(`${location.origin}/?d=integrate`);
+    return `intent://alarm?${q}#Intent;scheme=iaainotes;package=se.iaai.notes;S.browser_fallback_url=${fallback};end`;
+  }
+
+  // ⏰ in the note editor: straight to the reminder editor, unless there's a
+  // timed reminder with somewhere else to send it.
+  function onAlarmButton(anchor, note) {
+    const a = alarms.find((x) => x.noteId === note.id && x.kind === 'time');
+    const items = [];
+    if (a && !calendarFeedLive()) {
+      const url = googleCalendarEventUrl(a, note.title);
+      if (url) items.push({ label: '📅 Add to calendar', onClick: () => window.open(url, '_blank', 'noopener') });
+    }
+    if (a && isAndroid && phoneAlarmFits(a)) {
+      items.push({ label: '⏰ Add phone alarm', onClick: () => (location.href = alarmIntentUrl(a, note.title)) });
+    }
+    if (!items.length) return openAlarmEditor(note);
+    openActionMenu(anchor, [{ label: '✏️ Edit reminder', onClick: () => openAlarmEditor(note) }, ...items]);
   }
 
   async function openAlarmEditor(note) {
@@ -9008,6 +9491,37 @@
     gridDepth = gridDepth >= GRID_DEPTH_MAX ? GRID_DEPTH_MIN : gridDepth + 1;
     await applyGridDepth();
   });
+
+  // --- Keep the app exactly window-sized ---
+  // html/body are 100dvh, but on Android that value sometimes comes back
+  // stale (after a reload from the update bar, leaving fullscreen, a reload
+  // while the keyboard was up), and Chrome restores the previous scroll offset
+  // on reload — either leaves the grid partly below the screen until
+  // something forces a relayout. So: pin --app-h (style.css) to the measured
+  // window height on every viewport change, and since the document itself is
+  // never meant to scroll, reset any leftover offset — except while typing,
+  // where the browser may have scrolled to keep the caret in view.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  function fitViewport() {
+    document.documentElement.style.setProperty('--app-h', `${window.innerHeight}px`);
+    const ae = document.activeElement;
+    const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+    if (!typing && (window.scrollY || document.body.scrollTop)) {
+      window.scrollTo(0, 0);
+      document.body.scrollTop = 0;
+    }
+  }
+  ['resize', 'orientationchange', 'pageshow'].forEach((ev) => window.addEventListener(ev, fitViewport));
+  document.addEventListener('fullscreenchange', fitViewport);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) fitViewport();
+  });
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', fitViewport);
+  // Right after load the window can still be settling (standalone splash,
+  // system bars) without a resize event reaching us — re-measure a few times.
+  fitViewport();
+  requestAnimationFrame(fitViewport);
+  [300, 1000, 2500].forEach((ms) => setTimeout(fitViewport, ms));
 
   // --- Fullscreen toggle ---
   if (document.fullscreenEnabled) {
@@ -10875,8 +11389,7 @@
     }
     linkSending = false;
     loginBtn.disabled = false;
-    loginError.style.color = 'var(--muted)';
-    loginError.textContent = `If ${email} has an account, a login link is on its way. Check your inbox.`;
+    toast(`Login link sent to ${email} — check your inbox.`, { duration: 6000 });
   }
 
   loginBtn.addEventListener('click', doLogin);
@@ -10888,7 +11401,54 @@
     accountWidgetUrl.value = widgetToken
       ? `${location.origin}/api/widget?token=${widgetToken}`
       : '(unavailable — reload the page)';
+    renderCalendarFeed();
   }
+
+  const calendarFeedInput = document.getElementById('calendar-feed-url');
+  const calendarFeedStatus = document.getElementById('calendar-feed-status');
+  const calendarGoogleBtn = document.getElementById('calendar-google-btn');
+
+  function renderCalendarFeed() {
+    const url = calendarFeedUrl();
+    calendarFeedInput.value = url || '(unavailable — reload the page)';
+    // Google adds a subscription from a webcal:// cid (its Android app can't
+    // add one by URL at all, so this opens the web page either way).
+    calendarGoogleBtn.href = url
+      ? `https://calendar.google.com/calendar/render?cid=${encodeURIComponent(url.replace(/^https?:/, 'webcal:'))}`
+      : '#';
+    calendarFeedStatus.textContent = calendarFetchedAt
+      ? `Last fetched by a calendar ${new Date(calendarFetchedAt).toLocaleString()}${
+          calendarFeedLive() ? ' — subscribed.' : ' — not recently; is the subscription still there?'
+        }`
+      : 'Not subscribed yet — no calendar has fetched it.';
+  }
+
+  document.getElementById('calendar-copy-btn').addEventListener('click', async () => {
+    if (!calendarToken) return;
+    try {
+      await navigator.clipboard.writeText(calendarFeedInput.value);
+      toast('Calendar URL copied');
+    } catch {
+      calendarFeedInput.focus();
+      calendarFeedInput.select();
+      toast('Copy the selected URL');
+    }
+  });
+
+  document.getElementById('calendar-reset-btn').addEventListener('click', async () => {
+    if (
+      !(await confirmDialog(
+        'Reset the calendar URL? Calendars subscribed to the current one stop updating and must be re-added.',
+        { confirmLabel: 'Reset', danger: true }
+      ))
+    )
+      return;
+    const res = await api.rotateCalendarToken();
+    calendarToken = res.calendarToken || calendarToken;
+    calendarFetchedAt = null;
+    renderCalendarFeed();
+    toast('New calendar URL generated');
+  });
 
   function closeAccount() {
     accountOverlay.classList.add('hidden');

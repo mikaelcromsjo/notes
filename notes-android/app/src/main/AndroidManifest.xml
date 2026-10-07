@@ -35,6 +35,9 @@
          and this is the only lever available for that without a foreground
          service or a dedicated wake-up of our own. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- SetAlarmActivity's AlarmClock.ACTION_SET_ALARM (a normal-level
+         permission: granted at install, no prompt). -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
 
     <application
         android:allowBackup="true"
@@ -60,6 +63,23 @@
             <meta-data
                 android:name="android.app.shortcuts"
                 android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!-- The web app's "Add phone alarm": launched from the PWA through an
+             intent: URL (scheme iaainotes, host alarm), hence BROWSABLE.
+             No UI — forwards to the clock app and finishes. -->
+        <activity
+            android:name=".SetAlarmActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="iaainotes" android:host="alarm" />
+            </intent-filter>
         </activity>
 
         <receiver

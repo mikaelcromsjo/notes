@@ -7,13 +7,15 @@
 //    live on the *second* load, not instantly — the price of working offline.
 //  - Navigations fall back to the cached shell when the network is down, so the
 //    app boots offline; app.js then reads note data from IndexedDB.
-//  - `/api/*`, `/uploads/*`, `/share`, `/digest` are never touched here — they go
-//    straight to the network and app.js handles their offline behaviour itself
-//    (one source of truth: IndexedDB, not a synthetic response in the worker).
+//  - `/api/*`, `/uploads/*`, `/share`, `/digest`, `/calendar.ics` are never
+//    touched here — they go straight to the network and app.js handles their
+//    offline behaviour itself (one source of truth: IndexedDB, not a synthetic
+//    response in the worker). One exception: a share-target POST to `/share`
+//    made offline is parked in PENDING_SHARE_CACHE for app.js to replay.
 //
 // Bump CACHE_VERSION when the shell list changes or an old cache must be purged;
 // a byte change to this file is itself what makes the browser re-run install.
-const CACHE_VERSION = 'v101';
+const CACHE_VERSION = 'v114';
 const SHELL_CACHE = `nico-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [
@@ -88,7 +90,9 @@ self.addEventListener('activate', (event) => {
     (async () => {
       const keys = await caches.keys();
       await Promise.all(
-        keys.filter((k) => k !== SHELL_CACHE && k !== VENDOR_CACHE).map((k) => caches.delete(k))
+        keys
+          .filter((k) => k !== SHELL_CACHE && k !== VENDOR_CACHE && k !== PENDING_SHARE_CACHE)
+          .map((k) => caches.delete(k))
       );
       await self.clients.claim();
       // Tell already-open pages a new worker is in charge — they still hold the
@@ -105,14 +109,43 @@ self.addEventListener('message', (event) => {
 
 // /downloads/ (the Android APK) is a binary build artifact that changes out
 // from under this same URL on a rebuild — straight to network, like /uploads.
-const BYPASS = [/^\/api\//, /^\/uploads\//, /^\/share\b/, /^\/digest\b/, /^\/downloads\//];
+const BYPASS = [/^\/api\//, /^\/uploads\//, /^\/share\b/, /^\/digest\b/, /^\/calendar\.ics\b/, /^\/downloads\//];
+
+// Share-target POSTs (manifest `share_target` -> POST /share) that couldn't
+// reach the server: the raw multipart body is kept here, keyed
+// /__pending-share/<ts>, and app.js's flushPendingShares() replays each one to
+// POST /share?json=1 once online. Never versioned, so a worker update keeps it.
+const PENDING_SHARE_CACHE = 'nico-pending-shares';
+
+async function handleShareTarget(request) {
+  const copy = request.clone();
+  try {
+    return await fetch(request);
+  } catch {
+    try {
+      const cache = await caches.open(PENDING_SHARE_CACHE);
+      const body = await copy.blob();
+      await cache.put(
+        new Request(`/__pending-share/${Date.now()}`),
+        new Response(body, { headers: { 'Content-Type': copy.headers.get('Content-Type') || '' } })
+      );
+    } catch {
+      /* quota / unreadable body — the share is lost, same as before */
+    }
+    return Response.redirect('/?shared=queued', 303);
+  }
+}
 
 self.addEventListener('fetch', (event) => {
   const { request } = event;
-  if (request.method !== 'GET') return;
-
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+
+  if (request.method === 'POST' && url.pathname === '/share') {
+    event.respondWith(handleShareTarget(request));
+    return;
+  }
+  if (request.method !== 'GET') return;
   if (BYPASS.some((re) => re.test(url.pathname))) return;
   // The app's "Check for updates" asks for the live copy of a shell file: straight
   // to the network, and never stored under this odd URL.

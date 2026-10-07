@@ -12,4 +12,13 @@ function ensureWidgetToken(userId) {
   return token;
 }
 
-module.exports = { ensureWidgetToken };
+// Same, for the calendar subscription feed (users.calendar_token).
+function ensureCalendarToken(userId) {
+  const row = db.prepare('SELECT calendar_token FROM users WHERE id = ?').get(userId);
+  if (row && row.calendar_token) return row.calendar_token;
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare('UPDATE users SET calendar_token = ? WHERE id = ?').run(token, userId);
+  return token;
+}
+
+module.exports = { ensureWidgetToken, ensureCalendarToken };

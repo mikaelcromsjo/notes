@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const AdmZip = require('adm-zip');
 
 const uploadsDir = path.join(__dirname, '..', 'data', 'uploads');
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -113,8 +114,39 @@ function diskUpload() {
   });
 }
 
+// Write a buffer under /uploads with a random name + the given (already safe)
+// extension — the multer-free counterpart of diskUpload's storage.
+function writeUpload(buf, ext) {
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+  const full = path.join(uploadsDir, filename);
+  fs.writeFileSync(full, buf);
+  return { path: full, filename, size: buf.length };
+}
+
+// Several files ([{filename, content}]) -> one .zip buffer, names sanitised
+// and de-duplicated. Mail-in (2+ attachments) and the share target (2+ files).
+function zipAttachments(atts) {
+  const zip = new AdmZip();
+  const used = new Set();
+  atts.forEach((a, i) => {
+    let name =
+      path.basename(String(a.filename || '')).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim() ||
+      `attachment-${i + 1}`;
+    const base = name;
+    for (let n = 2; used.has(name.toLowerCase()); n++) {
+      const e = path.extname(base);
+      name = `${base.slice(0, base.length - e.length)} (${n})${e}`;
+    }
+    used.add(name.toLowerCase());
+    zip.addFile(name, a.content);
+  });
+  return zip.toBuffer();
+}
+
 module.exports = {
   uploadsDir,
+  writeUpload,
+  zipAttachments,
   IMAGE_EXT,
   AUDIO_EXT,
   FILE_EXT,

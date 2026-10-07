@@ -68,6 +68,18 @@ WebView, no note content ever rendered here.
   broken until the next 30-min tick. A 401 (bad/rotated/missing token) just
   shows "Tap to reconnect" straight to `SettingsActivity` — there's no cookie
   or session to silently resync from any more, unlike the old `WebView` build.
+- `SetAlarmActivity` — the one non-widget exception: the web app's "Add phone
+  alarm" (note editor ⏰ menu, `alarmIntentUrl` in `public/app.js`). Chrome
+  won't launch the clock app's own `AlarmClock.ACTION_SET_ALARM` from a page
+  (that activity isn't `BROWSABLE`), so the PWA fires an `intent:` URL at
+  this exported, `BROWSABLE`, `Theme.NoDisplay` activity
+  (`iaainotes://alarm?hour=&minutes=&days=&label=`, days in JS `getDay()`
+  numbers, converted to `Calendar.SUNDAY=1…`), which forwards to the clock
+  app and finishes. `EXTRA_SKIP_UI` stays false on purpose — any page can fire
+  that link, so the clock's own screen is the confirmation. One-way: the alarm
+  can't be updated/removed later. Needs `SET_ALARM` (normal permission). If
+  the APK (or a pre-0.22 build) is missing, Chrome follows the intent's
+  `browser_fallback_url` to the web app's Integrate section instead.
 - `WidgetTheme` — approximates the account's live app theme (server's
   `theme.colors`/`theme.font`, i.e. `public/themes.js`'s `effectiveColors`) onto
   the two `RemoteViews` widgets — flat colours carry over exactly, fonts

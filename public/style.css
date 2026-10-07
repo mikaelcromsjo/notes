@@ -37,6 +37,9 @@ html, body {
   margin: 0;
   height: 100vh;
   height: 100dvh;
+  /* Measured window height, kept current by fitViewport() in app.js —
+     100dvh alone sometimes stays stale on Android after a reload. */
+  height: var(--app-h, 100dvh);
   /* Never let a stray wide element push the page past the viewport — Android
      Chrome reacts to horizontal overflow by zooming the WHOLE page out (making
      everything look half-size in a normal tab but fine in fullscreen, which
@@ -594,7 +597,24 @@ button:hover { filter: brightness(1.05); }
 
 /* A tap-to-open toast (the "anytime" nudge) — same shell as the plain toast,
    just signals it does something on click. */
-.toast.toast-tap {
+/* A toast with an action (Undo / Open / Share): only its button takes taps —
+   #toast-host is pointer-events:none, so the text still lets them through. */
+.toast.toast-action {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  text-align: left;
+}
+.toast.toast-action button {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  background: var(--surface);
+  color: var(--text);
+  border: none;
+  border-radius: calc(var(--radius) - 2px);
+  padding: 0.35rem 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 600;
   cursor: pointer;
 }
 
@@ -1110,6 +1130,19 @@ button:hover { filter: brightness(1.05); }
 .center-attachment-app:hover,
 .center-attachment-file:hover {
   border-color: var(--accent);
+}
+
+.center-attachment-contact-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  flex: 0 0 auto;
+  max-width: 24rem;
+}
+
+.center-attachment-contact-edit-actions {
+  display: flex;
+  gap: 0.5rem;
 }
 
 .center-meta {
@@ -2392,6 +2425,12 @@ button:hover { filter: brightness(1.05); }
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-contrast);
+}
+
+.agenda-item .agenda-remove,
+.agenda-item .agenda-done {
+  flex: 0 0 auto;
+  padding: 0.3rem 0.5rem;
 }
 
 .agenda-task .agenda-when::before { content: '☐ '; }

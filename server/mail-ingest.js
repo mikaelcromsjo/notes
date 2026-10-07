@@ -26,24 +26,15 @@
 //
 // Opt-in: only runs with MAIL_INGEST=1, so a second checkout sharing this
 // Gmail account (test.ia-ai.se) can't double-import.
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
-const AdmZip = require('adm-zip');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const db = require('./db');
 const mailer = require('./mailer');
 const notes = require('./notes');
 const { publicOrigin } = require('./digest');
-const {
-  uploadsDir,
-  IMAGE_EXT,
-  AUDIO_EXT,
-  FILE_EXT,
-  safeFileExt,
-  isExecutableMime,
-} = require('./upload-config');
+const { writeUpload, zipAttachments } = require('./upload-config');
+const { classify, parseVcard } = require('./attachment-kind');
 
 const TICK_MS = 60 * 1000;
 const LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
@@ -156,11 +147,6 @@ function addressedToIngest(parsed, addresses) {
 
 // --- message → note ----------------------------------------------------------
 
-const MIME_BY_EXT = { '.jpeg': 'image/jpeg' };
-for (const map of [IMAGE_EXT, AUDIO_EXT]) {
-  for (const [mime, ext] of Object.entries(map)) if (!MIME_BY_EXT[ext]) MIME_BY_EXT[ext] = mime;
-}
-
 // Real attachments, plus inline cid: images big enough to be a photo. Small
 // inline images (signature logos etc.) are part of the HTML body, not
 // something the sender attached.
@@ -176,67 +162,6 @@ function attachmentsOf(parsed) {
 const INLINE_IMAGE_MIN = 20 * 1024;
 function isPastedImage(a) {
   return /^image\//i.test(a.contentType || '') && a.content.length >= INLINE_IMAGE_MIN;
-}
-
-function parseVcard(text) {
-  const src = String(text).replace(/\r?\n[ \t]/g, '');
-  const get = (name) => {
-    const m = new RegExp(`^${name}(?:;[^:\\n]*)?:(.*)$`, 'im').exec(src);
-    return m ? m[1].replace(/\\n/gi, ' ').replace(/\\([,;\\])/g, '$1').trim() : '';
-  };
-  let name = get('FN');
-  if (!name) {
-    const [last = '', first = ''] = get('N').split(';');
-    name = `${first} ${last}`.trim();
-  }
-  if (!name) return null;
-  return { name, phone: get('TEL'), email: get('EMAIL') };
-}
-
-// What a lone attachment becomes, or null if it must be zipped instead (a
-// MIME/extension we refuse to serve directly from /uploads).
-function classify(att) {
-  const name = att.filename || '';
-  const ext = path.extname(name).toLowerCase();
-  let mime = String(att.contentType || '').toLowerCase();
-  if ((!mime || mime === 'application/octet-stream') && MIME_BY_EXT[ext]) mime = MIME_BY_EXT[ext];
-
-  if (IMAGE_EXT[mime]) return { type: 'image', mime, ext: IMAGE_EXT[mime] };
-  if (AUDIO_EXT[mime]) return { type: 'audio', mime, ext: AUDIO_EXT[mime] };
-  if (/^text\/(x-)?vcard$|^text\/directory$/.test(mime) || ext === '.vcf') {
-    const contact = parseVcard(att.content.toString('utf8'));
-    if (contact) return { type: 'contact', contact };
-  }
-  if (FILE_EXT[mime]) return { type: 'file', mime, ext: FILE_EXT[mime] };
-  if (isExecutableMime(mime)) return null;
-  const safe = safeFileExt(name);
-  if (ext && safe === '.bin') return null; // blocked extension
-  return { type: 'file', mime: mime || 'application/octet-stream', ext: safe };
-}
-
-function writeUpload(buf, ext) {
-  const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
-  const full = path.join(uploadsDir, filename);
-  fs.writeFileSync(full, buf);
-  return { path: full, filename, size: buf.length };
-}
-
-function zipAttachments(atts) {
-  const zip = new AdmZip();
-  const used = new Set();
-  atts.forEach((a, i) => {
-    let name =
-      path.basename(String(a.filename || '')).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim() ||
-      `attachment-${i + 1}`;
-    const base = name;
-    for (let n = 2; used.has(name.toLowerCase()); n++) {
-      const e = path.extname(base);
-      name = `${base.slice(0, base.length - e.length)} (${n})${e}`;
-    }
-    used.add(name.toLowerCase());
-    zip.addFile(name, a.content);
-  });
-  return zip.toBuffer();
 }
 
 function noteText(parsed) {

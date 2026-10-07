@@ -28,6 +28,7 @@ const historyRouter = require('./routes/history');
 const importRouter = require('./routes/import');
 const onboardingRouter = require('./routes/onboarding');
 const shareRouter = require('./routes/share');
+const calendarRouter = require('./routes/calendar');
 const sharesRouter = require('./routes/shares');
 const accountRouter = require('./routes/account');
 const alarmScheduler = require('./alarm-scheduler');
@@ -130,6 +131,8 @@ app.use('/api/auth', authRouter);
 // Token-authed (widget_token query param), so these sit above the cookie gate.
 app.use('/api/widget', widgetRouter);
 app.use('/digest', digestPageRouter);
+// Calendar subscription feed — calendar_token-authed, same reasoning.
+app.use('/calendar.ics', calendarRouter);
 
 // Account export + deletion. `delete-confirm` is authed by its emailed one-time
 // token (not the cookie), so the router sits above the 401 gate; its cookie-only

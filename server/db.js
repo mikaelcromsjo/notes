@@ -147,6 +147,16 @@ if (!userCols.some((c) => c.name === 'widget_token')) {
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_widget_token ON users(widget_token)');
 
+// Calendar subscription feed (GET /calendar.ics?token=…, server/calendar-feed.js).
+// A token of its own, not widget_token: this URL gets stored on Google's/
+// Apple's servers, and widget_token also authorises a write
+// (/api/widget/location). calendar_fetched_at = last time anything polled the
+// feed — the client hides per-reminder "Add to calendar" while it's recent.
+for (const [name, decl] of [['calendar_token', 'TEXT'], ['calendar_fetched_at', 'TEXT']]) {
+  if (!userCols.some((c) => c.name === name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${decl}`);
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_calendar_token ON users(calendar_token)');
+
 // Digest prefs: an opt-in scheduled push/email of the user's agenda (today +
 // this week). server/digest-scheduler.js reads these hourly; the client owns
 // the schedule TZ the same way reminders do. cadence 'off' | 'daily' | 'weekly';
@@ -437,8 +447,9 @@ if (!reminderColumns.some((c) => c.name === 'geo')) {
 }
 
 // One-time backfill of every armed notes.alarm_* row into reminders. Shares the
-// user_version counter with the FTS rebuild above (1 = FTS built); to force
-// either again bump past 2 and adjust the matching guard.
+// user_version counter with the FTS rebuild above (1 = FTS built) and the
+// file→image/audio fix-up at the bottom (3); to force one again bump past the
+// highest and adjust the matching guard.
 if (db.pragma('user_version', { simple: true }) < 2) {
   const armed = db
     .prepare(
@@ -685,5 +696,24 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_mail_ingest_token ON mail_ingest (token_hash);
   CREATE INDEX IF NOT EXISTS idx_mail_ingest_user ON mail_ingest (user_id, created_at);
 `);
+
+// One-time: "file" attachment notes that are really a photo/recording become
+// image/audio notes — the same rule every upload now applies
+// (attachment-kind.js's uploadedFileType, judged by the stored extension).
+// No updated_at bump: clients take the server row's type on the next list.
+if (db.pragma('user_version', { simple: true }) < 3) {
+  const { uploadedFileType } = require('./attachment-kind');
+  const rows = db
+    .prepare("SELECT id, attachment_path FROM notes WHERE type = 'file' AND attachment_path LIKE '/uploads/%'")
+    .all();
+  const setType = db.prepare('UPDATE notes SET type = ? WHERE id = ?');
+  db.transaction(() => {
+    for (const r of rows) {
+      const type = uploadedFileType({ filename: path.basename(r.attachment_path), mimetype: '' });
+      if (type !== 'file') setType.run(type, r.id);
+    }
+  })();
+  db.pragma('user_version = 3');
+}
 
 module.exports = db;
