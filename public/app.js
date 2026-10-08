@@ -6302,10 +6302,10 @@
   const RELATION_ICON = {
     child: '⤵',
     parent: '⤴',
-    cross: '🔀',
+    cross: '⇄',
     'auto-child': '⤵',
     'auto-parent': '⤴',
-    'auto-cross': '🔀',
+    'auto-cross': '⇄',
   };
   const RELATION_LABEL = {
     child: 'child',
@@ -6499,7 +6499,7 @@
     return [
       { label: '⤵ Mark as child', active: current === 'child', onClick: () => apply('child') },
       { label: '⤴ Mark as parent', active: current === 'parent', onClick: () => apply('parent') },
-      { label: '🔀 Mark as cross-reference', active: current === 'cross', onClick: () => apply('cross') },
+      { label: '⇄ Mark as cross-reference', active: current === 'cross', onClick: () => apply('cross') },
       {
         label: '✕ Remove connection',
         onClick: async () => {
@@ -7030,7 +7030,7 @@
     return cell;
   }
 
-  // A card's lower-left ✏️: open the note straight into editing (centre
+  // A card's lower-left ✎: open the note straight into editing (centre
   // card) or centre it and then do so (neighbour) — a small explicit target,
   // since the old "bottom half of the card = edit" split was easy to hit by
   // mistake. The card's own tap (anywhere else) previews / centres.
@@ -7038,7 +7038,7 @@
     const pen = document.createElement('button');
     pen.type = 'button';
     pen.className = 'edit-pen';
-    pen.textContent = '✏️';
+    pen.textContent = '\u270E\uFE0E'; // ✎, text presentation — thin + gray like the relation arrows
     pen.title = 'Edit note';
     pen.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -7448,6 +7448,9 @@
     if (!currentId) return;
     currentNote = await api.getNote(currentId);
     if (!currentNote) return;
+    // Nothing to read → straight into editing. (`null` = not cached offline,
+    // which stays in preview — see buildNoteEditor.)
+    if (mode === 'preview' && currentNote.content != null && !currentNote.content.trim()) mode = 'edit';
     renderNoteFullscreen(mode);
     noteOverlay.classList.remove('hidden');
   }

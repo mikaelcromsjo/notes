@@ -36,7 +36,7 @@ const CHAIN = [
   },
   {
     title: '👆 Tap zones',
-    body: "Tap a card to open it to read — rendered, tap a [[wikilink]] straight away, no keyboard. The ✏️ in its lower-left corner opens it straight into editing.\n\nSame for any card, not just this one: tapping a neighbour centres it, its ✏️ centres it and opens the editor.",
+    body: "Tap a card to open it to read — rendered, tap a [[wikilink]] straight away, no keyboard. The ✎ in its lower-left corner opens it straight into editing.\n\nSame for any card, not just this one: tapping a neighbour centres it, its ✎ centres it and opens the editor.",
   },
   {
     title: '🫳 Move it',

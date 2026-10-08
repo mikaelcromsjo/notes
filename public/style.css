@@ -833,21 +833,21 @@ button:hover { filter: brightness(1.05); }
   gap: 0.35rem;
   max-width: calc(100% - 48px);
 }
-/* Lower-left ✏️ (app.js makeEditPen): open the note straight into editing.
-   Mirrors the neighbour's upper-right relation button. */
+/* Lower-left ✎ (app.js makeEditPen): open the note straight into editing.
+   Styled like the neighbour's upper-right relation button. */
 .cell .edit-pen {
   position: absolute;
   left: 6px;
   bottom: 4px;
   border: none;
   background: transparent;
+  color: var(--muted);
   padding: 0.15rem 0.4rem;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   line-height: 1;
-  opacity: 0.55;
   z-index: 1;
 }
-.cell .edit-pen:hover { opacity: 1; }
+.cell .edit-pen:hover { color: var(--accent); }
 .cell .card-corner .center-link-badge { position: static; }
 .cell .card-info-icons {
   font-size: 0.8rem;
