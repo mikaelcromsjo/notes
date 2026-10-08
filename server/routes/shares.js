@@ -166,6 +166,10 @@ router.post('/', requireSession, wrap((req) => sharesCore.createShare(db, req.us
 
 router.get('/', requireSession, wrap((req) => sharesCore.listMyShares(db, req.userId)));
 
+// Search every space you're a member of in one call (the header search's
+// cross-space half — see searchAllShares). Declared before "/:id".
+router.get('/search', requireSession, wrap((req) => sharesCore.searchAllShares(db, req.userId, req.query)));
+
 router.post(
   '/:shareId/refs',
   requireSession,

@@ -7,6 +7,7 @@ const { listRefsForNote } = require('../shares');
 const themes = require('../../public/themes.js');
 const { cleanPrefs } = require('./theme');
 const location = require('../location');
+const reminders = require('../reminders');
 
 const router = express.Router();
 
@@ -104,7 +105,7 @@ router.get('/', (req, res) => {
     const now = new Date();
     const rows = db
       .prepare(
-        `SELECT r.id, r.note_id, r.tz, r.snooze_until, r.next_at, n.title
+        `SELECT r.id, r.note_id, r.tz, r.snooze_until, r.next_at, r.days, r.date, r.created_at, n.title
          FROM reminders r JOIN notes n ON n.id = r.note_id
          WHERE r.user_id = ? AND r.kind = 'anytime' AND n.status NOT IN ('deleted', 'done')
            AND COALESCE(r.snooze_until, r.next_at) IS NOT NULL`
@@ -132,6 +133,8 @@ router.get('/', (req, res) => {
         title: r.title,
         due: dueMs <= nowMs,
         url: `${origin}/?preview=1#${r.note_id}`,
+        // Last 7 days: { done, scheduled, avgRating } — the tile's second line.
+        week: reminders.weekStats(db, r, now),
       }));
 
     return res.json({

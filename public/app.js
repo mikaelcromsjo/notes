@@ -3,6 +3,7 @@
   const tabbar = document.getElementById('tabbar');
   const spacesbar = document.getElementById('spacesbar');
   const pinbar = document.getElementById('pinbar');
+  const orphanbar = document.getElementById('orphanbar');
   const latestbar = document.getElementById('latestbar');
   const todobar = document.getElementById('todobar');
   const searchInput = document.getElementById('search-input');
@@ -96,6 +97,25 @@
   const alarmWindowFields = document.getElementById('alarm-window-fields');
   const alarmWindowStartInput = document.getElementById('alarm-window-start-input');
   const alarmWindowEndInput = document.getElementById('alarm-window-end-input');
+  // A nudge's `track`: 0 info only, 1 Done/Skip/Snooze, 2 + ★ rating.
+  // Two on/off toggle buttons. Rate implies Track: turning Rate on turns
+  // Track on, turning Track off turns Rate off.
+  const alarmTrackBtn = document.getElementById('alarm-track-btn');
+  const alarmRateBtn = document.getElementById('alarm-rate-btn');
+  let alarmTrack = 0;
+  const setAlarmTrack = (t) => {
+    alarmTrack = t;
+    alarmTrackBtn.classList.toggle('active', t >= 1);
+    alarmTrackBtn.setAttribute('aria-pressed', String(t >= 1));
+    alarmRateBtn.classList.toggle('active', t === 2);
+    alarmRateBtn.setAttribute('aria-pressed', String(t === 2));
+  };
+  alarmTrackBtn.addEventListener('click', () => setAlarmTrack(alarmTrack ? 0 : 1));
+  // 📈 — only for a saved, tracked nudge (there's nothing logged otherwise).
+  const alarmStatsBtn = document.getElementById('alarm-stats-btn');
+  let alarmStatsTarget = null;
+  alarmStatsBtn.addEventListener('click', () => alarmStatsTarget && openNudgeStats(alarmStatsTarget, 'month'));
+  alarmRateBtn.addEventListener('click', () => setAlarmTrack(alarmTrack === 2 ? 1 : 2));
   const alarmPlaceFields = document.getElementById('alarm-place-fields');
   const alarmRadiusInput = document.getElementById('alarm-radius-input');
   const alarmLocReadout = document.getElementById('alarm-loc-readout');
@@ -175,6 +195,7 @@
     latest: 'nico-notes-bar-latest',
     todos: 'nico-notes-bar-todos',
     alarms: 'nico-notes-bar-alarms',
+    orphans: 'nico-notes-bar-orphans',
   };
   const barPrefs = Object.fromEntries(
     Object.entries(BAR_PREF_KEY).map(([k, key]) => {
@@ -199,6 +220,7 @@
     renderPinbar();
     renderLatestbar();
     renderAlarmbar();
+    renderOrphanbar();
   }
 
   // --- In-app replacements for native alert()/confirm() ---
@@ -208,32 +230,45 @@
   // `onClick` adds an action button (label `action`, default "Open"): only the
   // button takes taps — the rest of the toast, like a plain one, lets them
   // through to whatever is underneath (#toast-host is pointer-events:none).
-  function toast(msg, { onClick, action = 'Open', duration = 2600 } = {}) {
+  // `actions` = several buttons instead: [{label, title?, onClick(btn)}] —
+  // each dismisses the toast, then runs with its own button (an anchor for a
+  // follow-up openActionMenu). Empty `msg` = buttons only; `className` is
+  // added to the toast element.
+  function toast(msg, { onClick, action = 'Open', actions, duration = 2600, className = '' } = {}) {
     let host = document.getElementById('toast-host');
     if (!host) {
       host = document.createElement('div');
       host.id = 'toast-host';
       document.body.appendChild(host);
     }
+    const buttons = actions || (onClick ? [{ label: action, onClick }] : []);
     const el = document.createElement('div');
-    el.className = 'toast' + (onClick ? ' toast-action' : '');
-    const text = document.createElement('span');
-    text.textContent = msg;
-    el.appendChild(text);
+    el.className = 'toast' + (buttons.length ? ' toast-action' : '') + (className ? ` ${className}` : '');
+    if (msg) {
+      const text = document.createElement('span');
+      text.textContent = msg;
+      el.appendChild(text);
+    }
     const dismiss = () => {
       el.classList.remove('show');
       setTimeout(() => el.remove(), 200);
     };
-    if (onClick) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.textContent = action;
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        dismiss();
-        onClick();
-      });
-      el.appendChild(btn);
+    if (buttons.length) {
+      const row = document.createElement('div');
+      row.className = 'toast-buttons';
+      for (const b of buttons) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = b.label;
+        if (b.title) btn.title = b.title;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          dismiss();
+          b.onClick(btn);
+        });
+        row.appendChild(btn);
+      }
+      el.appendChild(row);
     }
     host.appendChild(el);
     requestAnimationFrame(() => el.classList.add('show'));
@@ -679,6 +714,7 @@
       try {
         const prev = await store.get('notes', note.id);
         const next = { ...prev, ...note };
+        delete next.historyId; // response-only (the toast's Undo), never note data
         if (fromServer) {
           next._serverUpdatedAt = note.updated_at;
           next._dirty = outbox.hasPendingFor(note.id);
@@ -983,7 +1019,7 @@
 
     // --- Cached neighbour responses (phase 4): the last server-ranked
     // { parent, neighbors, links, linkCount } per centred note, so the grid keeps
-    // its exact arrangement + path-heat offline instead of a link-recency guess.
+    // its exact arrangement offline instead of a link-recency guess.
     nkey(id) {
       return typeof id === 'string' && /^\d+$/.test(id) ? Number(id) : id;
     },
@@ -1726,13 +1762,24 @@
     if (e.kind === 'reminder.ack') {
       const id = ridResolve(p.id);
       if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
-      await postJson(`/api/alarms/${id}/ack`, { at: p.at, nextAt: p.nextAt || null });
+      await postJson(`/api/alarms/${id}/ack`, { at: p.at, nextAt: p.nextAt || null, outcome: p.outcome || 'done' });
+      return;
+    }
+    if (e.kind === 'reminder.rate') {
+      const id = ridResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
+      try {
+        await postJson(`/api/alarms/${id}/rate`, { at: p.at, rating: p.rating });
+      } catch (err) {
+        // Its ack was coalesced away by a later offline one — nothing to rate.
+        if (err.httpStatus !== 404) throw err;
+      }
       return;
     }
     if (e.kind === 'reminder.snooze') {
       const id = ridResolve(p.id);
       if (isTmp(id)) throw httpErr(0, 'reminder not synced yet');
-      await postJson(`/api/alarms/${id}/snooze`, { until: p.until });
+      await postJson(`/api/alarms/${id}/snooze`, { until: p.until, at: p.at });
       return;
     }
     if (e.kind === 'reminder.arrive') {
@@ -2066,7 +2113,7 @@
       return {
         kind: 'anytime', time: '', days: b.days || [], date: b.date || null,
         lat: null, lon: null, radiusM: null,
-        windowStart: b.windowStart, windowEnd: b.windowEnd,
+        windowStart: b.windowStart, windowEnd: b.windowEnd, track: b.track || 0,
         tz: b.tz || null,
         ackAt: b.ackAt || new Date().toISOString(),
         nextAt: b.nextAt || null, snoozeUntil: null,
@@ -2099,6 +2146,7 @@
       radiusM: loc ? b.radiusM || 250 : null,
       windowStart: nudge ? b.windowStart : null,
       windowEnd: nudge ? b.windowEnd : null,
+      track: nudge ? b.track || 0 : 0,
       tz: b.tz || null,
       ackAt: b.ackAt || new Date().toISOString(),
       nextAt: b.nextAt || null,
@@ -2396,11 +2444,19 @@
   function onActionMenuKey(e) {
     if (e.key === 'Escape') closeActionMenu();
   }
+  // An item with `children` (instead of onClick) is a foldable section: tap
+  // its header to expand its items inline, collapsing whichever other section
+  // was open — keeps a long menu (the grid card's long-press one) short.
   function openActionMenu(anchor, items) {
     closeActionMenu();
     const menu = document.createElement('div');
     menu.className = 'action-menu';
-    items.forEach(({ label, onClick, active }) => {
+    const place = () => {
+      const r = anchor.getBoundingClientRect();
+      menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8))}px`;
+    };
+    const itemButton = ({ label, onClick, active }) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'action-menu-item' + (active ? ' active' : '');
@@ -2409,12 +2465,38 @@
         closeActionMenu();
         onClick();
       });
-      menu.appendChild(btn);
+      return btn;
+    };
+    const sections = [];
+    items.forEach((item) => {
+      if (!item.children) {
+        menu.appendChild(itemButton(item));
+        return;
+      }
+      const head = document.createElement('button');
+      head.type = 'button';
+      head.className = 'action-menu-item action-menu-section';
+      head.textContent = item.label;
+      const body = document.createElement('div');
+      body.className = 'action-menu-sub hidden';
+      item.children.forEach((c) => body.appendChild(itemButton(c)));
+      head.addEventListener('click', () => {
+        const opening = body.classList.contains('hidden');
+        sections.forEach(([h, b]) => {
+          b.classList.add('hidden');
+          h.classList.remove('open');
+        });
+        if (opening) {
+          body.classList.remove('hidden');
+          head.classList.add('open');
+        }
+        place();
+      });
+      sections.push([head, body]);
+      menu.append(head, body);
     });
     document.body.appendChild(menu);
-    const r = anchor.getBoundingClientRect();
-    menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`;
-    menu.style.top = `${Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+    place();
     openActionMenuEl = menu;
     // Deferred so the click that opened the menu doesn't immediately close it
     // via the same outside-mousedown listener (capture phase fires before this
@@ -2599,9 +2681,14 @@
   }
 
   // --- Colour coding (toggleable) ---
-  const COLOR_MODES = ['off', 'path', 'note'];
-  const COLOR_LABEL = { off: 'off', path: 'path heat', note: 'note heat' };
+  // Just off / note heat. A "path heat" mode (tint by how likely each
+  // neighbour is as the next step from here) used to sit in between, but the
+  // grid already orders neighbours by that same score, and its tint was
+  // hard to tell apart from note heat's — so it was dropped.
+  const COLOR_MODES = ['off', 'note'];
+  const COLOR_LABEL = { off: 'off', note: 'note heat' };
   let colorMode = localStorage.getItem('nico-notes-color-mode') || 'off';
+  if (colorMode === 'path') colorMode = 'note'; // was on — keep it on
   if (!COLOR_MODES.includes(colorMode)) colorMode = 'off';
   let noteHeat = {};
   // Bumped whenever noteHeat is (re)fetched — lets the map's marker-diffing
@@ -2854,12 +2941,21 @@
     return a.time || '';
   }
 
-  const GRID_DEPTH_MIN = 1;
-  const GRID_DEPTH_MAX = 2;
-  let gridDepth = Math.min(
-    GRID_DEPTH_MAX,
-    Math.max(GRID_DEPTH_MIN, Number(localStorage.getItem('nico-notes-grid-depth')) || 1)
-  );
+  // Grid view, cycled by the 🔲 header button: 'titles' (default — neighbours
+  // show title + icons only), 'text' (neighbour cards show their note text,
+  // like the centre), 'nested' (each neighbour expands into its own mini 3x3).
+  const GRID_VIEWS = ['titles', 'text', 'nested'];
+  const GRID_VIEW_LABEL = { text: 'Neighbour text', titles: 'Titles only', nested: 'Nested 3x3' };
+  let gridView = (() => {
+    try {
+      const v = localStorage.getItem('nico-notes-grid-view');
+      if (GRID_VIEWS.includes(v)) return v;
+      // Older builds stored a nested depth (1|2).
+      return localStorage.getItem('nico-notes-grid-depth') === '2' ? 'nested' : 'titles';
+    } catch {
+      return 'titles';
+    }
+  })();
 
   // Opportunistic GPS trail sample: any time the app already asked for the
   // device's current position for something else (tagging a new note or
@@ -3077,14 +3173,55 @@
     // (v1 is online-only for shares — same rule as getShareNotes/
     // getShareLinks), so there's no local corpus to search there — this is
     // a live call every debounced keystroke, same as those two.
+    // The header search: every scope at once — personal from the local mirror
+    // (offline-capable, sees decrypted content) plus every space you're in
+    // from one server call (online only; GET /api/shares/search). Each row
+    // carries shareId/shareTitle (null = personal); ordering is the caller's
+    // job (orderSearchRows).
+    searchEverywhere: async (q) => {
+      const [personal, spaces] = await Promise.all([
+        cache.localSearch(q).catch(() => []),
+        navigator.onLine
+          ? fetch(`/api/shares/search?q=${encodeURIComponent(q)}`)
+              .then((r) => (r.ok ? r.json() : []))
+              .catch(() => [])
+          : [],
+      ]);
+      return [...personal.map((r) => ({ ...r, shareId: null, shareTitle: null })), ...spaces];
+    },
     searchNotes: (q) =>
       currentSpace
         ? fetch(`/api/shares/${currentSpace.id}/search?q=${encodeURIComponent(q)}`)
             .then((r) => (r.ok ? r.json() : []))
             .catch(() => [])
         : cache.localSearch(q),
+    // The orphan row (GET /api/notes/inbox): one item per note outside its
+    // scope's home tree — orphans, in-between notes, disconnected trees' tops —
+    // across personal and every space. Offline: personal orphans only (no
+    // links at all), from the local mirror.
+    getInbox: async () => {
+      if (navigator.onLine) {
+        try {
+          const r = await fetch('/api/notes/inbox');
+          if (r.ok) return (await r.json()).items || [];
+        } catch {
+          /* fall through to local */
+        }
+      }
+      const [links, notesArr] = [await cache.cachedLinks(), await cache.cachedList()];
+      const linked = new Set();
+      links.filter((l) => !l._deleted).forEach((l) => {
+        linked.add(l.a);
+        linked.add(l.b);
+      });
+      return notesArr
+        .filter((n) => n.status !== 'deleted' && n.status !== 'done' && !linked.has(n.id))
+        .sort((x, y) => String(y.updated_at).localeCompare(String(x.updated_at)))
+        .map((n) => ({ noteId: n.id, title: n.title }));
+    },
     // Every open ('todo') note anywhere below `id` in the inferred hierarchy —
-    // powers the to-do bar's "under here" scoping.
+    // powers the to-do bar's "under here" scoping. On the home note it's every
+    // note (server/notes.js's crossScopeSubtree); offline too, from the mirror.
     getSubtreeTodos: async (id) => {
       if (id == null || isTmp(id)) return [];
       if (navigator.onLine) {
@@ -3094,6 +3231,11 @@
         } catch {
           /* fall through to local */
         }
+      }
+      if (id === homeNoteId) {
+        return (await cache.cachedList())
+          .filter((n) => n.id !== id && n.status === 'todo')
+          .map((n) => ({ id: n.id, title: n.title }));
       }
       return cache.localSubtreeTodos(id);
     },
@@ -3108,6 +3250,9 @@
         } catch {
           /* fall through to local */
         }
+      }
+      if (id === homeNoteId) {
+        return (await cache.cachedList()).filter((n) => n.id !== id && n.status !== 'deleted').map((n) => n.id);
       }
       return cache.localSubtreeIds(id);
     },
@@ -3404,6 +3549,12 @@
       if (isTmp(id)) return cache.localNeighbors(id);
       try {
         const d = await fetch(`/api/notes/${id}/neighbors`).then((r) => r.json());
+        // Neighbour cards show the note text too (makeNeighborCell).
+        await Promise.all(
+          [d.parent, ...(d.neighbors || [])].filter(Boolean).map(async (n) => {
+            n.content = await decryptIncoming(n.content);
+          })
+        );
         if (!currentSpace) await cache.putNeighbors(id, d);
         return d;
       } catch {
@@ -3412,7 +3563,15 @@
         // shared note (never mirrored — see getNote's same reasoning).
         if (currentSpace) return { parent: null, neighbors: [], linkCount: 0, links: [] };
         const blob = await cache.getNeighborsBlob(id);
-        return blob ? cache.filterNeighborBlob(blob) : cache.localNeighbors(id);
+        const d = blob ? cache.filterNeighborBlob(blob) : await cache.localNeighbors(id);
+        // The blob's text is from the last online visit; the note mirror is
+        // fresher (offline edits, warmCache).
+        const byId = new Map((await cache.cachedList()).map((n) => [n.id, n]));
+        const withText = (n) => {
+          const m = n && byId.get(n.id);
+          return m && m.content !== undefined ? { ...n, content: m.content } : n;
+        };
+        return { ...d, parent: withText(d.parent), neighbors: (d.neighbors || []).map(withText) };
       }
     },
     link: async (a, b, rehomeFrom) => {
@@ -3653,20 +3812,45 @@
       scheduleFlush();
       return null;
     },
-    ackAlarm: async (id, nextAt) => {
+    // `outcome` 'done' | 'skip' (server logs it in reminder_events). Returns
+    // { at } — the key a later rateAlarm points back at.
+    ackAlarm: async (id, nextAt, outcome = 'done') => {
       const at = new Date().toISOString();
       const patch = { ackAt: at, nextAt: nextAt || null, snoozeUntil: null };
       if (navigator.onLine && !isTmp(id)) {
         try {
-          const r = await reqJson(`/api/alarms/${id}/ack`, 'POST', { at, nextAt: nextAt || null });
+          await reqJson(`/api/alarms/${id}/ack`, 'POST', { at, nextAt: nextAt || null, outcome });
           await mirrorPatchAlarm(id, patch);
-          return r;
+          return { ok: true, at };
         } catch (err) {
           if (err.httpStatus) throw err;
         }
       }
       await mirrorPatchAlarm(id, patch);
-      await enqueue('reminder.ack', { id, at, nextAt: nextAt || null }, [id]);
+      await enqueue('reminder.ack', { id, at, nextAt: nextAt || null, outcome }, [id]);
+      scheduleFlush();
+      return { ok: true, at };
+    },
+    // Practice statistics (server/reminders.js stats) — online-only, null
+    // when offline or it fails.
+    getAlarmStats: async (id, range) => {
+      if (!navigator.onLine || isTmp(id)) return null;
+      try {
+        return await reqJson(`/api/alarms/${id}/stats?range=${encodeURIComponent(range)}`, 'GET');
+      } catch {
+        return null;
+      }
+    },
+    // 1-5 "how did it go" on the 'done' ack stamped `at`.
+    rateAlarm: async (id, at, rating) => {
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          return await reqJson(`/api/alarms/${id}/rate`, 'POST', { at, rating });
+        } catch (err) {
+          if (err.httpStatus) throw err;
+        }
+      }
+      await enqueue('reminder.rate', { id, at, rating }, [id]);
       scheduleFlush();
       return { ok: true };
     },
@@ -3674,7 +3858,7 @@
       const at = new Date().toISOString();
       if (navigator.onLine && !isTmp(id)) {
         try {
-          const r = await reqJson(`/api/alarms/${id}/snooze`, 'POST', { until });
+          const r = await reqJson(`/api/alarms/${id}/snooze`, 'POST', { until, at });
           await mirrorPatchAlarm(id, { snoozeUntil: until, ackAt: at });
           return r;
         } catch (err) {
@@ -3878,14 +4062,10 @@
 
   // The translucent tint for a note under the active colour mode, or null.
   function tintFor(note) {
-    if (colorMode === 'off' || !note) return null;
-    if (colorMode === 'path') {
-      const p = typeof note.p === 'number' ? note.p : 0;
-      if (p > 0) return `color-mix(in srgb, var(--accent) ${Math.round(p * 55)}%, transparent)`;
-    } else if (colorMode === 'note') {
-      const h = noteHeat[note.id] || 0;
-      if (h > 0) return `color-mix(in srgb, var(--pin) ${Math.round(h * 55)}%, transparent)`;
-    }
+    if (colorMode !== 'note' || !note) return null;
+    const h = noteHeat[note.id] || 0;
+    // --note-heat: the theme's own "note heat" colour (themes.js COLOR_GROUPS).
+    if (h > 0) return `color-mix(in srgb, var(--note-heat) ${Math.round(h * 55)}%, transparent)`;
     return null;
   }
 
@@ -4370,6 +4550,7 @@
   async function setGraphRoot(noteId) {
     try {
       const result = await api.setRootNote(noteId);
+      pinRootCache.key = null; // re-fetch the root for the pin bar's ordering
       toast(
         noteId != null
           ? `"${result.note.title}" is now your home note.`
@@ -4415,7 +4596,9 @@
       case 'reminder.delete':
         return 'Delete reminder';
       case 'reminder.ack':
-        return 'Reminder “OK”';
+        return e.payload && e.payload.outcome === 'skip' ? 'Skip reminder' : 'Reminder done';
+      case 'reminder.rate':
+        return 'Rate reminder';
       case 'reminder.snooze':
         return 'Snooze reminder';
       case 'reminder.arrive':
@@ -5431,7 +5614,10 @@
     themeBody.appendChild(themeScope === 'app' ? buildAppPanel() : buildNotePanel());
   }
 
+  // Opens on "This note" (the common case: styling what you're looking at);
+  // "App" is one tab away. No note open → App.
   async function openThemeModal() {
+    themeScope = currentNote ? 'note' : 'app';
     await refreshThemeContext();
     themeOverlay.classList.remove('hidden');
     renderThemeModal();
@@ -5627,7 +5813,7 @@
       allNotesCache = await api.listNotes();
       renderPinbar();
       await refreshFromTabs(await api.openTab(note.id));
-      toast('Saved shared note.');
+      undoToast('Saved shared note', note.historyId);
     } catch {
       toast('Could not save the shared note.');
     }
@@ -5890,17 +6076,31 @@
   function buildContactEditForm(note, contact) {
     const form = document.createElement('form');
     form.className = 'center-attachment-contact-edit';
-    const field = (value, placeholder, type) => {
+    // One labelled row per field: icon + caption above a full-width input.
+    const field = (icon, caption, value, placeholder, type, autocomplete) => {
+      const row = document.createElement('label');
+      row.className = 'contact-edit-field';
+      const cap = document.createElement('span');
+      cap.className = 'contact-edit-caption';
+      cap.textContent = `${icon} ${caption}`;
       const input = document.createElement('input');
       input.type = type;
       input.value = value || '';
       input.placeholder = placeholder;
-      form.appendChild(input);
+      input.autocomplete = autocomplete;
+      row.append(cap, input);
+      form.appendChild(row);
       return input;
     };
-    const name = field(contact.name, 'Contact name', 'text');
-    const phone = field(contact.phone, 'Phone (optional)', 'tel');
-    const email = field(contact.email, 'Email (optional)', 'email');
+    const name = field('👤', 'Name', contact.name, 'Full name', 'text', 'name');
+    const phone = field('📞', 'Phone', contact.phone, 'Optional', 'tel', 'tel');
+    const email = field('✉️', 'Email', contact.email, 'Optional', 'email', 'email');
+    form.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cancel.click();
+      }
+    });
     const actions = document.createElement('div');
     actions.className = 'center-attachment-contact-edit-actions';
     const save = document.createElement('button');
@@ -5932,7 +6132,7 @@
       try {
         const updated = await api.setNoteAttachment(note.id, formData);
         if (updated.id === currentId) currentNote = updated;
-        toast('Contact saved.');
+        undoToast('Contact saved', updated.historyId);
         await afterAttach();
       } catch (err) {
         if (err.httpStatus) toast(err.message || "Couldn't save the contact.");
@@ -5967,11 +6167,15 @@
     if (note.created_from_note_id) {
       const source = allNotesCache.find((n) => n.id === note.created_from_note_id);
       const from = document.createElement('a');
-      from.href = '#';
+      // A real `#<id>` href (same as a wikilink), so hover / copy link /
+      // open-in-new-tab point at the note rather than a bare '#'.
+      from.href = `#${note.created_from_note_id}`;
       from.textContent = `⤴ from ${source ? source.title : `note #${note.created_from_note_id}`}`;
       from.addEventListener('click', (e) => {
         e.preventDefault();
-        goTo(note.created_from_note_id, 'from-link');
+        // Close the fullscreen editor first, else navigation happens behind it.
+        if (!noteOverlay.classList.contains('hidden')) closeNoteFullscreen();
+        jumpTo(note.created_from_note_id, 'from-link');
       });
       parts.push(from);
     }
@@ -5995,9 +6199,15 @@
   // own the full pointer lifecycle for drag-to-rehome). Swallows the
   // synthetic click a long-press would otherwise also fire, same trick
   // attachCardDrag uses for a completed drag.
+  //
+  // A `contextmenu` event (desktop right-click, or the browser's own long-press
+  // menu on a touch screen) opens the same callback and never the browser's
+  // menu; `firedAt` keeps a touch long-press from opening it twice when the
+  // browser's contextmenu lands just after our own timer.
   function attachLongPress(el, callback) {
     let timer = null;
     let fired = false;
+    let firedAt = 0;
     let startX = 0;
     let startY = 0;
     const cancel = () => {
@@ -6011,8 +6221,19 @@
       startY = e.clientY;
       timer = setTimeout(() => {
         fired = true;
+        firedAt = Date.now();
         callback(e.clientX, e.clientY);
       }, LONG_PRESS_MS);
+    });
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (Date.now() - firedAt < 1000) return;
+      const pressing = timer != null;
+      cancel();
+      if (pressing) fired = true; // touch: swallow the click its pointerup ends with
+      firedAt = Date.now();
+      callback(e.clientX, e.clientY);
     });
     el.addEventListener('pointermove', (e) => {
       if (Math.hypot(e.clientX - startX, e.clientY - startY) > DRAG_THRESHOLD) cancel();
@@ -6260,6 +6481,10 @@
   // attachCardDrag/attachLongPress) — the same two trigger styles, so
   // touch users never have to hit a small target precisely.
   function openRelationMenu(anchor, centerId, other) {
+    openActionMenu(anchor, relationMenuItems(centerId, other));
+  }
+
+  function relationMenuItems(centerId, other) {
     const current = linkRelationOf(other);
     const apply = async (relation) => {
       try {
@@ -6271,7 +6496,7 @@
         toast(e.message || "Couldn't update that connection.");
       }
     };
-    openActionMenu(anchor, [
+    return [
       { label: '⤵ Mark as child', active: current === 'child', onClick: () => apply('child') },
       { label: '⤴ Mark as parent', active: current === 'parent', onClick: () => apply('parent') },
       { label: '🔀 Mark as cross-reference', active: current === 'cross', onClick: () => apply('cross') },
@@ -6286,7 +6511,7 @@
           if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
         },
       },
-    ]);
+    ];
   }
 
   // Scrollable list of every note linked to the current one, each row a
@@ -6330,9 +6555,9 @@
         e.stopPropagation();
         openRelationMenu(relBtn, currentId, link);
       });
-      // A long press anywhere on the row reaches the same menu, so touch
-      // users don't need to hit the small icon precisely.
-      attachLongPress(row, () => openRelationMenu(row, currentId, link));
+      // A long press (or right-click) anywhere on the row opens the grid
+      // card's full menu, connection section included.
+      attachLongPress(row, () => openCardMenu(row, link));
 
       row.appendChild(name);
       row.appendChild(relBtn);
@@ -6554,18 +6779,9 @@
     addBtn.textContent = '➕';
     addBtn.title = 'Create, attach, or connect';
     addBtn.addEventListener('click', () => {
-      openActionMenu(addBtn, [
-        { label: '📝 Create a note', onClick: () => openPicker() },
-        { label: '📎 Add / remove attachment', onClick: () => openPicker({ mode: 'attach' }) },
-        { label: '🔗 Connect to note', onClick: () => openLinkModal() },
-        { label: '📲 Share to app…', onClick: () => shareNoteToApp(currentNote) },
-        // "Share this note…" only outside a space — a shared note is already
-        // shared; moving notes between two different shares isn't supported.
-        ...(!currentSpace ? [{ label: '🔗 Share this note…', onClick: () => openShareFlow(addBtn, currentNote) }] : []),
-        // Referencing a note in another space is just "Connect to note" —
-        // its search spans your spaces and makes a cross-space reference.
-        ...(currentSpace ? [{ label: '📤 Remove from space', onClick: () => removeFromSpaceFlow(currentNote) }] : []),
-      ]);
+      // Shared with the grid card menu's "Add" section — see noteAddItems.
+      const open = async () => currentNote;
+      openActionMenu(addBtn, noteAddItems({ anchor: () => addBtn, focus: open, full: open }));
     });
 
     // GTD context tags: no stored field — a tag is just an `@word` in the
@@ -6724,10 +6940,11 @@
     deleteBtn.addEventListener('click', async () => {
       if (currentNote.pinned) return;
       if (!(await confirmDialog(`Delete "${currentNote.title}"?`, { confirmLabel: 'Delete', danger: true }))) return;
-      await api.setStatus(currentId, 'deleted');
+      const deleted = await api.setStatus(currentId, 'deleted');
       allNotesCache = await api.listNotes();
       renderPinbar();
       await afterDelete();
+      undoToast('Note deleted', deleted && deleted.historyId);
     });
 
     frag.appendChild(buildMetaLine(currentNote));
@@ -6780,8 +6997,6 @@
       // Distinct from the "Write here…" invitation below, which would
       // otherwise wrongly suggest an empty note.
       content.textContent = contentUnavailableMessage(true);
-    } else {
-      content.textContent = 'Write here…';
     }
 
     cell.appendChild(title);
@@ -6802,16 +7017,36 @@
     }
     if (corner.children.length) cell.appendChild(corner);
 
+    // Tap anywhere → open read-only/rendered (peek at it, click wikilinks);
+    // the ✏️ in the lower-left corner opens straight into the textarea.
+    cell.appendChild(makeEditPen(() => openNoteFullscreen('edit')));
     cell.addEventListener('click', (e) => {
       if (e.target.closest('a, audio, input, label')) return;
-      // Top half of the card → open read-only/rendered (peek at it, click
-      // wikilinks); bottom half → open straight into the editable textarea.
-      const rect = cell.getBoundingClientRect();
-      const mode = e.clientY - rect.top < rect.height / 2 ? 'preview' : 'edit';
-      openNoteFullscreen(mode);
+      openNoteFullscreen('preview');
     });
+    // Long-press: the card menu (attachLongPress swallows the click it ends with).
+    attachLongPress(cell, () => openCardMenu(cell, currentNote, { isCenter: true }));
 
     return cell;
+  }
+
+  // A card's lower-left ✏️: open the note straight into editing (centre
+  // card) or centre it and then do so (neighbour) — a small explicit target,
+  // since the old "bottom half of the card = edit" split was easy to hit by
+  // mistake. The card's own tap (anywhere else) previews / centres.
+  function makeEditPen(onClick) {
+    const pen = document.createElement('button');
+    pen.type = 'button';
+    pen.className = 'edit-pen';
+    pen.textContent = '✏️';
+    pen.title = 'Edit note';
+    pen.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onClick();
+    });
+    // Not the card's long-press menu / drag (attachLongPress, attachCardDrag).
+    pen.addEventListener('pointerdown', (e) => e.stopPropagation());
+    return pen;
   }
 
   // --- Drag a neighbor card onto another card to re-home its connection:
@@ -6877,6 +7112,7 @@
     let hovered = null;
     let longPressTimer = null;
     let longPressFired = false;
+    let longPressAt = 0;
 
     const clearHover = () => {
       if (hovered) hovered.classList.remove('drop-target');
@@ -6889,7 +7125,7 @@
 
     cell.addEventListener('pointerdown', (e) => {
       if (!e.isPrimary || (e.button != null && e.button > 0)) return;
-      if (e.target.closest('.relation-btn')) return;
+      if (e.target.closest('.relation-btn, .edit-pen')) return;
       pointerId = e.pointerId;
       startX = e.clientX;
       startY = e.clientY;
@@ -6899,6 +7135,7 @@
         longPressTimer = setTimeout(() => {
           if (dragging) return;
           longPressFired = true;
+          longPressAt = Date.now();
           onLongPress();
         }, LONG_PRESS_MS);
       }
@@ -6957,6 +7194,17 @@
 
     cell.addEventListener('pointerup', (e) => finish(e, false));
     cell.addEventListener('pointercancel', (e) => finish(e, true));
+    // Right-click / the browser's touch long-press menu: same menu as our
+    // long-press, never the native one (see attachLongPress).
+    cell.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      if (!onLongPress || dragging || Date.now() - longPressAt < 1000) return;
+      const pressing = longPressTimer != null;
+      clearLongPress();
+      if (pressing) longPressFired = true;
+      longPressAt = Date.now();
+      onLongPress();
+    });
   }
 
   // A card's at-a-glance info row: attachment type, pin, one icon per kind of
@@ -7010,7 +7258,7 @@
       // in this same graph, which a cross-scope reference isn't; nor is
       // there a relationship to correct on one, so no long-press menu either.
       applyCellTheme(cell, neighbor.id);
-      attachCardDrag(cell, neighbor, () => openRelationMenu(cell, currentId, neighbor));
+      attachCardDrag(cell, neighbor, () => openCardMenu(cell, neighbor));
     }
 
     // One button per card: a reference just removes itself (there's no
@@ -7100,6 +7348,14 @@
       if (!neighbor.isRef) {
         const preview = buildAttachmentPreview(neighbor, { compact: true });
         if (preview) cell.appendChild(preview);
+        // The note's text, rendered like the centre card's (read-only here —
+        // a tap still just centres the note).
+        if (gridView === 'text' && neighbor.content && neighbor.content.trim()) {
+          const text = document.createElement('div');
+          text.className = 'neighbor-content';
+          renderMarkdownInto(text, neighbor.content, { selfId: neighbor.id });
+          cell.appendChild(text);
+        }
         const info = buildCardInfoIcons(neighbor);
         if (info) {
           const corner = document.createElement('div');
@@ -7128,14 +7384,18 @@
           await goTo(neighbor.id, navVia);
           return;
         }
-        // Top half: just center it, same as before (the center cell is
-        // already a read-only preview — opening fullscreen too is
-        // redundant). Bottom half: center it and go straight into editing.
-        const rect = cell.getBoundingClientRect();
-        const wantsEdit = e.clientY - rect.top >= rect.height / 2;
+        // Just center it (the center cell is already a read-only preview —
+        // opening fullscreen too is redundant); the ✏️ centers + edits.
         await goTo(neighbor.id, navVia);
-        if (wantsEdit) await openNoteFullscreen('edit');
       });
+      if (!neighbor.noAccess) {
+        cell.appendChild(
+          makeEditPen(async () => {
+            await goTo(neighbor.id, navVia);
+            await openNoteFullscreen('edit');
+          })
+        );
+      }
     }
 
     return cell;
@@ -7248,7 +7508,7 @@
     }
 
     let subById = {};
-    if (gridDepth >= 2) {
+    if (gridView === 'nested') {
       // A reference isn't a real note in this graph — no mini sub-grid for it.
       const forSub = Object.values(slotNote).map((s) => s.note).filter((n) => !n.isRef);
       if (forSub.length > 0) {
@@ -7274,6 +7534,12 @@
     }
 
     cells.forEach((cell) => grid.appendChild(cell));
+  }
+
+  // Long-press / right-click on a header-row chip: the grid card's menu for
+  // that note (no Connection section — a chip isn't a link of the centre).
+  function attachHeaderMenu(chip, note) {
+    attachLongPress(chip, () => openCardMenu(chip, note, { isCenter: true }));
   }
 
   // --- Tab bar --- One unified bar for personal and shared notes alike — a
@@ -7306,6 +7572,7 @@
 
       chip.appendChild(title);
       chip.appendChild(closeBtn);
+      attachHeaderMenu(chip, { id: tab.note_id, title: tab.title });
       chip.addEventListener('click', async () => {
         if (tab.id === activeTabId) return;
         const from = currentId;
@@ -7382,8 +7649,55 @@
   }
 
   // --- Pin bar: shortcuts to pinned notes (done ones drop out, like the alarm bar) ---
+  // The current scope's root note id (personal: getRootNote, a space:
+  // getShareRoot), so the pin bar can put it first. Fetched once per scope
+  // and re-painted when it lands; cached in localStorage for offline boots.
+  // pinRootCache.key = scope ('p' | 's<shareId>'); setGraphRoot invalidates.
+  const pinRootCache = { key: null, id: null, pending: null };
+  // The personal home note's id, as last seen by pinRootId — lets the to-do/
+  // alarm bars' offline fallback treat home as "everything" like the server.
+  let homeNoteId = null;
+  function pinRootId() {
+    const key = currentSpace ? `s${currentSpace.id}` : 'p';
+    if (pinRootCache.key !== key) {
+      pinRootCache.key = key;
+      pinRootCache.id = null;
+      try {
+        const saved = localStorage.getItem(`nico-pin-root-${currentUser && currentUser.id}-${key}`);
+        if (saved) pinRootCache.id = Number(saved);
+      } catch (_) {}
+      if (key === 'p') homeNoteId = pinRootCache.id;
+      pinRootCache.pending = null;
+    }
+    if (!pinRootCache.pending) {
+      const fetch = currentSpace ? api.getShareRoot(currentSpace.id) : api.getRootNote();
+      pinRootCache.pending = fetch
+        .then((info) => {
+          if (pinRootCache.key !== key) return;
+          const id = info && info.note ? info.note.id : null;
+          try {
+            localStorage.setItem(`nico-pin-root-${currentUser && currentUser.id}-${key}`, id == null ? '' : String(id));
+          } catch (_) {}
+          if (key === 'p') homeNoteId = id;
+          if (id !== pinRootCache.id) {
+            pinRootCache.id = id;
+            renderPinbar();
+          }
+        })
+        .catch(() => {
+          // Offline / error: keep the cached guess, try again on a later render.
+          if (pinRootCache.key === key) pinRootCache.pending = null;
+        });
+    }
+    return pinRootCache.id;
+  }
+
   function renderPinbar() {
+    const rootId = pinRootId();
     const pinned = allNotesCache.filter((n) => n.pinned && n.status !== 'done');
+    // The root note (if pinned) always leads the row.
+    const rootIdx = pinned.findIndex((n) => n.id === rootId);
+    if (rootIdx > 0) pinned.unshift(...pinned.splice(rootIdx, 1));
     pinbar.innerHTML = '';
     pinbar.classList.toggle('hidden', pinned.length === 0 || !barPrefs.pins);
 
@@ -7400,6 +7714,7 @@
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(note.id, 'pin'));
+      attachHeaderMenu(chip, note);
       pinbar.appendChild(chip);
     });
 
@@ -7407,6 +7722,39 @@
     renderLatestbar();
     renderTodobar();
     renderSpacesbar();
+    renderOrphanbar();
+  }
+
+  // --- Orphan bar: every note outside its scope's home tree — orphans (no
+  // links), notes linked but under nothing (e.g. only cross links), and the
+  // top of each disconnected tree — across personal and every space, as
+  // server/notes.js's inbox orders them (personal first, then spaces by name). ---
+  let orphanbarGen = 0;
+  async function renderOrphanbar() {
+    if (!orphanbar) return;
+    const gen = ++orphanbarGen;
+    const items = await api.getInbox().catch(() => []);
+    if (gen !== orphanbarGen) return; // a newer call already landed — drop this one
+
+    orphanbar.innerHTML = '';
+    orphanbar.classList.toggle('hidden', items.length === 0 || !barPrefs.orphans);
+
+    items.forEach((o) => {
+      const chip = document.createElement('div');
+      chip.className =
+        'tab' +
+        (o.noteId === currentId ? ' active' : '') +
+        (triggeredAlarmIds.has(o.noteId) ? ' alarm-triggered' : '');
+
+      const title = document.createElement('span');
+      title.className = 'tab-title';
+      title.textContent = `🔌 ${o.title}` + (o.shareTitle ? ` 🔗${o.shareTitle}` : '');
+
+      chip.appendChild(title);
+      chip.addEventListener('click', () => jumpTo(o.noteId, 'orphan'));
+      attachHeaderMenu(chip, { id: o.noteId, title: o.title });
+      orphanbar.appendChild(chip);
+    });
   }
 
   // --- Latest bar: shortcuts to the most recently edited notes account-wide. ---
@@ -7431,6 +7779,7 @@
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(note.id, 'latest'));
+      attachHeaderMenu(chip, note);
       latestbar.appendChild(chip);
     });
   }
@@ -7470,6 +7819,7 @@
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(note.id, 'todo'));
+      attachHeaderMenu(chip, note);
       todobar.appendChild(chip);
     });
   }
@@ -7508,6 +7858,7 @@
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(a.noteId, 'alarm'));
+      attachHeaderMenu(chip, { id: a.noteId, title: a.title, status: a.noteStatus });
       alarmbar.appendChild(chip);
     });
   }
@@ -7560,9 +7911,73 @@
     if (!eligible.length) return; // every due nudge was shown within the last 30 min
     const pick = eligible[Math.floor(Math.random() * eligible.length)];
     markNudgeShown(pick.noteId);
-    // Plain, button-less: a nudge is a passing thought, not a call to action —
-    // the note stays reachable from the alarm bar and the 🔔 agenda.
-    toast(`🌊 ${pick.title}?`, { duration: 6000 });
+    // Info-only nudge (track 0, the default): a plain passing thought.
+    if (!pick.track) {
+      toast(`🌊 ${pick.title}`, { duration: 6000 });
+      return;
+    }
+    // Opted in: Done / Skip / Snooze are logged (reminder_events) for the
+    // practice stats; ignoring it is fine too — it comes back after the cooldown.
+    toast(`🌊 ${pick.title}?`, {
+      duration: 12000,
+      actions: [
+        { label: '✓ Done', onClick: () => finishReminder(pick, 'done') },
+        { label: 'Skip', title: 'Not today', onClick: () => finishReminder(pick, 'skip') },
+        { label: 'Snooze', onClick: (btn) => openActionMenu(btn, snoozeMenuItems(pick, NUDGE_SNOOZE_COUNT)) },
+      ],
+    });
+  }
+
+  // Done or Skip on a ringing reminder: quiet until its next occurrence, and
+  // logged with that outcome. A nudge opted into rating (track 2) then asks ★1-5.
+  async function finishReminder(a, outcome, after) {
+    let r;
+    try {
+      r = await api.ackAlarm(a.id, isoOrNull(nextAlarmOccurrence(a, new Date())), outcome);
+    } catch {
+      toast("Couldn't save that.");
+      return;
+    }
+    alarmDismissed.delete(a.id);
+    await checkAlarms({ popup: false });
+    if (after) after();
+    if (outcome === 'done' && a.kind === 'anytime' && a.track === 2 && r && r.at) askNudgeRating(a, r.at);
+  }
+
+  // "How did it go?" after a nudge's Done — five ★ buttons and nothing else;
+  // the nth star = rating n. Let it time out to skip.
+  function askNudgeRating(a, at) {
+    toast('', {
+      duration: 10000,
+      className: 'toast-rating',
+      actions: [1, 2, 3, 4, 5].map((n) => ({
+        label: '★',
+        title: `${n} of 5`,
+        onClick: async () => {
+          try {
+            await api.rateAlarm(a.id, at, n);
+            toast('★'.repeat(n) + '☆'.repeat(5 - n));
+          } catch {
+            toast("Couldn't save the rating.");
+          }
+        },
+      })),
+    });
+  }
+
+  // The toast's Snooze menu: the short end of SNOOZE_OPTIONS (a nudge is
+  // about today, not "in 3 months").
+  const NUDGE_SNOOZE_COUNT = 5;
+  function snoozeMenuItems(a, count = SNOOZE_OPTIONS.length) {
+    return SNOOZE_OPTIONS.slice(0, count).map((opt) => ({
+      label: opt.label,
+      onClick: async () => {
+        await api.snoozeAlarm(a.id, snoozeUntilIso(opt));
+        alarmDismissed.delete(a.id);
+        await checkAlarms({ popup: false });
+        toast(`Snoozed · ${opt.label}`);
+      },
+    }));
   }
 
   // Fetch alarms, decide (in the viewer's timezone) which are ringing, repaint
@@ -7719,15 +8134,22 @@
 
       const snooze = buildSnoozeSelect(a, () => hideAlarmPopupRow(row));
 
+      const skip = document.createElement('button');
+      skip.className = 'apo-skip secondary';
+      skip.textContent = 'Skip';
+      skip.title = 'Not this time — quiet until it next goes off';
+      skip.addEventListener('click', () => {
+        hideAlarmPopupRow(row);
+        finishReminder(a, 'skip');
+      });
+
       const ok = document.createElement('button');
       ok.className = 'apo-ok';
-      ok.textContent = 'OK';
-      ok.title = "Don't show again until it next goes off";
-      ok.addEventListener('click', async () => {
-        await api.ackAlarm(a.id, isoOrNull(nextAlarmOccurrence(a, new Date())));
-        alarmDismissed.delete(a.id);
+      ok.textContent = 'Done';
+      ok.title = 'Done — quiet until it next goes off';
+      ok.addEventListener('click', () => {
         hideAlarmPopupRow(row);
-        await checkAlarms({ popup: false });
+        finishReminder(a, 'done');
       });
 
       const x = document.createElement('button');
@@ -7741,6 +8163,7 @@
 
       row.appendChild(info);
       row.appendChild(snooze);
+      row.appendChild(skip);
       row.appendChild(ok);
       row.appendChild(x);
       alarmPopupList.appendChild(row);
@@ -7800,6 +8223,7 @@
     b.title = 'Mark the note done';
     b.addEventListener('click', async () => {
       b.disabled = true;
+      let historyId = null;
       try {
         const inScope = (shareId == null ? null : shareId) === (currentSpace ? currentSpace.id : null);
         const note = inScope ? allNotesCache.find((n) => n.id === noteId) : null;
@@ -7810,10 +8234,11 @@
             return; // dialog cancelled
           }
           const updated = await api.setStatus(noteId, 'done', cascade);
+          historyId = updated && updated.historyId;
           if (currentNote && currentNote.id === noteId) currentNote = updated;
           allNotesCache = await api.listNotes();
         } else {
-          await putJson(`/api/notes/${noteId}/status`, { status: 'done' });
+          historyId = (await putJson(`/api/notes/${noteId}/status`, { status: 'done' })).historyId;
         }
       } catch {
         b.disabled = false;
@@ -7825,7 +8250,11 @@
       renderAlarmbar();
       render();
       openAgenda();
-      toast('Marked done');
+      undoToast('Marked done', historyId, async () => {
+        await checkAlarms({ popup: false });
+        renderAlarmbar();
+        if (!agendaOverlay.classList.contains('hidden')) openAgenda();
+      });
     });
     return b;
   }
@@ -7863,11 +8292,12 @@
     ok.className = 'agenda-ok';
     ok.textContent = '✓';
     ok.title = 'Done — quiet until it next goes off';
-    ok.addEventListener('click', async () => {
-      await api.ackAlarm(a.id, isoOrNull(nextAlarmOccurrence(a, new Date())));
-      await checkAlarms({ popup: false });
-      openAgenda();
-    });
+    ok.addEventListener('click', () => finishReminder(a, 'done', openAgenda));
+    const skip = document.createElement('button');
+    skip.className = 'agenda-skip';
+    skip.textContent = '⏭';
+    skip.title = 'Skip — not this time';
+    skip.addEventListener('click', () => finishReminder(a, 'skip', openAgenda));
 
     // Remove the reminder outright (not just this ring) — undoable via the
     // toast, so no confirm.
@@ -7887,8 +8317,8 @@
       }
       // Same as the alarm editor's Remove: remember the settings in
       // last_reminder so re-adding one starts from them.
-      const { kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd } = a;
-      const last = JSON.stringify({ kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd });
+      const { kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd, track } = a;
+      const last = JSON.stringify({ kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd, track });
       const cached = allNotesCache.find((n) => n.id === a.noteId);
       if (cached) cached.last_reminder = last;
       if (currentNote && currentNote.id === a.noteId) currentNote.last_reminder = last;
@@ -7899,9 +8329,9 @@
 
     row.appendChild(info);
     row.appendChild(snooze);
-    // ✓ only quiets a reminder that's actually going off right now — on one
-    // that hasn't rung yet there's nothing to acknowledge.
-    if (a.triggered) row.appendChild(ok);
+    // ✓/⏭ only on a reminder that's going off right now — and not on an
+    // info-only nudge (track 0), which has nothing to answer.
+    if (a.triggered && !(a.kind === 'anytime' && !a.track)) row.append(skip, ok);
     row.appendChild(remove);
     return row;
   }
@@ -7951,7 +8381,7 @@
     row.appendChild(info);
     const mapB = document.createElement('button');
     mapB.className = 'agenda-ok';
-    mapB.textContent = '🗺';
+    mapB.textContent = '📍';
     mapB.title = 'Show on map';
     mapB.addEventListener('click', () => {
       agendaOverlay.classList.add('hidden');
@@ -8464,6 +8894,14 @@
   // ⏰ in the note editor: straight to the reminder editor, unless there's a
   // timed reminder with somewhere else to send it.
   function onAlarmButton(anchor, note) {
+    const items = reminderExportItems(note);
+    if (!items.length) return openAlarmEditor(note);
+    openActionMenu(anchor, [{ label: '✏️ Edit reminder', onClick: () => openAlarmEditor(note) }, ...items]);
+  }
+
+  // "Add to calendar" / "Add phone alarm" for a note's timed reminder, where
+  // they apply (empty otherwise) — the ⏰ button's menu and the grid card menu.
+  function reminderExportItems(note) {
     const a = alarms.find((x) => x.noteId === note.id && x.kind === 'time');
     const items = [];
     if (a && !calendarFeedLive()) {
@@ -8473,8 +8911,156 @@
     if (a && isAndroid && phoneAlarmFits(a)) {
       items.push({ label: '⏰ Add phone alarm', onClick: () => (location.href = alarmIntentUrl(a, note.title)) });
     }
-    if (!items.length) return openAlarmEditor(note);
-    openActionMenu(anchor, [{ label: '✏️ Edit reminder', onClick: () => openAlarmEditor(note) }, ...items]);
+    return items;
+  }
+
+  // The ➕ actions for one note. The single source for both the note editor's
+  // ➕ menu and the grid card long-press menu's "Add" section — add a new
+  // ➕ action here and both get it. `focus()` resolves to the note once it's
+  // the open/centred one (create/attach/connect/space flows all act on
+  // currentId); `full()` to the note with its content, without moving
+  // anything (share to app). In the editor both are just currentNote.
+  function noteAddItems({ anchor, focus, full }) {
+    return [
+      { label: '📝 Create a note', onClick: async () => (await focus(), openPicker()) },
+      { label: '📎 Add / remove attachment', onClick: async () => (await focus(), openPicker({ mode: 'attach' })) },
+      { label: '🔗 Connect to note', onClick: async () => (await focus(), openLinkModal()) },
+      {
+        label: '📲 Share to app…',
+        onClick: async () => {
+          const n = await full();
+          if (n) shareNoteToApp(n);
+        },
+      },
+      // "Share this note…" only outside a space — a shared note is already
+      // shared; moving notes between two different shares isn't supported.
+      // Referencing a note in another space is just "Connect to note" — its
+      // search spans your spaces and makes a cross-space reference.
+      ...(!currentSpace
+        ? [{ label: '🔗 Share this note…', onClick: async () => openShareFlow(anchor(), await focus()) }]
+        : [{ label: '📤 Remove from space', onClick: async () => removeFromSpaceFlow(await focus()) }]),
+    ];
+  }
+
+  // --- Grid card long-press: every per-note action in one compact menu ---
+  // Keep it in step with the editor footer: its ➕ items come from
+  // noteAddItems, the connection items from relationMenuItems and the
+  // reminder extras from reminderExportItems (all shared); pin / status /
+  // delete mirror the footer's 📌 / status / 🗑️ buttons by hand.
+  // Quick one-tap actions (pin, delete) at the top level; the
+  // rest folded into sections (status, reminder, add, connection), one open
+  // at a time (openActionMenu's `children`). Status/pin/delete/share act on
+  // the card's note in place; anything the editor runs against "the open
+  // note" (create/attach/connect/share into a space, the reminder editor)
+  // first centres this note, then runs exactly what the editor's own buttons
+  // run. `isCenter` = the centre card (no connection section — it's the
+  // note every link is relative to).
+  const CARD_STATUSES = [
+    ['active', '○', 'Normal'],
+    ['waiting', '⏳', 'Waiting'],
+    ['todo', '📋', 'To-do'],
+    ['done', '✅', 'Done'],
+  ];
+
+  async function refreshAfterCardAction(noteId, patch) {
+    if (patch && currentNote && currentNote.id === noteId) currentNote = { ...currentNote, ...patch };
+    allNotesCache = await api.listNotes();
+    renderPinbar();
+    renderAlarmbar();
+    await loadNeighbors(currentId);
+    await render();
+    if (!noteOverlay.classList.contains('hidden')) renderNoteFullscreen();
+  }
+
+  function openCardMenu(anchor, card, { isCenter = false } = {}) {
+    const n = allNotesCache.find((x) => x.id === card.id) || card;
+    const status = CARD_STATUSES.some(([s]) => s === n.status) ? n.status : 'active';
+    const face = CARD_STATUSES.find(([s]) => s === status);
+    const hasReminder = alarms.some((a) => a.noteId === n.id);
+    const focus = async () => {
+      if (currentId !== n.id) {
+        // From the editor's links list: leave the editor for the new centre.
+        if (!noteOverlay.classList.contains('hidden')) closeNoteFullscreen();
+        await goTo(n.id, 'neighbor');
+      }
+      return currentNote;
+    };
+    const centerCell = () => grid.querySelector('.cell.center') || anchor;
+
+    const items = [
+      {
+        label: n.pinned ? '📌 Unpin' : '📌 Pin',
+        onClick: async () => {
+          try {
+            const r = n.pinned ? await api.unpinNote(n.id) : await api.pinNote(n.id);
+            await refreshAfterCardAction(n.id, { pinned: n.pinned ? 0 : 1 });
+            undoToast(n.pinned ? 'Unpinned' : 'Pinned', r && r.historyId);
+          } catch (e) {
+            toast(e.message || "Couldn't change the pin.");
+          }
+        },
+      },
+      {
+        label: `${face[1]} Status: ${face[2]}`,
+        children: CARD_STATUSES.map(([s, icon, label]) => ({
+          label: `${icon} ${label}`,
+          active: s === status,
+          onClick: async () => {
+            if (s === status) return;
+            const cascade = await openStatusCascadeDialog(n, status, s);
+            if (cascade == null) return;
+            try {
+              const r = await api.setStatus(n.id, s, cascade);
+              await refreshAfterCardAction(n.id, { status: s });
+              await checkAlarms({ popup: false });
+              undoToast(`${icon} ${label}`, r && r.historyId);
+            } catch (e) {
+              toast(e.message || "Couldn't change the status.");
+            }
+          },
+        })),
+      },
+      {
+        label: hasReminder ? '⏰ Reminder' : '⏰ Reminder (none)',
+        children: [
+          {
+            label: hasReminder ? '✏️ Edit reminder…' : '➕ Set reminder…',
+            onClick: async () => openAlarmEditor(await focus()),
+          },
+          ...reminderExportItems(n),
+        ],
+      },
+      {
+        label: '➕ Add',
+        children: noteAddItems({
+          anchor: centerCell,
+          focus,
+          full: async () => (n.id === currentId ? currentNote : api.getNote(n.id)),
+        }),
+      },
+      ...(!isCenter && !card.isRef ? [{ label: '🔀 Connection', children: relationMenuItems(currentId, card) }] : []),
+      {
+        label: '🗑️ Delete',
+        onClick: async () => {
+          if (n.pinned) return toast('Unpin before deleting.');
+          if (!(await confirmDialog(`Delete "${n.title}"?`, { confirmLabel: 'Delete', danger: true }))) return;
+          try {
+            const r = await api.setStatus(n.id, 'deleted');
+            if (n.id === currentId) {
+              allNotesCache = await api.listNotes();
+              renderPinbar();
+              await refreshFromTabs(await api.listTabs());
+            } else {
+              await refreshAfterCardAction(n.id);
+            }
+            undoToast('Note deleted', r && r.historyId);
+          } catch (e) {
+            toast(e.message || "Couldn't delete the note.");
+          }
+        },
+      },
+    ];
+    openActionMenu(anchor, items);
   }
 
   async function openAlarmEditor(note) {
@@ -8530,6 +9116,9 @@
     }
     alarmWindowStartInput.value = existing && existing.windowStart ? existing.windowStart : '08:00';
     alarmWindowEndInput.value = existing && existing.windowEnd ? existing.windowEnd : '23:00';
+    setAlarmTrack((existing && existing.kind === 'anytime' && existing.track) || 0);
+    alarmStatsTarget = current && current.kind === 'anytime' && current.track >= 1 && !isTmp(current.id) ? current : null;
+    alarmStatsBtn.classList.toggle('hidden', !alarmStatsTarget);
     // An existing nudge already carries the user's own days (possibly none, if
     // it's a one-time date) — don't let the all-days default below stomp them.
     alarmNudgeDefaultsDone = !!(existing && existing.kind === 'anytime');
@@ -8674,7 +9263,7 @@
         return;
       }
       const days = selectedAlarmDays();
-      const body = { kind: 'anytime', windowStart, windowEnd, days };
+      const body = { kind: 'anytime', windowStart, windowEnd, days, track: alarmTrack };
       if (days.length === 0) {
         if (!alarmDateInput.value) {
           toast('Pick a date, or choose repeat days.');
@@ -8750,8 +9339,8 @@
       r = await api.removeAlarm(existing.id);
       // Same as the server's notes.last_reminder, so re-adding one right
       // away (even offline) starts from these settings.
-      const { kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd } = existing;
-      const last = JSON.stringify({ kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd });
+      const { kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd, track } = existing;
+      const last = JSON.stringify({ kind, time, days, date, lat, lon, radiusM, geo, windowStart, windowEnd, track });
       alarmEditNote.last_reminder = last;
       if (currentNote && currentNote.id === alarmEditNote.id) currentNote.last_reminder = last;
     }
@@ -8783,6 +9372,14 @@
     const title = document.createElement('div');
     title.className = 'result-title';
     title.textContent = icon + (n.title || 'Untitled');
+    // Header search rows from another scope than the one open (shareId is
+    // only ever set — null included — on those): name where it lives.
+    if (n.shareId !== undefined && n.shareId !== (currentSpace ? currentSpace.id : null)) {
+      const where = document.createElement('span');
+      where.className = 'result-scope';
+      where.textContent = n.shareId == null ? ' · 👤 Personal' : ` · 🔗 ${n.shareTitle || 'Shared space'}`;
+      title.appendChild(where);
+    }
     div.appendChild(title);
     if (n.isCross) {
       const snip = document.createElement('div');
@@ -8806,6 +9403,23 @@
   // Both searches list 'done' notes last (stable — relative order kept).
   function sinkDone(list) {
     return [...list].sort((a, b) => (a.status === 'done' ? 1 : 0) - (b.status === 'done' ? 1 : 0));
+  }
+
+  // Header search order: not-done before done (as everywhere), then the scope
+  // you're in, then personal, then other spaces (already name-ordered by the
+  // server); within each, that search's own ranking. Stable sort.
+  const SEARCH_MAX_ROWS = 30;
+  function orderSearchRows(rows) {
+    const cur = currentSpace ? currentSpace.id : null;
+    const scopeRank = (r) => (r.shareId === cur ? 0 : r.shareId == null ? 1 : 2);
+    return rows
+      .map((r, i) => ({ r, i }))
+      .sort(
+        (a, b) =>
+          (a.r.status === 'done') - (b.r.status === 'done') || scopeRank(a.r) - scopeRank(b.r) || a.i - b.i
+      )
+      .map((x) => x.r)
+      .slice(0, SEARCH_MAX_ROWS);
   }
 
   function renderSearchResults(list) {
@@ -8838,7 +9452,7 @@
     const seq = ++searchSeq;
     clearTimeout(searchDebounce);
     searchDebounce = setTimeout(async () => {
-      const rows = await api.searchNotes(q);
+      const rows = orderSearchRows(await api.searchEverywhere(q));
       if (seq === searchSeq && searchInput.value.trim() === q) renderSearchResults(rows);
     }, 180);
   });
@@ -9174,7 +9788,7 @@
       const note = await api.removeNoteAttachment(pickerAttachTarget);
       if (note.id === currentId) currentNote = note;
       closePicker();
-      toast('Attachment removed.');
+      undoToast('Attachment removed', note.historyId);
       await afterAttach();
     } catch (e) {
       if (e.httpStatus) toast(e.message || "Couldn't remove the attachment.");
@@ -9359,7 +9973,7 @@
         const note = await api.setNoteAttachment(pickerAttachTarget, formData);
         if (note.id === currentId) currentNote = note;
         closePicker();
-        toast('Attachment saved.');
+        undoToast('Attachment saved', note.historyId);
         await afterAttach();
       } catch (e) {
         if (e.httpStatus) toast(e.message || "Couldn't save the attachment.");
@@ -9392,7 +10006,7 @@
         }
         closePicker();
         if (fromId != null && note && note.id != null) await linkAcrossScopes(fromId, note);
-        toast('Created.');
+        undoToast('Created', note && note.historyId);
         await goTo(note.id, 'new');
         return;
       }
@@ -9402,7 +10016,7 @@
         );
         const hadTarget = !!pendingLinkTarget;
         closePicker();
-        toast('Created.');
+        undoToast('Created', note && note.historyId);
         if (hadTarget) {
           await afterAttach();
         } else {
@@ -9416,9 +10030,9 @@
         }
       } else {
         if (title) formData.set('title', title);
-        await api.createAttachment(pendingLinkTarget, formData);
+        const added = await api.createAttachment(pendingLinkTarget, formData);
         closePicker();
-        toast('Added.');
+        undoToast('Added', added && added.historyId);
         await afterAttach();
       }
     } finally {
@@ -9473,22 +10087,40 @@
 
   applyZoom();
 
-  // --- Grid depth cycle button (expands each neighbor cell into its own 3x3) ---
-  // Same icon always; lights up like the palette toggle when depth is raised.
+  // --- Grid view cycle button: titles only → neighbour text → nested 3x3 ---
+  // The icon shows the current view: the same square outline, empty / with
+  // text lines / split 3x3 (inline SVG on currentColor, so all three are the
+  // same size and follow the theme).
+  const GRID_VIEW_ICON_INNER = {
+    titles: '',
+    text: '<path d="M7 8h10M7 12h10M7 16h6"/>',
+    nested: '<path d="M9.67 4v16M14.33 4v16M4 9.67h16M4 14.33h16"/>',
+  };
   function paintDepthBtn() {
-    depthCycleBtn.classList.toggle('active', gridDepth > GRID_DEPTH_MIN);
-    depthCycleBtn.title = `Nested grid depth: ${gridDepth}`;
+    depthCycleBtn.innerHTML =
+      '<svg class="grid-view-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor"' +
+      ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="4" y="4" width="16" height="16" rx="2.5"/>' +
+      GRID_VIEW_ICON_INNER[gridView] +
+      '</svg>';
+    depthCycleBtn.title = `Grid view: ${GRID_VIEW_LABEL[gridView]} — tap to change`;
+    depthCycleBtn.setAttribute('aria-label', `Grid view: ${GRID_VIEW_LABEL[gridView]}`);
   }
   paintDepthBtn();
 
   async function applyGridDepth() {
     paintDepthBtn();
-    localStorage.setItem('nico-notes-grid-depth', String(gridDepth));
+    try {
+      localStorage.setItem('nico-notes-grid-view', gridView);
+    } catch {
+      /* ignore */
+    }
     await render();
   }
 
   depthCycleBtn.addEventListener('click', async () => {
-    gridDepth = gridDepth >= GRID_DEPTH_MAX ? GRID_DEPTH_MIN : gridDepth + 1;
+    gridView = GRID_VIEWS[(GRID_VIEWS.indexOf(gridView) + 1) % GRID_VIEWS.length];
+    toast(GRID_VIEW_LABEL[gridView]);
     await applyGridDepth();
   });
 
@@ -9566,7 +10198,6 @@
     colorModeBtn.title = `Colour coding: ${COLOR_LABEL[colorMode]}`;
     // Each mode gets its own colour (off = transparent) so the button itself
     // shows which one is active, not just its hover tooltip.
-    colorModeBtn.classList.toggle('mode-path', colorMode === 'path');
     colorModeBtn.classList.toggle('mode-note', colorMode === 'note');
     localStorage.setItem('nico-notes-color-mode', colorMode);
   }
@@ -9619,6 +10250,9 @@
     total.textContent = `${data.totalEvents} navigation events on record (last 90 days).`;
     insightsBody.appendChild(total);
 
+    const practice = await insightsPracticeSection();
+    if (practice) insightsBody.appendChild(practice);
+
     const h1 = document.createElement('h3');
     h1.textContent = 'Most visited';
     insightsBody.appendChild(h1);
@@ -9667,6 +10301,397 @@
     );
   }
 
+  // --- Practice statistics for a tracked nudge (📈) ---------------------------
+  // GET /api/alarms/:id/stats → per-day states (server/reminders.js daySeries)
+  // for the last 30 days / 365 days / everything. Month = a calendar of days;
+  // Year/All = done-rate bars per week / per month. Below either, the ★ rating
+  // line over the same buckets (its own chart — never a second y-axis), then a
+  // table view of the same numbers. Online-only.
+  const nudgeStatsOverlay = document.getElementById('nudge-stats-overlay');
+  const nudgeStatsTitle = document.getElementById('nudge-stats-title');
+  const nudgeStatsBody = document.getElementById('nudge-stats-body');
+  const nudgeStatsRangeRow = document.getElementById('nudge-stats-range');
+  let nudgeStatsFor = null;
+  let nudgeStatsRange = 'month';
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svgEl(tag, attrs = {}, parent) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    if (parent) parent.appendChild(el);
+    return el;
+  }
+  const STAT_STATE_LABEL = { done: 'Done', skip: 'Skipped', missed: 'Missed', open: 'Not answered yet' };
+  const utcDate = (day) => new Date(`${day}T00:00:00Z`);
+  const fmtDay = (day, opts) => utcDate(day).toLocaleDateString(undefined, { timeZone: 'UTC', ...opts });
+  function weekStartOf(day) {
+    const d = utcDate(day);
+    d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7)); // back to Monday
+    return d.toISOString().slice(0, 10);
+  }
+  const pct = (n, of) => (of ? Math.round((n / of) * 100) : 0);
+  const avg = (xs) => (xs.length ? Math.round((xs.reduce((a, b) => a + b, 0) / xs.length) * 10) / 10 : null);
+
+  // Days → chart buckets: one per day (month), Monday-week (year), calendar
+  // month (all). `answered` = done + skip + missed (an open today isn't yet).
+  function statBuckets(days, range) {
+    const keyOf = range === 'month' ? (d) => d : range === 'year' ? weekStartOf : (d) => d.slice(0, 7);
+    const out = [];
+    for (const d of days) {
+      const key = keyOf(d.day);
+      let b = out[out.length - 1];
+      if (!b || b.key !== key) {
+        b = { key, from: d.day, done: 0, answered: 0, ratings: [], snoozes: 0, day: d };
+        out.push(b);
+      }
+      if (d.state === 'done') b.done++;
+      if (d.state === 'done' || d.state === 'skip' || d.state === 'missed') b.answered++;
+      if (d.rating != null) b.ratings.push(d.rating);
+      b.snoozes += d.snoozes;
+    }
+    for (const b of out) b.rating = avg(b.ratings);
+    return out;
+  }
+  function bucketLabel(b, range) {
+    if (range === 'month') return fmtDay(b.key, { weekday: 'short', day: 'numeric', month: 'short' });
+    if (range === 'year') return `Week of ${fmtDay(b.key, { day: 'numeric', month: 'short' })}`;
+    return fmtDay(`${b.key}-01`, { month: 'long', year: 'numeric' });
+  }
+
+  // Month: a Mon–Sun calendar. Fill + outline both encode the state, so it
+  // never rests on colour alone: done = solid, skipped = pale fill, missed =
+  // outline only, open = dashed outline, not scheduled = faint.
+  function monthCalendar(days, width) {
+    const gap = 4;
+    const cell = Math.min(40, Math.floor((width - gap * 6) / 7));
+    const lead = (utcDate(days[0].day).getUTCDay() + 6) % 7;
+    const rows = Math.ceil((lead + days.length) / 7);
+    const head = 16;
+    const svg = svgEl('svg', {
+      class: 'stats-chart',
+      width: cell * 7 + gap * 6,
+      height: head + rows * (cell + gap),
+      role: 'img',
+      'aria-label': 'Each day of the last 30 days',
+    });
+    ['M', 'T', 'W', 'T', 'F', 'S', 'S'].forEach((t, i) => {
+      const tx = svgEl('text', { x: i * (cell + gap) + cell / 2, y: 11, class: 'stats-axis', 'text-anchor': 'middle' }, svg);
+      tx.textContent = t;
+    });
+    days.forEach((d, i) => {
+      const k = lead + i;
+      const x = (k % 7) * (cell + gap);
+      const y = head + Math.floor(k / 7) * (cell + gap);
+      const g = svgEl('g', { class: 'stats-hit', 'data-tip': dayTip(d) }, svg);
+      svgEl('rect', { x: x + 1, y: y + 1, width: cell - 2, height: cell - 2, rx: 4, class: `stats-day is-${d.state || 'none'}` }, g);
+      const num = svgEl('text', { x: x + 5, y: y + 13, class: `stats-daynum${d.state === 'done' ? ' on-accent' : ''}` }, g);
+      num.textContent = String(Number(d.day.slice(8)));
+      if (d.rating != null && cell >= 30) {
+        const r = svgEl('text', { x: x + cell - 5, y: y + cell - 6, 'text-anchor': 'end', class: `stats-daynum${d.state === 'done' ? ' on-accent' : ''}` }, g);
+        r.textContent = `★${d.rating}`;
+      }
+    });
+    return svg;
+  }
+  function dayTip(d) {
+    const bits = [fmtDay(d.day, { weekday: 'short', day: 'numeric', month: 'short' }), STAT_STATE_LABEL[d.state] || 'Not scheduled'];
+    if (d.rating != null) bits.push(`★ ${d.rating}`);
+    if (d.snoozes) bits.push(`snoozed ${d.snoozes}×`);
+    return bits.join(' · ');
+  }
+
+  // A bar with only its data end rounded, anchored flat on the baseline.
+  function topRoundedBar(x, y, w, h, r) {
+    r = Math.min(r, w / 2, h);
+    return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
+  }
+
+  // Shared frame for the bar + rating charts: plot area, y gridlines with
+  // labels, x labels thinned so they never collide, and one full-height
+  // transparent hit column per bucket carrying the tooltip.
+  function statsFrame(buckets, width, height, yTicks, yFmt, xLabel, tipOf, label) {
+    const pad = { l: 34, r: 6, t: 8, b: 20 };
+    const svg = svgEl('svg', { class: 'stats-chart', width, height, role: 'img', 'aria-label': label });
+    const pw = width - pad.l - pad.r;
+    const ph = height - pad.t - pad.b;
+    const step = pw / buckets.length;
+    const [y0, y1] = [yTicks[0], yTicks[yTicks.length - 1]];
+    const yAt = (v) => pad.t + ph - ((v - y0) / (y1 - y0)) * ph;
+    for (const t of yTicks) {
+      svgEl('line', { x1: pad.l, x2: width - pad.r, y1: yAt(t), y2: yAt(t), class: t === y0 ? 'stats-base' : 'stats-grid' }, svg);
+      const tx = svgEl('text', { x: pad.l - 6, y: yAt(t) + 4, 'text-anchor': 'end', class: 'stats-axis' }, svg);
+      tx.textContent = yFmt(t);
+    }
+    let lastX = -Infinity;
+    buckets.forEach((b, i) => {
+      const lbl = xLabel(b, i, buckets);
+      const cx = pad.l + step * (i + 0.5);
+      if (lbl && cx - lastX >= 34) {
+        const tx = svgEl('text', { x: cx, y: height - 5, 'text-anchor': 'middle', class: 'stats-axis' }, svg);
+        tx.textContent = lbl;
+        lastX = cx;
+      }
+    });
+    const marks = svgEl('g', {}, svg);
+    const hits = svgEl('g', {}, svg);
+    buckets.forEach((b, i) => {
+      svgEl('rect', { x: pad.l + step * i, y: pad.t, width: step, height: ph, class: 'stats-hit stats-col', 'data-tip': tipOf(b) }, hits);
+    });
+    return { svg, marks, step, pad, yAt, x: (i) => pad.l + step * i };
+  }
+
+  // Year: a month name on each month's first week. All: the year on
+  // January, the month's initial otherwise.
+  function xLabelFor(range) {
+    if (range === 'year') {
+      return (b, i, all) =>
+        i === 0 || all[i - 1].key.slice(5, 7) !== b.key.slice(5, 7) ? fmtDay(b.key, { month: 'short' }) : '';
+    }
+    return (b) => (b.key.slice(5) === '01' ? b.key.slice(0, 4) : fmtDay(`${b.key}-01`, { month: 'narrow' }));
+  }
+
+  function doneBars(buckets, range, width) {
+    const f = statsFrame(
+      buckets,
+      width,
+      160,
+      [0, 50, 100],
+      (t) => `${t}%`,
+      xLabelFor(range),
+      (b) => `${bucketLabel(b, range)} · ${b.answered ? `${b.done}/${b.answered} done (${pct(b.done, b.answered)}%)` : 'nothing scheduled'}`,
+      range === 'year' ? 'Share of days done, per week' : 'Share of days done, per month'
+    );
+    const gap = f.step > 6 ? 2 : f.step > 3 ? 1 : 0;
+    buckets.forEach((b, i) => {
+      if (!b.answered) return;
+      const y = f.yAt(pct(b.done, b.answered));
+      const h = f.yAt(0) - y;
+      if (h <= 0) return;
+      svgEl('path', { d: topRoundedBar(f.x(i) + gap / 2, y, Math.max(1, f.step - gap), h, 4), class: 'stats-bar' }, f.marks);
+    });
+    return f.svg;
+  }
+
+  function ratingLine(buckets, range, width) {
+    const f = statsFrame(
+      buckets,
+      width,
+      130,
+      [1, 2, 3, 4, 5],
+      (t) => `${t}★`,
+      range === 'month' ? (b, i) => (i % 7 === 0 ? fmtDay(b.key, { day: 'numeric', month: 'short' }) : '') : xLabelFor(range),
+      (b) => `${bucketLabel(b, range)} · ${b.rating != null ? `★ ${b.rating}${b.ratings.length > 1 ? ` (${b.ratings.length} ratings)` : ''}` : 'no rating'}`,
+      'Average rating'
+    );
+    // Unrated buckets are skipped and the line runs straight through them —
+    // it's the trend that matters, and isolated dots read as noise.
+    const pts = buckets.map((b, i) => (b.rating != null ? [f.x(i) + f.step / 2, f.yAt(b.rating)] : null)).filter(Boolean);
+    const d = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join('');
+    if (d) svgEl('path', { d, class: 'stats-line' }, f.marks);
+    const r = f.step >= 10 ? 4 : 2.5;
+    pts.forEach((p) => svgEl('circle', { cx: p[0], cy: p[1], r, class: 'stats-dot' }, f.marks));
+    return f.svg;
+  }
+
+  function statTile(value, label, sub) {
+    const t = document.createElement('div');
+    t.className = 'stats-tile';
+    const v = document.createElement('div');
+    v.className = 'stats-tile-value';
+    v.textContent = value;
+    const l = document.createElement('div');
+    l.className = 'stats-tile-label';
+    l.textContent = label;
+    t.append(v, l);
+    if (sub) {
+      const s = document.createElement('div');
+      s.className = 'stats-tile-sub';
+      s.textContent = sub;
+      t.appendChild(s);
+    }
+    return t;
+  }
+
+  function statsHeading(text) {
+    const h = document.createElement('h3');
+    h.textContent = text;
+    return h;
+  }
+
+  function renderNudgeStats(data) {
+    const { days, summary: s, range } = data;
+    nudgeStatsBody.innerHTML = '';
+    if (!days.length) {
+      const p = document.createElement('p');
+      p.className = 'muted';
+      p.textContent = 'Nothing logged yet — answer this nudge with Done, Skip or Snooze and it shows up here.';
+      nudgeStatsBody.appendChild(p);
+      return;
+    }
+    const ratingCount = days.filter((d) => d.rating != null).length;
+    const tiles = document.createElement('div');
+    tiles.className = 'stats-tiles';
+    tiles.append(
+      statTile(`${pct(s.done, s.scheduled)}%`, 'Done', `${s.done} of ${s.scheduled} days`),
+      statTile(`🔥 ${s.streak}`, 'Streak', `best ${s.bestStreak}`),
+      statTile(s.avgRating != null ? `★ ${s.avgRating}` : '–', 'Rating', `${ratingCount} rated`),
+      statTile(String(s.skip + s.missed), 'Not done', `${s.skip} skipped · ${s.missed} missed`)
+    );
+    nudgeStatsBody.appendChild(tiles);
+
+    const width = Math.max(240, nudgeStatsBody.clientWidth || 320);
+    const buckets = statBuckets(days, range);
+    if (range === 'month') {
+      nudgeStatsBody.appendChild(statsHeading('Each day'));
+      nudgeStatsBody.appendChild(monthCalendar(days, width));
+      const legend = document.createElement('div');
+      legend.className = 'stats-legend';
+      for (const [st, lbl] of [['done', 'Done'], ['skip', 'Skipped'], ['missed', 'Missed'], ['open', 'Today']]) {
+        const item = document.createElement('span');
+        const sw = svgEl('svg', { width: 12, height: 12, 'aria-hidden': 'true' });
+        svgEl('rect', { x: 1, y: 1, width: 10, height: 10, rx: 2, class: `stats-day is-${st}` }, sw);
+        item.append(sw, document.createTextNode(lbl));
+        legend.appendChild(item);
+      }
+      nudgeStatsBody.appendChild(legend);
+    } else {
+      nudgeStatsBody.appendChild(statsHeading(range === 'year' ? 'Done, per week' : 'Done, per month'));
+      nudgeStatsBody.appendChild(doneBars(buckets, range, width));
+    }
+    if (ratingCount) {
+      nudgeStatsBody.appendChild(statsHeading('How it went'));
+      nudgeStatsBody.appendChild(ratingLine(buckets, range, width));
+    }
+
+    // The same numbers as a table, for reading exact values.
+    const det = document.createElement('details');
+    det.className = 'stats-table-wrap';
+    const sum = document.createElement('summary');
+    sum.textContent = 'Show as table';
+    const table = document.createElement('table');
+    table.className = 'stats-table';
+    const headRow = table.createTHead().insertRow();
+    for (const h of [range === 'month' ? 'Day' : range === 'year' ? 'Week' : 'Month', 'Done', 'Rating']) {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
+    }
+    const tb = table.createTBody();
+    for (const b of [...buckets].reverse()) {
+      const row = tb.insertRow();
+      row.insertCell().textContent = bucketLabel(b, range);
+      row.insertCell().textContent =
+        range === 'month' ? STAT_STATE_LABEL[b.day.state] || '–' : b.answered ? `${b.done}/${b.answered}` : '–';
+      row.insertCell().textContent = b.rating != null ? `★ ${b.rating}` : '–';
+    }
+    det.append(sum, table);
+    nudgeStatsBody.appendChild(det);
+  }
+
+  async function openNudgeStats(a, range = nudgeStatsRange) {
+    nudgeStatsFor = a;
+    nudgeStatsRange = range;
+    nudgeStatsTitle.textContent = `📈 ${a.title || 'Statistics'}`;
+    nudgeStatsRangeRow.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.range === range));
+    nudgeStatsBody.textContent = 'Loading…';
+    nudgeStatsOverlay.classList.remove('hidden');
+    const data = await api.getAlarmStats(a.id, range);
+    if (nudgeStatsFor !== a || nudgeStatsRange !== range) return; // a newer open/range won
+    if (!data) {
+      nudgeStatsBody.textContent = net.online ? "Couldn't load the statistics." : 'Statistics need a connection.';
+      return;
+    }
+    renderNudgeStats(data);
+  }
+
+  nudgeStatsRangeRow.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-range]');
+    if (b && nudgeStatsFor) openNudgeStats(nudgeStatsFor, b.dataset.range);
+  });
+  const closeNudgeStats = () => {
+    nudgeStatsOverlay.classList.add('hidden');
+    nudgeStatsFor = null;
+    hideStatsTip();
+  };
+  document.getElementById('nudge-stats-close').addEventListener('click', closeNudgeStats);
+  nudgeStatsOverlay.addEventListener('click', (e) => {
+    if (e.target === nudgeStatsOverlay) closeNudgeStats();
+  });
+
+  // One tooltip for every stats chart (here and the Insights mini strips):
+  // any element with data-tip, on hover or tap.
+  let statsTip = null;
+  function hideStatsTip() {
+    if (statsTip) statsTip.classList.add('hidden');
+  }
+  function showStatsTip(target, x, y) {
+    if (!statsTip) {
+      statsTip = document.createElement('div');
+      statsTip.className = 'stats-tip hidden';
+      document.body.appendChild(statsTip);
+    }
+    statsTip.textContent = target.getAttribute('data-tip');
+    statsTip.classList.remove('hidden');
+    const w = statsTip.offsetWidth;
+    const h = statsTip.offsetHeight;
+    statsTip.style.left = `${Math.max(8, Math.min(x - w / 2, window.innerWidth - w - 8))}px`;
+    statsTip.style.top = `${y - h - 12 < 8 ? y + 16 : y - h - 12}px`;
+  }
+  for (const root of [nudgeStatsBody, insightsBody]) {
+    root.addEventListener('pointermove', (e) => {
+      const t = e.target.closest('[data-tip]');
+      if (t) showStatsTip(t, e.clientX, e.clientY);
+      else hideStatsTip();
+    });
+    root.addEventListener('pointerdown', (e) => {
+      const t = e.target.closest('[data-tip]');
+      if (t) showStatsTip(t, e.clientX, e.clientY);
+    });
+    root.addEventListener('pointerleave', (e) => {
+      if (e.pointerType === 'mouse') hideStatsTip();
+    });
+  }
+  document.addEventListener('scroll', hideStatsTip, true);
+
+  // Insights' "Practice" section: each tracked nudge with its last 30 days as
+  // a small strip of squares (same encoding as the month calendar), done %
+  // and average rating; the title opens the full statistics.
+  async function insightsPracticeSection() {
+    const tracked = alarms.filter((a) => a.kind === 'anytime' && a.track >= 1 && !isTmp(a.id));
+    if (!tracked.length || !net.online) return null;
+    const results = await Promise.all(tracked.map((a) => api.getAlarmStats(a.id, 'month')));
+    const wrap = document.createElement('div');
+    wrap.appendChild(statsHeading('Practice — last 30 days'));
+    const list = document.createElement('ul');
+    list.className = 'practice-list';
+    tracked.forEach((a, i) => {
+      const data = results[i];
+      if (!data || !data.days.length) return;
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'linkish';
+      name.textContent = a.title;
+      name.addEventListener('click', () => openNudgeStats(a, 'month'));
+      const strip = svgEl('svg', { class: 'stats-strip', width: 30 * 8, height: 10, role: 'img', 'aria-label': 'Last 30 days' });
+      const pad = 30 - data.days.length;
+      data.days.forEach((d, k) => {
+        const g = svgEl('g', { 'data-tip': dayTip(d) }, strip);
+        svgEl('rect', { x: (pad + k) * 8 + 1, y: 1, width: 6, height: 8, rx: 1.5, class: `stats-day is-${d.state || 'none'}` }, g);
+      });
+      const s = data.summary;
+      const meta = document.createElement('span');
+      meta.className = 'muted';
+      meta.textContent = ` ${pct(s.done, s.scheduled)}%${s.avgRating != null ? ` · ★ ${s.avgRating}` : ''}${s.streak >= 2 ? ` · 🔥 ${s.streak}` : ''}`;
+      const top = document.createElement('div');
+      top.append(name, meta);
+      li.append(top, strip);
+      list.appendChild(li);
+    });
+    if (!list.childElementCount) return null;
+    wrap.appendChild(list);
+    return wrap;
+  }
+
   // --- Map overlay: every located note as a pin on OpenStreetMap ---
   const mapOverlay = document.getElementById('map-overlay');
   const mapOverlayClose = document.getElementById('map-overlay-close');
@@ -9697,9 +10722,9 @@
   let mapTrailLayer = null;
 
   // Note pins on/off — a plain visibility toggle like Trail's, replacing the
-  // old Plain/Heat colour-mode buttons (that just duplicated the header's 🎨
+  // old Plain/Heat colour-mode buttons (that just duplicated the header's 🔥
   // colour-coding toggle without doing anything map-specific). Colour mode
-  // itself is still whatever 🎨 is set to app-wide; this only shows/hides
+  // itself is still whatever 🔥 is set to app-wide; this only shows/hides
   // the pins. Defaults on.
   let notesVisible = localStorage.getItem('nico-map-notes-visible') !== '0';
 
@@ -11476,6 +12501,7 @@
     latest: document.getElementById('bar-toggle-latest'),
     todos: document.getElementById('bar-toggle-todos'),
     alarms: document.getElementById('bar-toggle-alarms'),
+    orphans: document.getElementById('bar-toggle-orphans'),
   };
   Object.entries(barToggleEls).forEach(([key, el]) => {
     el.addEventListener('change', () => setBarPref(key, el.checked));

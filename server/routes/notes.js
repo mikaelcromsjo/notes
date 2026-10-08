@@ -58,6 +58,11 @@ router.post('/encrypt-geo', wrap((req) => notesCore.encryptGeo(db, req.userId, r
 // reason as "/search" above.
 router.get('/full', wrap((req) => notesCore.listFull(db, req.userId)));
 
+// The inbox row: every note outside its scope's home tree (orphans, separate
+// trees, cross-linked-only notes), one item per tree top — see notes.js's
+// inbox. Must be declared before "/:id" like "/full".
+router.get('/inbox', wrap((req) => notesCore.inbox(db, req.userId)));
+
 // The inferred hierarchy as a flat { childId: parentId } map (roots omitted).
 // Must be declared before "/:id" like "/full".
 router.get('/hierarchy-parents', wrap((req) => notesCore.hierarchyParents(db, req.userId)));

@@ -25,7 +25,7 @@ function buildHierarchy(scope) {
   const notesClause = scopeClause(scope);
   const notes = db
     .prepare(
-      `SELECT id, title, status, created_from_note_id, created_at FROM notes
+      `SELECT id, title, status, created_from_note_id, created_at, updated_at FROM notes
        WHERE ${notesClause.sql} AND status != 'deleted'`
     )
     .all(...notesClause.params);

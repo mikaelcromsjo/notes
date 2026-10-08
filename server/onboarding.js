@@ -36,7 +36,7 @@ const CHAIN = [
   },
   {
     title: '👆 Tap zones',
-    body: "A card's top half opens it to read — rendered, tap a [[wikilink]] straight away, no keyboard. The bottom half opens it straight into editing.\n\nSame for any card, not just this one.",
+    body: "Tap a card to open it to read — rendered, tap a [[wikilink]] straight away, no keyboard. The ✏️ in its lower-left corner opens it straight into editing.\n\nSame for any card, not just this one: tapping a neighbour centres it, its ✏️ centres it and opens the editor.",
   },
   {
     title: '🫳 Move it',
@@ -67,8 +67,8 @@ const CHAIN = [
     body: "Tap the bell up top — that's the agenda: everything due at a glance.",
   },
   {
-    title: '🗺️ Check the map',
-    body: 'Tap the map icon up top. Any note carrying a location shows up there.',
+    title: '📍 Check the map',
+    body: 'Tap the 📍 map icon up top. Any note carrying a location shows up there.',
   },
   {
     title: '💡 Tips: attachments & wikilinks',

@@ -30,7 +30,7 @@
       "text": "text",
       "url": "url",
       "files": [
-        { "name": "media", "accept": ["image/*", "audio/*", "video/*", "application/*", "text/*"] }
+        { "name": "media", "accept": ["image/*", "audio/*", "video/*", "application/*", "text/*", "text/vcard", "text/x-vcard", "text/directory", ".vcf"] }
       ]
     }
   }

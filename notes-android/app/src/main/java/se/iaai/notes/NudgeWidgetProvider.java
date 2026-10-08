@@ -182,11 +182,25 @@ public class NudgeWidgetProvider extends AppWidgetProvider {
         int textId = TEXT_IDS[nextChild];
 
         theme.applyToNudgeTile(views, textId, chosen.optBoolean("due", true));
-        views.setTextViewText(textId, "🌊 " + chosen.optString("title", "Untitled"));
+        views.setTextViewText(textId, "🌊 " + chosen.optString("title", "Untitled")
+                + weekLine(chosen.optJSONObject("week")));
         Intent open = new Intent(Intent.ACTION_VIEW, Uri.parse(chosen.optString("url", baseUrl + "/")));
         views.setOnClickPendingIntent(textId, PendingIntent.getActivity(context, widgetId, open, flags));
         views.setDisplayedChild(R.id.nudge_flipper, nextChild);
         prefs.edit().putInt(childKey(widgetId), nextChild).apply();
+    }
+
+    // "\n✓ 5/7 · ★ 3.8" from ?mode=nudge's `week` ({done, scheduled,
+    // avgRating} over the last 7 days, server/reminders.js weekStats) — empty
+    // until the nudge has any logged Done/Skip/Snooze.
+    private static String weekLine(JSONObject week) {
+        if (week == null || week.optInt("scheduled", 0) == 0) return "";
+        String line = "\n✓ " + week.optInt("done", 0) + "/" + week.optInt("scheduled", 0);
+        if (!week.isNull("avgRating")) {
+            double avg = week.optDouble("avgRating", 0);
+            line += " · ★ " + (avg == Math.floor(avg) ? String.valueOf((int) avg) : String.valueOf(avg));
+        }
+        return line;
     }
 
     private void fetchAndApply(Context context, AppWidgetManager appWidgetManager, int widgetId,

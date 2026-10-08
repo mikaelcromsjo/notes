@@ -30,7 +30,7 @@ const stagingDir = path.join(dir, 'staging');
 const STAGING_TTL_MS = 60 * 60 * 1000;
 
 // Every table a restore replaces, in insert order (notes first).
-const TABLES = ['notes', 'links', 'personal_refs', 'tabs', 'reminders', 'nav_events', 'import_source', 'history'];
+const TABLES = ['notes', 'links', 'personal_refs', 'tabs', 'reminders', 'reminder_events', 'nav_events', 'import_source', 'history'];
 // The users columns that travel with an account backup.
 const USER_COLS = ['digest_cadence', 'digest_hour', 'digest_tz', 'digest_channel', 'theme_prefs', 'root_note_id'];
 const ATTACHMENT_TYPES = new Set(['image', 'audio', 'file']);
@@ -211,6 +211,7 @@ function clearCurrent(u) {
   db.prepare(`DELETE FROM links WHERE note_a IN (${mine}) OR note_b IN (${mine})`).run(u, u);
   db.prepare(`DELETE FROM tabs WHERE user_id = ? OR note_id IN (${mine})`).run(u, u);
   db.prepare(`DELETE FROM reminders WHERE user_id = ? OR note_id IN (${mine})`).run(u, u);
+  db.prepare(`DELETE FROM reminder_events WHERE user_id = ? OR note_id IN (${mine})`).run(u, u);
   db.prepare(`DELETE FROM nav_events WHERE user_id = ? OR to_note_id IN (${mine})`).run(u, u);
   db.prepare(`UPDATE nav_events SET from_note_id = NULL WHERE from_note_id IN (${mine})`).run(u);
   db.prepare(`DELETE FROM import_source WHERE user_id = ? OR note_id IN (${mine})`).run(u, u);
@@ -341,14 +342,34 @@ function loadRows(snap, userId, sourceUserId, { remap, untrusted }) {
   }
 
   const reminderTaken = db.prepare('SELECT 1 FROM reminders WHERE id = ?');
+  const remMap = new Map();
   for (const r of read('reminders', 'user_id = ?', src)) {
     const nid = M(r.note_id);
     if (!acc(nid)) continue;
+    const oldId = r.id;
     // Keep the id (undo history refers to it) unless something else has it.
     if (remap || reminderTaken.get(r.id)) delete r.id;
     Object.assign(r, { user_id: userId, note_id: nid });
-    insertRow('reminders', r);
+    const info = insertRow('reminders', r);
+    remMap.set(oldId, r.id != null ? r.id : Number(info.lastInsertRowid));
     counts.reminders++;
+  }
+
+  // Outcome log: follows its reminder's (possibly new) id; rows of a
+  // reminder that's gone keep their old id unless that's someone else's now.
+  const remOwner = db.prepare('SELECT user_id FROM reminders WHERE id = ?');
+  for (const e of read('reminder_events', 'user_id = ?', src)) {
+    const nid = M(e.note_id);
+    if (!acc(nid)) continue;
+    let rid = remMap.get(e.reminder_id);
+    if (rid == null) {
+      const owner = remOwner.get(e.reminder_id);
+      if (remap || (owner && owner.user_id !== userId)) continue;
+      rid = e.reminder_id;
+    }
+    delete e.id;
+    Object.assign(e, { user_id: userId, note_id: nid, reminder_id: rid });
+    insertRow('reminder_events', e);
   }
 
   for (const e of read('nav_events', 'user_id = ?', src)) {
@@ -477,6 +498,7 @@ function writeAccountDb(userId) {
       personal_refs: ['user_id = ?', [userId]],
       tabs: ['user_id = ?', [userId]],
       reminders: ['user_id = ?', [userId]],
+      reminder_events: ['user_id = ?', [userId]],
       nav_events: ['user_id = ?', [userId]],
       import_source: ['user_id = ?', [userId]],
       history: ['user_id = ?', [userId]],

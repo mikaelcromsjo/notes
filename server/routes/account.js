@@ -406,6 +406,7 @@ router.get('/delete-confirm', (req, res) => {
   db.transaction(() => {
     for (const sql of [
       'DELETE FROM reminders WHERE user_id = ?',
+      'DELETE FROM reminder_events WHERE user_id = ?',
       'DELETE FROM import_source WHERE user_id = ?',
       'DELETE FROM import_jobs WHERE user_id = ?',
       'DELETE FROM nav_events WHERE user_id = ?',

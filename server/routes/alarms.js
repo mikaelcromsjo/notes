@@ -37,15 +37,21 @@ router.put('/:id', wrap((req) => reminders.update(db, req.userId, req.params.id,
 
 router.delete('/:id', wrap((req) => reminders.remove(db, req.userId, req.params.id)));
 
-// "OK" on the popup — quiet until the reminder next goes off. The client sends
-// the rolled-forward nextAt so the scheduler re-arms for that occurrence; any
-// active snooze is spent.
+// Done / Skip (`outcome`) — quiet until the reminder next goes off. The client
+// sends the rolled-forward nextAt so the scheduler re-arms for that
+// occurrence; any active snooze is spent. Logged in reminder_events.
 router.post('/:id/ack', wrap((req) => reminders.ack(db, req.userId, req.params.id, req.body)));
 
 // Push the reminder out to an absolute instant (weeks/months). The client
 // computes `until` in the viewer's timezone; the scheduler treats snooze_until
 // as the due time while it is set.
 router.post('/:id/snooze', wrap((req) => reminders.snooze(db, req.userId, req.params.id, req.body)));
+
+// Per-day outcomes + totals for the statistics view (?range=month|year|all).
+router.get('/:id/stats', wrap((req) => reminders.stats(db, req.userId, req.params.id, req.query)));
+
+// Optional 1-5 rating on a 'done' (nudges) — `at` = that ack's own `at`.
+router.post('/:id/rate', wrap((req) => reminders.rate(db, req.userId, req.params.id, req.body)));
 
 // Roll the next-ring instant forward (client does this on every poll while the
 // app is open, so future occurrences stay armed for push).

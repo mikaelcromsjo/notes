@@ -430,6 +430,27 @@ function searchShare(db, userId, shareId, opts) {
   return searchScoped(db, { shareId }, opts, encrypted);
 }
 
+// The header search's cross-space half: every space this user is a member
+// of, each searched with its usual ranking (searchScoped — done notes last),
+// spaces in name order, every row tagged shareId/shareTitle. The client puts
+// its own scope first and merges in the local personal search.
+function searchAllShares(db, userId, opts) {
+  const encrypted = encryption.getPrefs(db, userId).enabled;
+  const shares = db
+    .prepare(
+      `SELECT s.id, s.title FROM shares s JOIN share_members sm ON sm.share_id = s.id
+        WHERE sm.user_id = ? ORDER BY s.title COLLATE NOCASE`
+    )
+    .all(userId);
+  const out = [];
+  for (const sh of shares) {
+    for (const r of searchScoped(db, { shareId: sh.id }, opts, encrypted)) {
+      out.push({ ...r, shareId: sh.id, shareTitle: sh.title });
+    }
+  }
+  return out;
+}
+
 // The landing note for entering a share — the spacesbar chip, the Account
 // panel's "Open" button, an invite-accept redirect with no ?center=. Same
 // "probable root" picking logic as a personal graph's own landing note and
@@ -815,6 +836,7 @@ module.exports = {
   listShareLinks,
   hierarchyParents,
   searchShare,
+  searchAllShares,
   shareRootNote,
   dissolveShare,
   inviteEditor,

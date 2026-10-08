@@ -35,10 +35,10 @@
         <button id="zoom-reset-btn" class="icon-btn zoom-level" title="Reset zoom">100%</button>
         <button id="zoom-in-btn" class="icon-btn" title="Zoom in" aria-label="Zoom in">+</button>
       </div>
-      <button id="depth-cycle-btn" class="icon-btn" title="Nested grid depth" aria-label="Cycle nested grid depth">🔲</button>
-      <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🎨</button>
-      <button id="theme-btn" class="icon-btn" title="Themes — colours, fonts, backgrounds" aria-label="Open theme settings">🖌️</button>
-      <button id="map-btn" class="icon-btn" title="Map of notes" aria-label="Open map of notes">🗺️</button>
+      <button id="depth-cycle-btn" class="icon-btn" title="Grid view" aria-label="Cycle grid view">🔲</button>
+      <button id="color-mode-btn" class="icon-btn" title="Colour coding: off" aria-label="Cycle colour coding">🔥</button>
+      <button id="theme-btn" class="icon-btn" title="Themes — colours, fonts, backgrounds" aria-label="Open theme settings">🎨</button>
+      <button id="map-btn" class="icon-btn" title="Map of notes" aria-label="Open map of notes">📍</button>
       <button id="graph-btn" class="icon-btn" title="Graph view — explore the note graph visually" aria-label="Open graph view">🌐</button>
       <button id="agenda-btn" class="icon-btn" title="Agenda — what's due" aria-label="Open agenda">🔔<span id="agenda-badge" class="agenda-badge hidden"></span></button>
       <button id="insights-btn" class="icon-btn" title="Insights" aria-label="Open insights">📊</button>
@@ -54,6 +54,7 @@
   <nav id="latestbar" class="tabbar latestbar hidden"></nav>
   <nav id="todobar" class="tabbar todobar hidden"></nav>
   <nav id="alarmbar" class="tabbar alarmbar hidden"></nav>
+  <nav id="orphanbar" class="tabbar orphanbar hidden"></nav>
 
   <main id="grid" class="grid">
     <!-- 9 cells: index 4 is the center note, others are neighbors -->
@@ -241,6 +242,11 @@
             <span class="alarm-window-sep">–</span>
             <input type="time" id="alarm-window-end-input" class="alarm-time-input" />
           </div>
+          <div class="alarm-kind-row alarm-track-row">
+            <button type="button" id="alarm-track-btn" class="alarm-kind-btn" aria-pressed="false" title="Ask Done / Skip / Snooze and count it in the stats">✅ Track</button>
+            <button type="button" id="alarm-rate-btn" class="alarm-kind-btn" aria-pressed="false" title="Ask for ★1–5 after Done (turns Track on)">⭐ Rate</button>
+          </div>
+          <button type="button" id="alarm-stats-btn" class="secondary alarm-stats-btn hidden">📈 Statistics</button>
         </div>
         <div class="alarm-repeat-label">Repeat</div>
         <div class="alarm-days-row" id="alarm-days-row"></div>
@@ -271,6 +277,21 @@
         <button id="alarm-remove-btn" class="secondary hidden">Remove</button>
         <button id="alarm-cancel-btn" class="secondary">Cancel</button>
       </div>
+    </div>
+  </div>
+
+  <!-- A tracked nudge's practice statistics (openNudgeStats in app.js) —
+       after #alarm-overlay so it stacks above the editor it's opened from. -->
+  <div id="nudge-stats-overlay" class="overlay hidden">
+    <div class="picker nudge-stats-panel" role="dialog" aria-modal="true" aria-labelledby="nudge-stats-title">
+      <button id="nudge-stats-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
+      <h2 id="nudge-stats-title">📈 Statistics</h2>
+      <div class="alarm-kind-row nudge-stats-range" id="nudge-stats-range">
+        <button type="button" data-range="month" class="alarm-kind-btn active">Month</button>
+        <button type="button" data-range="year" class="alarm-kind-btn">Year</button>
+        <button type="button" data-range="all" class="alarm-kind-btn">All</button>
+      </div>
+      <div id="nudge-stats-body" class="nudge-stats-body"></div>
     </div>
   </div>
 
@@ -448,6 +469,15 @@
                 <span class="settings-toggle-sub">Notes with a wake-up set</span>
               </span>
               <input type="checkbox" id="bar-toggle-alarms" />
+              <span class="settings-switch" aria-hidden="true"></span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-text">
+                <span class="settings-toggle-title">Orphans</span>
+                <span class="settings-toggle-sub">Inbox: notes not under your home note yet, in every space</span>
+              </span>
+              <input type="checkbox" id="bar-toggle-orphans" />
               <span class="settings-switch" aria-hidden="true"></span>
             </label>
           </section>

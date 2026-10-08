@@ -114,7 +114,9 @@ function create(db, userId, { title, content = '', linkTo, shareId, ...coordBody
 
   const id = doCreate();
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
-  history.record(userId, 'create', { noteId: id, title: note.title }, `Created "${note.title}"`);
+  // historyId rides along on the response so the client's toast can offer
+  // Undo (stripped before caching — cache.putNote).
+  note.historyId = history.record(userId, 'create', { noteId: id, title: note.title }, `Created "${note.title}"`);
   return note;
 }
 
@@ -408,7 +410,7 @@ function pin(db, userId, id) {
   if (!role) throw new HttpError(404, 'not found');
   db.prepare('UPDATE notes SET pinned = 1 WHERE id = ?').run(id);
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
-  history.record(userId, 'pin', { noteId: note.id }, `Pinned "${note.title}"`);
+  note.historyId = history.record(userId, 'pin', { noteId: note.id }, `Pinned "${note.title}"`);
   return note;
 }
 
@@ -417,7 +419,7 @@ function unpin(db, userId, id) {
   if (!role) throw new HttpError(404, 'not found');
   db.prepare('UPDATE notes SET pinned = 0 WHERE id = ?').run(id);
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
-  history.record(userId, 'unpin', { noteId: note.id }, `Unpinned "${note.title}"`);
+  note.historyId = history.record(userId, 'unpin', { noteId: note.id }, `Unpinned "${note.title}"`);
   return note;
 }
 
@@ -503,16 +505,17 @@ function setStatus(db, userId, id, status, cascade) {
     }
   })();
 
+  let historyId = null;
   if (status !== prev.status) {
     const extra = cascaded.length ? ` + ${cascaded.length} sub-note${cascaded.length === 1 ? '' : 's'}` : '';
-    history.record(
+    historyId = history.record(
       userId,
       'status',
       { noteId: prev.id, from: prev.status, to: status, cascade: cascaded },
       `${STATUS_VERB[status] || 'Changed'} "${prev.title}"${extra}`
     );
   }
-  return db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
+  return { ...db.prepare('SELECT * FROM notes WHERE id = ?').get(id), historyId };
 }
 
 // Linked, non-deleted notes ranked by "probable next step", plus the single
@@ -538,6 +541,74 @@ function neighbors(db, userId, id) {
   return result;
 }
 
+// Is this the user's home note (getRootNote — marked, or inferred)?
+function isHomeNote(db, userId, note) {
+  if (!note || note.share_id != null) return false;
+  const home = getRootNote(db, userId).note;
+  return Boolean(home && home.id === note.id);
+}
+
+// The spaces this user is a member of, by name (the usual "personal first,
+// then spaces by name" order).
+function memberShares(db, userId) {
+  return db
+    .prepare(
+      `SELECT s.id, s.title FROM shares s JOIN share_members m ON m.share_id = s.id
+       WHERE m.user_id = ? ORDER BY s.title COLLATE NOCASE, s.id`
+    )
+    .all(userId);
+}
+
+// "Lost" notes — everything outside its scope's home tree in the inferred
+// hierarchy (buildHierarchy): orphans, whole separate trees, and notes that
+// are linked but parentless (e.g. only 🔀 cross links, in between two trees).
+// The home tree is the one holding the home note (getRootNote) for the
+// personal graph, the space's root (probableRoot, = shares.js's
+// shareRootNote) for a space. Returns one entry per scope, personal first:
+// { share, h (buildHierarchy result), tops: [parentless note ids outside the
+// home tree] }.
+function lostTrees(db, userId) {
+  const scopes = [{ scope: { userId }, share: null, rootId: (getRootNote(db, userId).note || {}).id }];
+  for (const s of memberShares(db, userId)) {
+    const r = probableRoot({ shareId: s.id });
+    scopes.push({ scope: { shareId: s.id }, share: s, rootId: r ? r.id : null });
+  }
+  return scopes.map(({ scope, share, rootId }) => {
+    const h = buildHierarchy(scope);
+    // The top of the tree holding the root (an inferred root can itself have
+    // a guessed parent) — that whole tree counts as home.
+    let homeTop = rootId != null && h.byId.has(rootId) ? rootId : null;
+    for (let i = 0; homeTop != null && h.parentOf.get(homeTop) != null && i < 10000; i++) {
+      homeTop = h.parentOf.get(homeTop);
+    }
+    const tops = [];
+    for (const [id, p] of h.parentOf) if (p == null && id !== homeTop) tops.push(id);
+    return { share, h, tops };
+  });
+}
+
+const shareTag = (share) => (share ? { shareId: share.id, shareTitle: share.title } : {});
+
+// The orphan header row: one item per lost tree top (an orphan, an in-between
+// note, or the top of a disconnected tree), personal first then spaces by
+// name, most recently touched first. Fully-done trees drop out.
+function inbox(db, userId) {
+  const items = [];
+  for (const { share, h, tops } of lostTrees(db, userId)) {
+    const scoped = [];
+    for (const id of tops) {
+      const note = h.byId.get(id);
+      const under = subtreeIds(h.childrenOf, id);
+      const all = [id, ...under].map((x) => h.byId.get(x)).filter(Boolean);
+      if (!all.some((x) => x.status !== 'done')) continue;
+      scoped.push({ noteId: id, title: note.title, updatedAt: note.updated_at, ...shareTag(share) });
+    }
+    scoped.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    items.push(...scoped);
+  }
+  return { items };
+}
+
 // The center's own subtree plus, for a personal center, every shared space
 // it reaches through this user's personal_refs: a ref from the center or any
 // note under it pulls in the referenced shared note and that note's subtree
@@ -545,7 +616,22 @@ function neighbors(db, userId, id) {
 // never pulls personal notes in. A ref only counts while the user is still a
 // member of its space. Returns [{ id, note, share }] (share = { id, title } or
 // null), center excluded.
+//
+// The home note (isHomeNote) is the exception: "under home" there means
+// everything — every personal note and every note in every space you're in,
+// whether or not it hangs under home — so nothing (a lost to-do, a reminder
+// on an unfiled note) can only be found by searching.
 function crossScopeSubtree(db, userId, center) {
+  if (isHomeNote(db, userId, center)) {
+    const out = [];
+    for (const n of buildHierarchy({ userId }).byId.values()) {
+      if (n.id !== center.id) out.push({ id: n.id, note: n, share: null });
+    }
+    for (const s of memberShares(db, userId)) {
+      for (const n of buildHierarchy({ shareId: s.id }).byId.values()) out.push({ id: n.id, note: n, share: s });
+    }
+    return out;
+  }
   const { byId, childrenOf } = buildHierarchy(scopeOf(center));
   const own = subtreeIds(childrenOf, center.id);
   const out = own.map((id) => ({ id, note: byId.get(id), share: null }));
@@ -718,7 +804,12 @@ function createAttachmentNote(db, userId, parentId, body, file) {
 
   const id = doCreate();
   const note = db.prepare('SELECT * FROM notes WHERE id = ?').get(id);
-  history.record(userId, 'create', { noteId: id, title: note.title }, `Added ${type} "${note.title}"`);
+  note.historyId = history.record(
+    userId,
+    'create',
+    { noteId: id, title: note.title },
+    `Added ${type} "${note.title}"`
+  );
   return note;
 }
 
@@ -796,7 +887,7 @@ function replaceAttachment(db, userId, id, body, file) {
   ).run(type, newTitle, attachmentPath, attachmentSize, now(), note.id);
 
   const updated = db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id);
-  history.record(
+  updated.historyId = history.record(
     userId,
     'attach',
     {
@@ -819,7 +910,7 @@ function removeAttachment(db, userId, id) {
     "UPDATE notes SET type = 'text', attachment_path = NULL, attachment_size = NULL, updated_at = ? WHERE id = ?"
   ).run(now(), note.id);
 
-  history.record(
+  const historyId = history.record(
     userId,
     'attach',
     {
@@ -830,7 +921,7 @@ function removeAttachment(db, userId, id) {
     `Removed attachment from "${note.title}"`
   );
 
-  return db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id);
+  return { ...db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id), historyId };
 }
 
 module.exports = {
@@ -857,6 +948,7 @@ module.exports = {
   neighbors,
   subtreeTodos,
   subtreeIdsFor,
+  inbox,
   createAttachmentNote,
   createInlineImage,
   replaceAttachment,

@@ -697,6 +697,35 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_mail_ingest_user ON mail_ingest (user_id, created_at);
 `);
 
+// What the user did each time a reminder went off: 'done' / 'skip' (ack with
+// an outcome) or 'snooze'. `day` = the local wall date (reminder tz) of `at`,
+// what per-day stats count by. `rating` = optional 1-5 "how did it go", set
+// afterwards on a nudge's 'done' row (POST /api/alarms/:id/rate, matched by
+// reminder_id + at — the client knows `at` even when the ack went through
+// the offline outbox). reminder_id has no FK on purpose: an undone reminder
+// removal re-inserts the same id, and its history should come back with it.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS reminder_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    reminder_id INTEGER NOT NULL,
+    note_id     INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    outcome     TEXT NOT NULL,
+    rating      INTEGER,
+    day         TEXT NOT NULL,
+    at          TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_reminder_events_rem ON reminder_events (reminder_id, day);
+  CREATE INDEX IF NOT EXISTS idx_reminder_events_user ON reminder_events (user_id, day);
+`);
+
+// kind='anytime' only: what the nudge toast offers. 0 = info only (a plain
+// toast, nothing logged — "you are beautiful"), 1 = Done / Skip / Snooze
+// (logged in reminder_events), 2 = that plus a ★1-5 rating after Done.
+if (!db.prepare('PRAGMA table_info(reminders)').all().some((c) => c.name === 'track')) {
+  db.exec('ALTER TABLE reminders ADD COLUMN track INTEGER NOT NULL DEFAULT 0');
+}
+
 // One-time: "file" attachment notes that are really a photo/recording become
 // image/audio notes — the same rule every upload now applies
 // (attachment-kind.js's uploadedFileType, judged by the stored extension).

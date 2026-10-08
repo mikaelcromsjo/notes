@@ -1,5 +1,47 @@
 const db = require('./db');
 const { buildAgenda } = require('./agenda');
+const reminders = require('./reminders');
+
+// Tracked nudges (reminders.track >= 1) with their last-7-days stats — the
+// "Practice" section. Like orphans, never part of isEmpty.
+const practiceStmt = db.prepare(
+  `SELECT r.id, r.note_id, r.days, r.date, r.tz, n.title, n.share_id,
+          (SELECT title FROM shares WHERE id = n.share_id) AS share_title
+   FROM reminders r JOIN notes n ON n.id = r.note_id
+   WHERE r.user_id = ? AND r.kind = 'anytime' AND r.track >= 1 AND n.status NOT IN ('deleted', 'done')
+   ORDER BY n.title`
+);
+function buildPractice(userId, now) {
+  return practiceStmt
+    .all(userId)
+    .map((r) => {
+      const week = reminders.weekStats(db, r, now);
+      if (!week) return null;
+      return {
+        noteId: r.note_id,
+        title: r.title,
+        week,
+        ...(r.share_id != null ? { shareId: r.share_id, shareTitle: r.share_title } : {}),
+      };
+    })
+    .filter(Boolean);
+}
+
+// The 7-day strip, oldest first: ● done ◐ skipped ○ missed ◌ today, not yet
+// answered · not scheduled.
+const STRIP = { done: '●', skip: '◐', missed: '○', open: '◌' };
+function practiceStrip(week) {
+  return week.strip.map((st) => STRIP[st] || '·').join('');
+}
+// "done 5 of 7 days · skipped 1 · missed 1 · ★ 3.8 · 🔥 3"
+function practiceLabel(week) {
+  const bits = [`done ${week.done} of ${week.scheduled} day${week.scheduled === 1 ? '' : 's'}`];
+  if (week.skip) bits.push(`skipped ${week.skip}`);
+  if (week.missed) bits.push(`missed ${week.missed}`);
+  if (week.avgRating != null) bits.push(`★ ${week.avgRating}`);
+  if (week.streak >= 2) bits.push(`🔥 ${week.streak}`);
+  return bits.join(' · ');
+}
 
 // The digest is the user's agenda on a schedule: what's overdue, due today, and
 // due this week, plus notes flagged to-do, notes carrying open `- [ ]` tasks,
@@ -37,6 +79,7 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
     orphans: a.orphans.length,
     nudges: nudges.length,
   };
+  const practice = buildPractice(userId, now);
   return {
     generatedAt: a.generatedAt,
     tz: a.tz,
@@ -47,6 +90,7 @@ function buildDigest(userId, { tz, now = new Date() } = {}) {
     openTasks: a.openTasks,
     orphans: a.orphans,
     nudges,
+    practice,
     counts,
     isEmpty:
       counts.overdue + counts.today + counts.week + counts.todos + counts.openTasks === 0,
@@ -122,7 +166,7 @@ function digestSubject(d, cadence) {
 // name, the usual sections inside each (same order as public/app.js's
 // openAgenda). `head` is null when nothing comes from a space, so a
 // personal-only digest renders exactly as it did before spaces existed.
-const SPACE_LISTS = ['overdue', 'today', 'week', 'todos', 'openTasks', 'allReminders', 'nudges', 'orphans'];
+const SPACE_LISTS = ['overdue', 'today', 'week', 'todos', 'openTasks', 'allReminders', 'nudges', 'practice', 'orphans'];
 function bySpace(d) {
   const groups = new Map();
   for (const list of SPACE_LISTS) {
@@ -168,6 +212,10 @@ function digestText(d, cadence, { viewUrl } = {}) {
       'Open tasks',
       g.openTasks.map((t) => `${t.title} (${t.open} open)  ${origin}/#${t.noteId}`)
     );
+    out += section(
+      'Practice (last 7 days)',
+      g.practice.map((p) => `${p.title}  ${practiceStrip(p.week)}  ${practiceLabel(p.week)}`)
+    );
     out += section('Orphaned notes', g.orphans.map((o) => `${o.title}  ${origin}/#${o.noteId}`));
   }
   if (viewUrl) out += `See everything — every reminder, orphaned notes, insights:\n  ${viewUrl}\n\n`;
@@ -206,6 +254,15 @@ function digestHtml(d, cadence, { viewUrl } = {}) {
           (cadence === 'weekly' ? htmlList('This week', g.week.map((r) => link(r, whenLabel(r)))) : '') +
           htmlList('To-do', g.todos.map((t) => link({ noteId: t.noteId, title: t.title }, ''))) +
           htmlList('Open tasks', g.openTasks.map((t) => link({ noteId: t.noteId, title: t.title }, `${t.open} open`))) +
+          htmlList(
+            'Practice (last 7 days)',
+            g.practice.map(
+              (p) =>
+                link(p, '') +
+                ` <span style="letter-spacing:2px;color:#2563eb">${practiceStrip(p.week)}</span>` +
+                `<br><span style="color:#666">${esc(practiceLabel(p.week))}</span>`
+            )
+          ) +
           htmlList('Orphaned notes', g.orphans.map((o) => link({ noteId: o.noteId, title: o.title }, '')))
       )
       .join('') +
@@ -284,6 +341,12 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
         // public/app.js's openAgenda): no committed clock time to be "Overdue"/
         // "Today"/rhythm-labelled about.
         pageSection('Nudges', g.nudges.map((r) => L(r, nudgeLabel(r)))) +
+        pageSection(
+          'Practice (last 7 days)',
+          g.practice.map(
+            (p) => `${L(p, '')} <span class="strip">${practiceStrip(p.week)}</span><br><span class="meta">${esc(practiceLabel(p.week))}</span>`
+          )
+        ) +
         pageSection('Orphans', g.orphans.map((o) => L({ noteId: o.noteId, title: o.title }, '')))
     )
     .join('');
@@ -311,13 +374,14 @@ function digestPageDoc(page, cadence, { origin: pageOrigin } = {}) {
   li:first-child { border-top: none; }
   a { color: #2563eb; text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
   .meta { color: #777; font-weight: 400; font-size: 0.85rem; }
+  .strip { letter-spacing: 2px; color: #2563eb; }
   .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
   .actions a { display: inline-block; padding: 9px 14px; border: 1px solid #d0d0d5; border-radius: 8px; background: #fff; }
   .empty { color: #666; }
   @media (prefers-color-scheme: dark) {
     body { background: #16161a; color: #e9e9ec; }
     li, h2.space { border-color: #2c2c33; }
-    a { color: #6ea8fe; }
+    a, .strip { color: #6ea8fe; }
     .actions a { background: #1f1f25; border-color: #35353d; }
     .sub, h2, .meta, .empty { color: #9a9aa4; }
   }
