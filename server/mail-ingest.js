@@ -28,7 +28,11 @@
 // in the agenda's "Orphaned notes" until the user links it somewhere.
 //
 // Opt-in: only runs with MAIL_INGEST=1, so a second checkout sharing this
-// Gmail account (test.ia-ai.se) can't double-import.
+// Gmail account can't double-import. MAIL_INGEST_SOURCE picks who reads Gmail:
+// `imap` (default) = poll() below; `mailrouter` = /srv/mailrouter polls the
+// inbox and POSTs each +notes/+note mail to routes/mail-in.js `/ingest`
+// (→ ingestRaw). Same pipeline and same message_key (Gmail X-GM-MSGID) either
+// way, so switching modes never double-imports.
 const crypto = require('crypto');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
@@ -651,11 +655,41 @@ async function confirm(token) {
   }
 }
 
+// --- mail handed over by /srv/mailrouter (MAIL_INGEST_SOURCE=mailrouter) ----
+
+function receivesFromRouter() {
+  return process.env.MAIL_INGEST === '1' && process.env.MAIL_INGEST_SOURCE === 'mailrouter';
+}
+
+// `raw` = the RFC 822 bytes, `meta` = { key (X-GM-MSGID), labels (Set), receivedAt }
+// as the router read them from Gmail. → { status, duplicate? }, status being what
+// tidy() would have labelled: the router does the Gmail labelling/archiving in
+// this mode. A message already in mail_ingest (router retry, or seen by poll()
+// before a mode switch) is not processed again.
+async function ingestRaw(raw, meta) {
+  const cfg = mailer.imapConfig();
+  if (!cfg) throw new Error('mail not configured');
+  const seen = statusStmt.get(meta.key);
+  if (seen) return { status: seen.status, duplicate: true };
+  if (raw.length > MAX_MESSAGE_BYTES) {
+    record({ key: meta.key, status: 'ignored', reason: 'too large', receivedAt: meta.receivedAt || null });
+    return { status: 'ignored' };
+  }
+  await processParsed(await simpleParser(raw), meta, cfg);
+  const row = statusStmt.get(meta.key);
+  return { status: row ? row.status : 'ignored' };
+}
+
 function start() {
   if (process.env.MAIL_INGEST !== '1') return;
   const cfg = mailer.imapConfig();
   if (!cfg) {
     console.warn('[mail-ingest] MAIL_INGEST=1 but no mail credentials — not polling');
+    return;
+  }
+  if (receivesFromRouter()) {
+    if (!process.env.MAIL_INGEST_TOKEN) console.warn('[mail-ingest] MAIL_INGEST_SOURCE=mailrouter but no MAIL_INGEST_TOKEN — /ingest refuses everything');
+    console.log(`[mail-ingest] ${cfg.ingestAddresses.join(', ')} delivered by /srv/mailrouter (POST /api/mail-in/ingest), not polling`);
     return;
   }
   console.log(`[mail-ingest] polling ${cfg.ingestAddresses.join(', ')} every ${TICK_MS / 1000}s`);
@@ -667,6 +701,8 @@ module.exports = {
   start,
   poll,
   confirm,
+  receivesFromRouter,
+  ingestRaw,
   pendingByToken,
   // exported for testing
   processParsed,

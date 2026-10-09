@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const mailIngest = require('../mail-ingest');
 const mailAliases = require('../mail-aliases');
@@ -148,6 +149,39 @@ router.post('/alias/verify', express.urlencoded({ extended: false }), (req, res)
       '✅'
     )
   );
+});
+
+// MAIL_INGEST_SOURCE=mailrouter: /srv/mailrouter (handler `notes`) hands over each
+// +notes/+note mail as raw RFC 822, with Gmail's X-GM-MSGID / X-GM-LABELS /
+// INTERNALDATE in headers. Shared-secret MAIL_INGEST_TOKEN, and only straight from
+// this box — nginx always adds X-Forwarded-For, so a proxied request is refused.
+// 409 in imap mode tells the router to leave the mail for poll().
+function tokenOk(got) {
+  const want = process.env.MAIL_INGEST_TOKEN || '';
+  got = String(got || '');
+  return want.length >= 16 && got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
+}
+
+router.post('/ingest', express.raw({ type: () => true, limit: '40mb' }), async (req, res) => {
+  if (req.get('x-forwarded-for') || !tokenOk(req.get('x-ingest-token'))) return res.status(403).json({ error: 'forbidden' });
+  if (!mailIngest.receivesFromRouter()) return res.status(409).json({ error: 'MAIL_INGEST_SOURCE is not mailrouter' });
+  const key = String(req.get('x-gm-msgid') || '').trim();
+  if (!/^\d+$/.test(key) || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'bad request' });
+  let labels = [];
+  try {
+    labels = JSON.parse(req.get('x-gm-labels') || '[]');
+  } catch {}
+  const date = Date.parse(req.get('x-internal-date') || '');
+  try {
+    res.json(await mailIngest.ingestRaw(req.body, {
+      key,
+      labels: new Set(Array.isArray(labels) ? labels.map(String) : []),
+      receivedAt: isNaN(date) ? null : new Date(date).toISOString(),
+    }));
+  } catch (err) {
+    console.error('[mail-ingest] /ingest failed:', err && err.message);
+    res.status(500).json({ error: 'ingest failed' });
+  }
 });
 
 module.exports = router;
