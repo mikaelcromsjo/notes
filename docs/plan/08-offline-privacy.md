@@ -292,8 +292,6 @@ its replacement (2) has run for a while.
   offline, embedded client DB — not detailed in this file) would need; doing
   it now pays twice.
 - **This domain targets `notes.ia-ai.se` (this checkout) only.**
-  `test.ia-ai.se` "stays as-is" per `CLAUDE.md` — do not port this to
-  `/srv/nico-server` as part of this work.
 - `notes-android`: no code changes in that sub-project for Phase 1, but
   milestone 4 has a direct consequence for it — see Risks below. Do not
   revive the deleted `WebView` wrapper as part of this domain; nothing here

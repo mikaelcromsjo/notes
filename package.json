@@ -1,5 +1,5 @@
 {
-  "name": "nico-server",
+  "name": "notes",
   "version": "1.0.0",
   "private": true,
   "description": "Personal assistant: notes as a linked graph, navigated 3x3 around a centered note.",

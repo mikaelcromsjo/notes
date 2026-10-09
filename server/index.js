@@ -176,7 +176,7 @@ app.use('/api/onboarding', onboardingRouter);
 app.use('/share', shareRouter);
 
 app.listen(PORT, HOST, () => {
-  console.log(`nico-server running at http://${HOST}:${PORT}/`);
+  console.log(`notes server running at http://${HOST}:${PORT}/`);
 });
 
 alarmScheduler.start();

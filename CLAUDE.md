@@ -2,7 +2,7 @@
 
 Personal notes app: notes are a link graph, rendered as a 3x3 grid around one centered note. Express + better-sqlite3 (`server/`), no-build vanilla-JS IIFE (`public/`). No bundler, no tests, no lint.
 
-This checkout (`/srv/notes`, port **8050**) serves **notes.ia-ai.se**. It was forked from `/srv/nico-server` (port 8040, **test.ia-ai.se**) on 2026-09-15 — same codebase, independent data from that point on (no sync between the two). **`test.ia-ai.se` was retired 2026-10-05**: the old app no longer runs; `/srv/nico-server/redirect.js` (bare node on :8040, user-crontab `@reboot`) 301s every request to the same path on notes.ia-ai.se. Its `data/notes.db` is kept untouched (holds 7 post-fork notes never copied here). Proper fix = nginx `return 301` in `/etc/nginx/sites-available/test` (needs root), then drop the redirect process + crontab line.
+This checkout (`/srv/notes`, port **8050**) serves **notes.ia-ai.se** and is the only running copy of the app. (`test.ia-ai.se` is now a separate client test-sites server in `/srv/test`, unrelated to this app.)
 
 `notes-android/` is a sub-project in this same git repo: `se.iaai.notes`, native home-screen widgets (a live 3x3 grid, an agenda summary, a nudge tile) plus `SetAlarmActivity` (the web app's "Add phone alarm") for whichever `base_url` (currently notes.ia-ai.se) is baked into it. No app UI of its own, deliberately — the app itself is installed via "Add to Home Screen" on the PWA, not this APK; see `notes-android/CLAUDE.md` for why. Its own Gradle build, unrelated to `npm`/`server/`.
 

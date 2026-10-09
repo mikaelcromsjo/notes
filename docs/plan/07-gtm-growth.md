@@ -20,7 +20,7 @@ the launch itself.
   `share_target`, no `shortcuts` in the manifest.
 - No `robots.txt`, no `sitemap.xml`, no OpenGraph/meta tags in
   `public/index.html`, no `<title>`/description tuned for search.
-- Domain per `CLAUDE.md`: `test.ia-ai.se` behind nginx → `:8040`. No marketing
+- Domain per `CLAUDE.md`: `notes.ia-ai.se` behind nginx → `:8050`. No marketing
   domain.
 - No `docs/` beyond this plan set; no press kit, no changelog.
 
@@ -32,7 +32,7 @@ the launch itself.
   reminds you." Secondary: **PKM mobile companion**.
 - One-liner candidates: _"One thought at a time."_ / _"The notes app that
   resurfaces what matters — and reminds you."_
-- Name/brand: decide a product name distinct from `nico-server`; secure the
+- Name/brand: decide a product name; secure the
   `.com` + a social handle. (Blocking task — everything below references it.)
 
 ### 3.2 Landing page

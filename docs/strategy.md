@@ -1,4 +1,4 @@
-# nico-server — Product & Commercial Strategy
+# Notes — Product & Commercial Strategy
 
 _Written 2026-09-09. This is an engineer's strategic read from the codebase and
 `CLAUDE.md`, not validated market research. Treat every number as a hypothesis to

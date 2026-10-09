@@ -110,7 +110,7 @@ WebView, no note content ever rendered here.
 
 - `./gradlew assembleDebug` (or `installDebug` with a device/emulator
   attached). Java 17, `compileSdk 34`, `minSdk 26`.
-- To point a build at a different backend (e.g. `test.ia-ai.se` / port 8040),
+- To point a build at a different backend (e.g. a local `http://10.0.2.2:8050` dev server),
   change `base_url` in `strings.xml` — it's baked in at build time. A token
   minted by one server won't authenticate against the other either, so
   Settings needs a fresh paste after switching.
