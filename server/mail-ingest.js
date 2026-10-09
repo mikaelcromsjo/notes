@@ -169,14 +169,100 @@ function isPastedImage(a) {
   return /^image\//i.test(a.contentType || '') && a.content.length >= INLINE_IMAGE_MIN;
 }
 
+// A forwarded mail's header block: a marker line (Gmail's "---------- Forwarded
+// message ---------", Apple Mail's "Begin forwarded message:", Outlook's
+// "-----Original Message-----" or "_____" rule, en/sv) then "Key: value" lines
+// (From/Från/Date/Datum/Skickat/Subject/Ämne/To/Till/Cc/Kopia…) up to the first
+// blank line. The marker and header lines go; text typed above it stays.
+const FWD_MARKER_RE =
+  /^[ \t>]*(?:-{2,}\s*(?:forwarded message|vidarebefordrat meddelande|original message|ursprungligt meddelande)\s*-{2,}|begin forwarded message:|vidarebefordrat meddelande:|_{10,})[ \t]*$/im;
+const FWD_HEADER_RE =
+  /^[ \t>]*(from|fr[åa]n|date|datum|sent|skickat|subject|[äa]mne|to|till|cc|kopia|reply-to|svara till)[ \t]*:[ \t]*(.*)$/i;
+const FWD_FIELD = {
+  from: 'from', 'från': 'from', fran: 'from',
+  to: 'to', till: 'to',
+  date: 'date', datum: 'date', sent: 'date', skickat: 'date',
+  subject: 'subject', 'ämne': 'subject', amne: 'subject',
+};
+
+// → { text, header }: `header` = the forwarded mail's own {from, to, date,
+// subject} (null when there's no forward block), `text` without that block.
+function stripForwardHeader(text) {
+  const none = { text, header: null };
+  const m = FWD_MARKER_RE.exec(text);
+  if (!m) return none;
+  const lines = text.slice(m.index + m[0].length).split('\n');
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i += 1; // Apple Mail: blank line after marker
+  const start = i;
+  const header = {};
+  let last = null;
+  while (i < lines.length && lines[i].trim()) {
+    const h = FWD_HEADER_RE.exec(lines[i]);
+    if (!h && i === start) return none;
+    if (h) {
+      last = FWD_FIELD[h[1].toLowerCase()] || null;
+      if (last && !header[last]) header[last] = h[2].trim();
+      else if (last) last = null; // a 2nd From:/To: — keep the first
+    } else if (last) {
+      header[last] += ` ${lines[i].trim()}`; // wrapped To:/Cc: continuation
+    }
+    i += 1;
+  }
+  if (i === start) return none;
+  const before = text.slice(0, m.index).trim();
+  const after = lines.slice(i).join('\n').trim();
+  return { text: before && after ? `${before}\n\n${after}` : before || after, header };
+}
+
+// What notes.mail records for a mail-in note: the forwarded mail's own
+// sender/recipient/date when it's a forward, else this mail's.
+function mailInfo(parsed, fwdHeader) {
+  const clip = (v) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const info = fwdHeader
+    ? {
+        from: clip(fwdHeader.from),
+        to: clip(fwdHeader.to),
+        date: clip(fwdHeader.date),
+        subject: clip(cleanSubject(fwdHeader.subject || parsed.subject)),
+        forwarded: true,
+      }
+    : {
+        from: clip(parsed.from && parsed.from.text),
+        to: clip(parsed.to && (Array.isArray(parsed.to) ? parsed.to.map((t) => t.text).join(', ') : parsed.to.text)),
+        date: parsed.date instanceof Date && !isNaN(parsed.date) ? parsed.date.toISOString() : '',
+        subject: clip(cleanSubject(parsed.subject)),
+      };
+  return info.from ? JSON.stringify(info) : null;
+}
+
 function noteText(parsed) {
-  let text = String(parsed.text || '').replace(/\r\n/g, '\n').trim();
+  let text = stripForwardHeader(String(parsed.text || '').replace(/\r\n/g, '\n')).text.trim();
   if (text.length > MAX_CONTENT_CHARS) text = `${text.slice(0, MAX_CONTENT_CHARS)}\n\n…(truncated)`;
   return text;
 }
 
+// Reply/forward prefixes mail clients stack onto a subject ("Fwd: RE: SV: …",
+// "Fw[2]:", "[Fwd: …]"), in the common languages: Re/Fwd/Fw (en), Sv/Vb/Vs
+// (sv/no/da), Aw/Wg (de), Tr/Rv (fr), Antw/Doorst (nl), Rif (it), Odp/Pd (pl),
+// Enc/Res (pt/es), Ynt/Ilt (tr), Vl (fi), Vá/Továbbítás (hu), zh.
+const SUBJECT_PREFIX_RE =
+  /^(?:re|fwd?|fw|sv|vb|vs|aw|wg|tr|rv|antw|doorst|rif|odp|pd|enc|res|ynt|ilt|vl|vá|továbbítás|回复|转发|答复)\s*(?:\[\d+\]|\(\d+\))?\s*[:：]\s*/i;
+
+function cleanSubject(subject) {
+  let s = String(subject || '').trim();
+  for (;;) {
+    const before = s;
+    s = s.replace(SUBJECT_PREFIX_RE, '').trim();
+    // "[Fwd: Original subject]" (old Thunderbird/Outlook style)
+    const wrapped = /^\[(?:fwd?|fw)\s*:\s*(.*)\]$/i.exec(s);
+    if (wrapped) s = wrapped[1].trim();
+    if (s === before) return s;
+  }
+}
+
 function noteTitle(parsed, content) {
-  const subject = String(parsed.subject || '').trim();
+  const subject = cleanSubject(parsed.subject);
   if (subject) return subject.slice(0, 200);
   const line = content.split('\n').map((l) => l.trim()).find(Boolean);
   return line ? line.slice(0, 120) : '';
@@ -185,6 +271,16 @@ function noteTitle(parsed, content) {
 // Creates the note (own personal graph, no links) and returns it. An empty
 // title falls through to createAttachmentNote's per-type default.
 function createNoteFromMail(userId, parsed) {
+  const note = createMailNote(userId, parsed);
+  const mail = mailInfo(parsed, stripForwardHeader(String(parsed.text || '').replace(/\r\n/g, '\n')).header);
+  if (note && note.id != null && mail) {
+    db.prepare('UPDATE notes SET mail = ? WHERE id = ?').run(mail, note.id);
+    note.mail = mail;
+  }
+  return note;
+}
+
+function createMailNote(userId, parsed) {
   const content = noteText(parsed);
   const title = noteTitle(parsed, content);
   const atts = attachmentsOf(parsed);

@@ -54,7 +54,7 @@ function parseGeo(body) {
 function list(db, userId) {
   return db
     .prepare(
-      `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo, theme, theme_children,
+      `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo, theme, theme_children, mail,
               created_from_note_id, done_with_note_id
        FROM notes WHERE user_id = ? AND share_id IS NULL AND status != 'deleted'
        ORDER BY updated_at DESC`
@@ -924,8 +924,26 @@ function removeAttachment(db, userId, id) {
   return { ...db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id), historyId };
 }
 
+// Drop a mail-in note's email info (sender/recipient/date) — the note itself
+// stays as it is. Undoable (history action 'mail').
+function removeMail(db, userId, id) {
+  const { role, note } = resolveNoteAccess(db, userId, id);
+  if (!role) throw new HttpError(404, 'not found');
+  if (note.mail == null) throw new HttpError(409, 'note has no email info');
+
+  db.prepare('UPDATE notes SET mail = NULL WHERE id = ?').run(note.id);
+  const historyId = history.record(
+    userId,
+    'mail',
+    { noteId: note.id, before: note.mail, after: null },
+    `Removed email info from "${note.title}"`
+  );
+  return { ...db.prepare('SELECT * FROM notes WHERE id = ?').get(note.id), historyId };
+}
+
 module.exports = {
   parseGeo,
+  removeMail,
   list,
   create,
   encryptGeo,

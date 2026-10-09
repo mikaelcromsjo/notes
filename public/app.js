@@ -1734,6 +1734,17 @@
       return;
     }
 
+    if (e.kind === 'note.mail') {
+      const id = idResolve(p.id);
+      if (isTmp(id)) throw httpErr(0, 'note not synced yet');
+      try {
+        await cache.putNote(await reqJson(`/api/notes/${id}/mail`, 'DELETE'));
+      } catch (err) {
+        if (err.httpStatus !== 409) throw err; // 409 = already gone: done
+      }
+      return;
+    }
+
     if (e.kind === 'note.pin' || e.kind === 'note.unpin') {
       const id = idResolve(p.id);
       if (isTmp(id)) throw httpErr(0, 'note not synced yet');
@@ -3477,6 +3488,28 @@
       patchListCache(id, { type: note.type });
       return note;
     },
+    // Drop a mail-in note's email info (notes.mail). Offline: optimistic +
+    // outbox, like the theme.
+    removeNoteMail: async (id) => {
+      if (navigator.onLine && !isTmp(id)) {
+        try {
+          const note = await reqJson(`/api/notes/${id}/mail`, 'DELETE');
+          if (!currentSpace) await cache.putNote(note);
+          patchListCache(id, { mail: null });
+          return note;
+        } catch (err) {
+          if (err.httpStatus) throw err;
+          if (currentSpace) throw httpErr(0, 'offline');
+        }
+      }
+      const prev = await localNoteFor(id);
+      const note = { ...prev, id, mail: null, _dirty: true };
+      if (store) await store.put('notes', note);
+      patchListCache(id, { mail: null });
+      await enqueue('note.mail', { id }, [id]);
+      scheduleFlush();
+      return note;
+    },
     updateNote: async (id, data) => {
       assertSpaceOnline();
       // A shared note is never mirrored into the personal IndexedDB cache
@@ -4639,6 +4672,8 @@
         return `Set status “${p.status}”`;
       case 'note.theme':
         return 'Note theme';
+      case 'note.mail':
+        return 'Remove email info';
       case 'note.pin':
         return 'Pin note';
       case 'note.unpin':
@@ -6634,6 +6669,87 @@
   // title + content with autosave, the meta line, and the pin / 🗑 delete / ✅
   // done footer. (The grid center cell renders a read-only version, not this.)
   // `onRerender` runs after a pin/done toggle; `afterDelete` after a soft-delete.
+  // A mail-in note's email info (notes.mail JSON {from, to, date, subject,
+  // forwarded?}): "✉ Sender · date" under the title, with ✕ (remove the
+  // info; undoable) and the address as a reply button in the editor;
+  // `readOnly` (the grid's centre card) = just the sender line.
+  function parseMailInfo(raw) {
+    if (!raw) return null;
+    try {
+      const m = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return m && typeof m.from === 'string' && m.from ? m : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function mailAddress(field) {
+    const s = String(field || '');
+    const m = /<([^<>\s@]+@[^<>\s@]+)>/.exec(s) || /([^\s<>"',;]+@[^\s<>"',;]+\.[^\s<>"',;]+)/.exec(s);
+    return m ? m[1] : '';
+  }
+
+  function buildMailInfo(note, onRerender, { readOnly = false } = {}) {
+    const info = parseMailInfo(note && note.mail);
+    if (!info) return null;
+    const row = document.createElement('div');
+    row.className = 'mail-info';
+
+    const addr = mailAddress(info.from);
+    const name = info.from.replace(/<[^>]*>/, '').replace(/^["'\s]+|["'\s]+$/g, '') || addr || info.from;
+    const when = /^\d{4}-\d\d-\d\dT/.test(info.date || '')
+      ? new Date(info.date).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      : info.date || '';
+    const text = document.createElement('span');
+    text.className = 'mail-info-text';
+    text.textContent = `✉️ ${name}${when ? ` · ${when}` : ''}`;
+    text.title = [
+      `From: ${info.from}`,
+      info.to ? `To: ${info.to}` : '',
+      info.date ? `Date: ${info.date}` : '',
+      info.subject ? `Subject: ${info.subject}` : '',
+      info.forwarded ? '(forwarded to notes)' : '',
+    ].filter(Boolean).join('\n');
+    row.appendChild(text);
+    if (readOnly) return row;
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'mail-info-btn';
+    remove.textContent = '✕';
+    remove.title = 'Remove email info';
+    remove.addEventListener('click', async () => {
+      remove.disabled = true;
+      try {
+        const updated = await api.removeNoteMail(note.id);
+        if (note.id === currentId) currentNote = { ...currentNote, mail: null };
+        undoToast('Email info removed', updated.historyId);
+        if (onRerender) await onRerender();
+      } catch (e) {
+        remove.disabled = false;
+        toast(e.message || "Couldn't remove the email info.");
+      }
+    });
+    row.appendChild(remove);
+
+    // The sender's address as a button, like a contact card's email button —
+    // a reply with "Re: <subject>" filled in.
+    if (!addr) return row;
+    const block = document.createElement('div');
+    block.className = 'mail-info-block';
+    const buttons = document.createElement('div');
+    buttons.className = 'center-attachment-contact';
+    const mail = document.createElement('a');
+    mail.href = `mailto:${encodeURIComponent(addr).replace(/%40/g, '@')}?subject=${encodeURIComponent(
+      `Re: ${info.subject || note.title || ''}`
+    )}`;
+    mail.textContent = `✉️ ${addr}`;
+    mail.title = `Reply to ${addr}`;
+    buttons.appendChild(mail);
+    block.append(row, buttons);
+    return block;
+  }
+
   function buildNoteEditor({ onRerender, afterDelete, startPreview }) {
     const frag = document.createDocumentFragment();
 
@@ -6782,6 +6898,8 @@
     }
 
     frag.appendChild(title);
+    const mailRow = buildMailInfo(currentNote, onRerender);
+    if (mailRow) frag.appendChild(mailRow);
     frag.appendChild(previewBtn);
     frag.appendChild(content);
     frag.appendChild(previewDiv);
@@ -7062,6 +7180,8 @@
     }
 
     cell.appendChild(title);
+    const mailRow = buildMailInfo(currentNote, null, { readOnly: true });
+    if (mailRow) cell.appendChild(mailRow);
     if (preview) cell.appendChild(preview);
     cell.appendChild(content);
 
@@ -7280,6 +7400,7 @@
     const cached = allNotesCache.find((n) => n.id === note.id);
     const parts = [];
     if (TYPE_ICON[note.type]) parts.push([TYPE_ICON[note.type], note.type]);
+    if (note.mail || (cached && cached.mail)) parts.push(['✉️', 'from email']);
     if (note.pinned || (cached && cached.pinned)) parts.push(['📌', 'pinned']);
     const kinds = new Set(alarms.filter((a) => a.noteId === note.id).map((a) => a.kind || 'time'));
     for (const kind of ['time', 'anytime', 'location']) {

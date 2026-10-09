@@ -361,6 +361,13 @@ function applyUndo(action, p, uid) {
     return { noteId: n.id };
   }
 
+  if (action === 'mail') {
+    const n = ownNote(p.noteId, uid);
+    if (!n) throw new Error('that note no longer exists');
+    db.prepare('UPDATE notes SET mail = ? WHERE id = ?').run(p.before, n.id);
+    return { noteId: n.id };
+  }
+
   if (action === 'link-relation') {
     return applyLinkRelation(p.noteA, p.noteB, p.centerId, p.otherId, p.before, uid);
   }
@@ -451,6 +458,13 @@ function applyRedo(action, p, uid) {
     return { noteId: n.id };
   }
 
+  if (action === 'mail') {
+    const n = ownNote(p.noteId, uid);
+    if (!n) throw new Error('that note no longer exists');
+    db.prepare('UPDATE notes SET mail = ? WHERE id = ?').run(p.after, n.id);
+    return { noteId: n.id };
+  }
+
   if (action === 'link-relation') {
     return applyLinkRelation(p.noteA, p.noteB, p.centerId, p.otherId, p.after, uid);
   }
@@ -538,6 +552,10 @@ function isStale(action, p, uid) {
       if (!n) return true;
       return n.type !== p.after.type || n.attachment_path !== p.after.attachment_path;
     }
+    if (action === 'mail') {
+      const n = ownNote(p.noteId, uid);
+      return !n || n.mail === p.before;
+    }
     if (action === 'link-relation') {
       const center = ownNote(p.centerId, uid);
       const other = ownNote(p.otherId, uid);
@@ -607,6 +625,10 @@ function isRedoStale(action, p, uid) {
       const n = ownNote(p.noteId, uid);
       if (!n) return true;
       return n.type !== p.before.type || n.attachment_path !== p.before.attachment_path;
+    }
+    if (action === 'mail') {
+      const n = ownNote(p.noteId, uid);
+      return !n || n.mail === p.after;
     }
     if (action === 'link-relation') {
       const center = ownNote(p.centerId, uid);

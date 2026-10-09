@@ -135,5 +135,7 @@ router.put(
 
 // Remove this note's attachment, reverting it to a plain text note.
 router.delete('/:id/attachment', wrap((req) => notesCore.removeAttachment(db, req.userId, req.params.id)));
+// A mail-in note's email info (notes.mail) — remove only; mail-in sets it.
+router.delete('/:id/mail', wrap((req) => notesCore.removeMail(db, req.userId, req.params.id)));
 
 module.exports = router;

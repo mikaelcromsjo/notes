@@ -1095,8 +1095,10 @@ button:hover { filter: brightness(1.05); }
 .markdown-body h1 { font-size: 1.35em; }
 .markdown-body h2 { font-size: 1.2em; }
 .markdown-body h3 { font-size: 1.05em; }
-.markdown-body ul,
-.markdown-body ol { padding-left: 1.4em; }
+.markdown-body ul { padding-left: 1.4em; }
+/* Room for the "10. " marker in a monospace theme font (JetBrains Mono) — a
+   narrower padding lets the card's overflow:hidden clip the digits. */
+.markdown-body ol { padding-left: 4ch; }
 .markdown-body li { margin: 0.15em 0; }
 .markdown-body li.task-list-item,
 .markdown-body li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.2em; }
@@ -1138,6 +1140,41 @@ button:hover { filter: brightness(1.05); }
 .markdown-body table { border-collapse: collapse; }
 .markdown-body th,
 .markdown-body td { border: 1px solid var(--border); padding: 0.3em 0.5em; }
+
+/* A mail-in note's sender line in the editor (app.js's buildMailInfo). */
+.mail-info {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-width: 0;
+}
+.mail-info-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+.mail-info-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mail-info-btn {
+  flex: none;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+}
 
 .md-preview-toggle {
   align-self: flex-start;

@@ -88,6 +88,13 @@ if (!noteColumns.some((c) => c.name === 'status')) {
 if (!noteColumns.some((c) => c.name === 'last_reminder')) {
   db.exec('ALTER TABLE notes ADD COLUMN last_reminder TEXT');
 }
+// Where a mail-in note came from (JSON {from, to, date, subject}; for a
+// forwarded mail the original sender, parsed from the forward header that
+// server/mail-ingest.js strips from the text). NULL = not from mail, or the
+// user removed it (DELETE /api/notes/:id/mail, undoable).
+if (!noteColumns.some((c) => c.name === 'mail')) {
+  db.exec('ALTER TABLE notes ADD COLUMN mail TEXT');
+}
 if (!noteColumns.some((c) => c.name === 'done_with_note_id')) {
   db.exec('ALTER TABLE notes ADD COLUMN done_with_note_id INTEGER');
   db.exec('ALTER TABLE notes ADD COLUMN done_prev_status TEXT');

@@ -58,7 +58,7 @@ function computeNeighbors(scope, id, rankUserId = scope.userId ?? null, { skipSt
   const linkedClause = scopeClause(scope, 'n');
   const linked = db
     .prepare(
-      `SELECT n.id, n.title, n.content, n.updated_at, n.type, n.attachment_path, n.status,
+      `SELECT n.id, n.title, n.content, n.updated_at, n.type, n.attachment_path, n.status, n.mail,
               n.created_from_note_id, n.created_at AS note_created_at,
               l.created_at AS linked_at, l.kind AS link_kind
        FROM links l
