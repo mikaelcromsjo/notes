@@ -12,8 +12,11 @@
 //
 // Per message (deduped by Gmail's X-GM-MSGID in the mail_ingest table, see
 // db.js):
-//   - From must be exactly one address that is a users.email, else ignored
-//     (silently — no reply to unknown senders, no backscatter).
+//   - From must be exactly one address that is a users.email or one of that
+//     account's verified sender aliases (server/mail-aliases.js), else ignored.
+//     The sender gets a how-to reply only if Gmail authenticated the From
+//     (so never backscatter to a spoofed address), at most once per 30 days
+//     per address — see replyUnknownSender.
 //   - Authenticated (self-sent from this Gmail account, or Gmail's own
 //     DMARC/aligned DKIM/aligned SPF pass for the From domain) → note created.
 //   - Otherwise → nothing created yet; a one-time confirm link, quoting the
@@ -35,6 +38,7 @@ const notes = require('./notes');
 const { publicOrigin } = require('./digest');
 const { writeUpload, zipAttachments } = require('./upload-config');
 const { classify, parseVcard } = require('./attachment-kind');
+const mailAliases = require('./mail-aliases');
 
 const TICK_MS = 60 * 1000;
 const LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
@@ -52,8 +56,8 @@ const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const seenStmt = db.prepare('SELECT 1 FROM mail_ingest WHERE message_key = ?');
 const recordStmt = db.prepare(
   `INSERT OR IGNORE INTO mail_ingest
-     (message_key, user_id, from_addr, subject, status, reason, note_id, token_hash, received_at, created_at, expires_at)
-   VALUES (@key, @userId, @from, @subject, @status, @reason, @noteId, @tokenHash, @receivedAt, @createdAt, @expiresAt)`
+     (message_key, user_id, from_addr, subject, status, reason, note_id, token_hash, received_at, created_at, expires_at, replied_at)
+   VALUES (@key, @userId, @from, @subject, @status, @reason, @noteId, @tokenHash, @receivedAt, @createdAt, @expiresAt, @repliedAt)`
 );
 
 function record(r) {
@@ -66,6 +70,7 @@ function record(r) {
     tokenHash: null,
     receivedAt: null,
     expiresAt: null,
+    repliedAt: null,
     createdAt: now(),
     ...r,
   });
@@ -279,10 +284,72 @@ ${list.length ? `<div style="margin-top:10px;font-size:13px;color:#555">📎 ${l
   }
 }
 
+// --- unknown sender reply ----------------------------------------------------
+
+// A From that's no account's address (nor a verified alias) is ignored, but
+// we tell the sender how to fix it — only when Gmail proved the From is real
+// (authenticate()), so a spoofed From never makes us mail an innocent third
+// party (backscatter, which would also hurt this Gmail account's standing).
+// Automated mail never gets here (isAutomated runs first). Generic text: it
+// doesn't say whether any account exists and doesn't quote the message.
+const REPLY_GAP_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_REPLIES_PER_DAY = 20;
+
+async function sendUnknownSenderMail(to, parsed) {
+  const link = `${publicOrigin()}/?d=integrate`;
+  const subjectLine = String(parsed.subject || '').trim();
+  const subject = `Not saved: ${subjectLine || '(no subject)'}`.slice(0, 160);
+  const text =
+    `Your email to the notes mail-in address wasn't saved: ${to} isn't connected to a notes account.\n\n` +
+    `If you have an account and send from this address, add it under Settings → Integrate → Email to note, ` +
+    `click the confirmation link we send to it, then send your email again:\n${link}\n\n` +
+    `This is an automatic reply; you won't get another one for this address for 30 days.`;
+  const html = `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f5f7;padding:24px;color:#1c1e21">
+<div style="max-width:560px;margin:auto;background:#fff;border:1px solid #e2e4e9;border-radius:12px;padding:28px">
+<h2 style="margin:0 0 12px;text-align:center">Your email wasn't saved</h2>
+<p style="font-size:15px;line-height:1.5;margin:0 0 16px"><strong>${esc(to)}</strong> isn't connected to a notes account, so nothing was created from your email.</p>
+<p style="font-size:15px;line-height:1.5;margin:0 0 20px">If you have an account and send from this address, add it under <strong>Settings → Integrate → Email to note</strong>, click the confirmation link we send to it, then send your email again.</p>
+<p style="margin:0 0 20px;text-align:center"><a href="${link}" style="display:inline-block;background:#4f6df5;color:#fff;text-decoration:none;padding:10px 20px;border-radius:8px;font-weight:600">Open Settings</a></p>
+<p style="font-size:12px;color:#767a82;margin:0;text-align:center">This is an automatic reply; you won't get another one for this address for 30 days.</p>
+</div></body></html>`;
+  const thread = parsed.messageId ? { inReplyTo: parsed.messageId, references: parsed.messageId } : {};
+  if (mailer.configured()) {
+    // Auto-Submitted keeps well-behaved auto-responders from answering back.
+    await mailer.sendMail({ to, subject, text, html, headers: { 'Auto-Submitted': 'auto-replied' }, ...thread });
+  } else {
+    console.log(`[mail-ingest] mailer not configured — would tell ${to} it's not a known sender`);
+  }
+}
+
+async function replyUnknownSender(parsed, meta, cfg, base, { reply }) {
+  const from = base.from;
+  const ignored = { ...base, status: 'ignored', reason: 'unknown sender' };
+  const own = [normalize(cfg.user), ...(cfg.ingestAddresses || [cfg.ingestAddress]).map(normalize)];
+  if (own.includes(from) || !authenticate(parsed, meta.labels, from, cfg)) return record(ignored);
+  const recent = db
+    .prepare('SELECT 1 FROM mail_ingest WHERE from_addr = ? AND replied_at > ?')
+    .get(from, new Date(Date.now() - REPLY_GAP_MS).toISOString());
+  const today = db
+    .prepare('SELECT COUNT(*) AS n FROM mail_ingest WHERE replied_at > ?')
+    .get(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()).n;
+  if (recent || today >= MAX_REPLIES_PER_DAY) return record(ignored);
+
+  // Row first, mail second: a crash between the two can never re-send.
+  record({ ...ignored, reason: 'unknown sender (replied)', repliedAt: now() });
+  try {
+    await reply(from, parsed);
+    console.log(`[mail-ingest] told unknown sender ${from} how to connect the address`);
+  } catch (err) {
+    console.error('[mail-ingest] failed to reply to unknown sender:', err && err.message);
+  }
+}
+
+const normalize = (a) => String(a || '').trim().toLowerCase();
+
 // --- per-message handling ----------------------------------------------------
 
 // `meta`: { key, labels (Set), receivedAt }. `send` is injectable for tests.
-async function processParsed(parsed, meta, cfg, { send = sendConfirmMail } = {}) {
+async function processParsed(parsed, meta, cfg, { send = sendConfirmMail, reply = sendUnknownSenderMail } = {}) {
   const base = {
     key: meta.key,
     subject: String(parsed.subject || '').slice(0, 300),
@@ -294,8 +361,11 @@ async function processParsed(parsed, meta, cfg, { send = sendConfirmMail } = {})
   const from = senderOf(parsed);
   base.from = from;
   if (isAutomated(parsed)) return record({ ...base, status: 'ignored', reason: 'automated' });
-  const user = from && db.prepare('SELECT id, email FROM users WHERE email = ?').get(from);
-  if (!user) return record({ ...base, status: 'ignored', reason: from ? 'unknown sender' : 'no single From' });
+  const user = mailAliases.userForSender(from);
+  if (!user) {
+    if (!from) return record({ ...base, status: 'ignored', reason: 'no single From' });
+    return replyUnknownSender(parsed, meta, cfg, base, { reply });
+  }
   base.userId = user.id;
 
   const how = authenticate(parsed, meta.labels, from, cfg);

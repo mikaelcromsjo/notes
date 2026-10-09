@@ -696,6 +696,31 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_mail_ingest_token ON mail_ingest (token_hash);
   CREATE INDEX IF NOT EXISTS idx_mail_ingest_user ON mail_ingest (user_id, created_at);
 `);
+// replied_at: when an "unknown sender" mail got the how-to reply
+// (mail-ingest.js replyUnknownSender) — also its per-address/daily rate limit.
+if (!db.prepare('PRAGMA table_info(mail_ingest)').all().some((c) => c.name === 'replied_at')) {
+  db.exec('ALTER TABLE mail_ingest ADD COLUMN replied_at TEXT');
+}
+db.exec('CREATE INDEX IF NOT EXISTS idx_mail_ingest_from ON mail_ingest (from_addr, replied_at)');
+
+// Extra From addresses mail-in accepts for an account (server/mail-aliases.js),
+// besides users.email. Only counts once verified_at is set — the owner of the
+// address clicked the link mailed to it — so nobody can claim someone else's
+// address and have their mail land in their own account. address is lowercase
+// and unique across all users.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mail_aliases (
+    address          TEXT PRIMARY KEY,
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    verified_at      TEXT,
+    token_hash       TEXT,
+    token_expires_at TEXT,
+    last_sent_at     TEXT,
+    created_at       TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_aliases_user ON mail_aliases (user_id);
+  CREATE INDEX IF NOT EXISTS idx_mail_aliases_token ON mail_aliases (token_hash);
+`);
 
 // What the user did each time a reminder went off: 'done' / 'skip' (ack with
 // an outcome) or 'snooze'. `day` = the local wall date (reminder tz) of `at`,

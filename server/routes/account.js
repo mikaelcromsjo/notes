@@ -319,6 +319,9 @@ router.post('/delete-request', async (req, res) => {
   const user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(req.userId);
   if (!user) return res.status(401).json({ error: 'no active session' });
 
+  const spaces = spacesOf(user.id);
+  if (spaces.length) return res.status(409).json({ error: 'leave your shared spaces first', spaces });
+
   const ok = () => res.status(202).json({ ok: true });
   if (rateLimited(`del:${user.id}`, 3, 30 * 60 * 1000)) return ok();
 
@@ -373,6 +376,19 @@ function resultDoc(heading, body, ok) {
 </div></body></html>`;
 }
 
+// Spaces this account is still a member of. Deletion is refused until it has
+// left every one (Settings walks through them: hand over, delete for
+// everyone, or leave — routes/shares.js), so deleting an account never has to
+// guess what happens to a space other people use.
+function spacesOf(userId) {
+  return db
+    .prepare(
+      `SELECT s.id, s.title, sm.role FROM share_members sm JOIN shares s ON s.id = sm.share_id
+        WHERE sm.user_id = ? ORDER BY s.title`
+    )
+    .all(userId);
+}
+
 router.get('/delete-confirm', (req, res) => {
   const token = String(req.query.token || '');
   const invalid = (msg) => res.status(400).send(resultDoc('Link no longer valid', msg, false));
@@ -387,6 +403,19 @@ router.get('/delete-confirm', (req, res) => {
     return invalid('This deletion link is invalid, already used, or expired. Start again from Settings if you still want to delete your account.');
   }
 
+  const pending = db.prepare('SELECT id FROM users WHERE email = ?').get(row.email);
+  if (pending && spacesOf(pending.id).length) {
+    return res
+      .status(409)
+      .send(
+        resultDoc(
+          'Leave your shared spaces first',
+          'This account is in a shared space again. Open Settings → Account → Delete account… to decide what happens to each space; the link stays valid until it expires.',
+          false
+        )
+      );
+  }
+
   const consumed = db
     .prepare('UPDATE login_tokens SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL')
     .run(new Date().toISOString(), row.token_hash);
@@ -397,13 +426,22 @@ router.get('/delete-confirm', (req, res) => {
     return res.status(200).send(resultDoc('Account already gone', 'That account no longer exists.', true));
   }
 
-  // Note the upload files to unlink after the rows are gone.
   const files = new Set();
-  for (const n of db.prepare('SELECT attachment_path, content FROM notes WHERE user_id = ?').all(user.id)) {
-    for (const f of uploadRefs(n)) files.add(f);
-  }
-
   db.transaction(() => {
+    // Spaces it dissolved keep their (memberless) shares row, and it may
+    // have sent invites: both point at users with no ON DELETE.
+    db.prepare(
+      `UPDATE shares SET created_by = (SELECT user_id FROM share_members m WHERE m.share_id = shares.id AND m.role = 'owner')
+        WHERE created_by = ? AND EXISTS (SELECT 1 FROM share_members m WHERE m.share_id = shares.id AND m.role = 'owner')`
+    ).run(user.id);
+    db.prepare('DELETE FROM shares WHERE created_by = ?').run(user.id);
+    db.prepare('DELETE FROM share_invites WHERE invited_by = ?').run(user.id);
+    // Note the upload files to unlink after the rows are gone.
+    for (const n of db.prepare('SELECT attachment_path, content FROM notes WHERE user_id = ?').all(user.id)) {
+      for (const f of uploadRefs(n)) files.add(f);
+    }
+    // users.root_note_id → notes has no ON DELETE: clear it before the notes go.
+    db.prepare('UPDATE users SET root_note_id = NULL WHERE id = ?').run(user.id);
     for (const sql of [
       'DELETE FROM reminders WHERE user_id = ?',
       'DELETE FROM reminder_events WHERE user_id = ?',

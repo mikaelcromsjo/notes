@@ -485,7 +485,24 @@
           <section class="settings-section" data-section="integrate">
             <h3>Integrate</h3>
 
-            <label class="settings-label" for="account-widget-url">Home-screen widget feed</label>
+            <label class="settings-label" for="mailin-address">Email to note</label>
+            <p class="settings-desc">Send or forward any email to this address and it becomes a note in your account: the subject is the title, the text is the note, and attachments come along (one file becomes a photo, audio, contact or file note; several are bundled in one .zip). New notes aren't linked to anything yet, so they show up under Orphans until you connect them.</p>
+            <input type="text" id="mailin-address" readonly />
+            <div class="settings-btn-row">
+              <button id="mailin-copy-btn" class="secondary">Copy address</button>
+            </div>
+            <p class="settings-desc">Only mail <em>from</em> your account's address (<span id="mailin-account-email"></span>) or one of the addresses below is accepted — anything else is silently ignored. If your mail provider can't prove an email really came from you, you get a confirmation email first and the note is created when you click its link.</p>
+
+            <label class="settings-label settings-btn-row-spaced" for="mailin-alias-input">Other addresses you send from</label>
+            <p class="settings-desc">E.g. a work address you forward things from. Each one gets a confirmation link, and counts once you've clicked it.</p>
+            <div id="mailin-alias-list" class="session-list"></div>
+            <div class="settings-inline-row">
+              <input type="email" id="mailin-alias-input" placeholder="you@example.com" autocomplete="email" />
+              <button id="mailin-alias-add-btn" class="secondary">Add</button>
+            </div>
+            <p class="settings-desc" id="mailin-status"></p>
+
+            <label class="settings-label settings-btn-row-spaced" for="account-widget-url">Home-screen widget feed</label>
             <p class="settings-desc">A read-only URL a home-screen widget app can poll for your current note and what's due. Treat it like a password.</p>
             <input type="text" id="account-widget-url" readonly />
             <div class="settings-btn-row">

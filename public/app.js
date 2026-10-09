@@ -333,6 +333,64 @@
     });
   }
 
+  // Owner leaving a space that has other members: hand it to one of them, or
+  // delete it for everyone. Resolves { action: 'transfer', toUserId } |
+  // { action: 'delete' } | null (cancelled).
+  function spaceHandoverDialog(title, members, extra = '') {
+    return new Promise((resolve) => {
+      const overlay = document.createElement('div');
+      overlay.className = 'overlay';
+      const box = document.createElement('div');
+      box.className = 'picker';
+      const p = document.createElement('p');
+      p.className = 'confirm-message';
+      p.textContent =
+        `What should happen to "${title}"? Hand it over and it carries on with a new owner — the notes you wrote stay in it. ` +
+        `Delete it and it's gone for everyone: each member gets the notes they wrote back as private notes.${extra}`;
+      const label = document.createElement('label');
+      label.className = 'settings-inline-row';
+      label.textContent = 'New owner ';
+      const select = document.createElement('select');
+      for (const m of members) {
+        const o = document.createElement('option');
+        o.value = m.id;
+        o.textContent = m.email;
+        select.append(o);
+      }
+      label.append(select);
+      const actions = document.createElement('div');
+      actions.className = 'picker-actions';
+      const hand = document.createElement('button');
+      hand.textContent = 'Hand over & leave';
+      const del = document.createElement('button');
+      del.className = 'danger';
+      del.textContent = 'Delete for everyone';
+      const cancel = document.createElement('button');
+      cancel.className = 'secondary';
+      cancel.textContent = 'Cancel';
+      actions.append(hand, del, cancel);
+      box.append(p, label, actions);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      const done = (val) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(val);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') done(null);
+      };
+      hand.addEventListener('click', () => done({ action: 'transfer', toUserId: Number(select.value) }));
+      del.addEventListener('click', () => done({ action: 'delete' }));
+      cancel.addEventListener('click', () => done(null));
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) done(null);
+      });
+      document.addEventListener('keydown', onKey);
+      hand.focus();
+    });
+  }
+
   // In-app replacement for native prompt(). Resolves to the trimmed-not-here
   // (caller's job) input string, or null on cancel/Escape/backdrop-click —
   // same null-means-cancelled contract as window.prompt.
@@ -4004,6 +4062,10 @@
     mintShareViewerLink: (shareId) => postJson(`/api/shares/${shareId}/viewer-token`, {}),
     revokeShareViewerLink: (shareId) => reqJson(`/api/shares/${shareId}/viewer-token`, 'DELETE'),
     getShare: (shareId) => reqJson(`/api/shares/${shareId}`, 'GET'),
+    // Non-owner leaves (their notes stay in the space); owner hands it over.
+    leaveShare: (shareId) => reqJson(`/api/shares/${shareId}/leave`, 'POST'),
+    transferShare: (shareId, toUserId, leave) =>
+      reqJson(`/api/shares/${shareId}/transfer`, 'POST', { toUserId, leave }),
     // The landing note for entering a share — { note: {id,title}|null }, same
     // "probable root" pick as a personal graph's own landing note. See
     // switchSpace's doc comment on why this replaced "most recently updated".
@@ -12478,6 +12540,120 @@
     toast('New calendar URL generated');
   });
 
+  // --- Email to note (Integrate) --------------------------------------------
+  // The mail-in address plus this account's extra sender addresses
+  // (server/mail-aliases.js). Online-only, like the rest of Settings' server
+  // lists; an alias only counts once its emailed link has been clicked.
+  const mailinAddress = document.getElementById('mailin-address');
+  const mailinAliasList = document.getElementById('mailin-alias-list');
+  const mailinAliasInput = document.getElementById('mailin-alias-input');
+  const mailinAliasAddBtn = document.getElementById('mailin-alias-add-btn');
+  const mailinStatus = document.getElementById('mailin-status');
+
+  async function mailinJson(res) {
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    return body;
+  }
+
+  async function renderMailIn() {
+    document.getElementById('mailin-account-email').textContent = currentUser ? currentUser.email : '';
+    mailinStatus.textContent = '';
+    mailinAliasList.textContent = 'Loading…';
+    let data;
+    try {
+      data = await mailinJson(await fetch('/api/mail-in/aliases'));
+    } catch {
+      mailinAddress.value = '';
+      mailinAliasList.textContent = 'Unavailable offline.';
+      return;
+    }
+    mailinAddress.value = data.ingestAddress || '(not set up on this server)';
+    if (!data.enabled) mailinStatus.textContent = 'Mail-in is switched off on this server right now.';
+    mailinAliasList.innerHTML = '';
+    if (!data.aliases.length) mailinAliasList.textContent = 'None yet.';
+    for (const a of data.aliases) {
+      const row = document.createElement('div');
+      row.className = 'session-row multi-action';
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      const name = document.createElement('span');
+      name.className = 'session-name';
+      name.textContent = a.address;
+      const sub = document.createElement('span');
+      sub.className = 'session-sub';
+      sub.textContent = a.verifiedAt
+        ? `✓ confirmed ${relTime(a.verifiedAt)}`
+        : a.expired
+          ? 'Link expired — resend it'
+          : 'Waiting for you to click the link sent to it';
+      meta.append(name, sub);
+      const actions = document.createElement('div');
+      actions.className = 'session-actions';
+      if (!a.verifiedAt) {
+        const resend = document.createElement('button');
+        resend.className = 'secondary';
+        resend.textContent = 'Resend link';
+        resend.addEventListener('click', () => addMailAlias(a.address, resend));
+        actions.append(resend);
+      }
+      const del = document.createElement('button');
+      del.className = 'secondary';
+      del.textContent = 'Remove';
+      del.addEventListener('click', async () => {
+        del.disabled = true;
+        await fetch(`/api/mail-in/aliases/${encodeURIComponent(a.address)}`, { method: 'DELETE' }).catch(() => {});
+        renderMailIn();
+      });
+      actions.append(del);
+      row.append(meta, actions);
+      mailinAliasList.append(row);
+    }
+  }
+
+  async function addMailAlias(address, btn) {
+    btn.disabled = true;
+    try {
+      await mailinJson(
+        await fetch('/api/mail-in/aliases', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address }),
+        })
+      );
+      await renderMailIn();
+      mailinStatus.textContent = `Confirmation link sent to ${address} — click it to start using that address.`;
+      return true;
+    } catch (err) {
+      mailinStatus.textContent = navigator.onLine ? `Couldn't add it: ${err.message}` : 'You are offline.';
+      return false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function onAddMailAlias() {
+    const address = mailinAliasInput.value.trim();
+    if (!address) return;
+    if (await addMailAlias(address, mailinAliasAddBtn)) mailinAliasInput.value = '';
+  }
+  mailinAliasAddBtn.addEventListener('click', onAddMailAlias);
+  mailinAliasInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') onAddMailAlias();
+  });
+
+  document.getElementById('mailin-copy-btn').addEventListener('click', async () => {
+    if (!mailinAddress.value || mailinAddress.value.startsWith('(')) return;
+    try {
+      await navigator.clipboard.writeText(mailinAddress.value);
+      toast('Address copied');
+    } catch {
+      mailinAddress.focus();
+      mailinAddress.select();
+      toast('Copy the selected address');
+    }
+  });
+
   function closeAccount() {
     accountOverlay.classList.add('hidden');
   }
@@ -12528,6 +12704,7 @@
     renderSessions();
     renderEncryptionPanel();
     renderSharesSection();
+    renderMailIn();
     renderRootNoteSection();
     renderSnapshots();
     accountOverlay.classList.remove('hidden');
@@ -12741,6 +12918,66 @@
 
   // --- Shared spaces (Account → Shared spaces section) -------------------
   const sharesList = document.getElementById('shares-list');
+  // Leaving a space, whichever way fits the caller's role — the one place that
+  // asks. Owner with other members: hand over (and leave) or delete for
+  // everyone. Owner alone: delete (notes back to private). Member: leave, their
+  // notes stay in the space. `forDeletion` = part of deleting the account
+  // (wording only). Resolves true once out of the space, false if cancelled
+  // or it failed.
+  async function exitSpace(s, { forDeletion = false } = {}) {
+    const later = forDeletion ? ' (and are then deleted with your account)' : '';
+    let action;
+    let toUserId;
+    if (s.role === 'owner' && s.memberCount > 1) {
+      const full = await api.getShare(s.id).catch(() => null);
+      const others = ((full && full.members) || []).filter((m) => m.role !== 'owner');
+      if (!others.length) return toast("Couldn't load that space's members."), false;
+      const choice = await spaceHandoverDialog(s.title, others, forDeletion ? ' Your own notes there would come back to you only to be deleted with your account.' : '');
+      if (!choice) return false;
+      ({ action, toUserId } = choice);
+    } else if (s.role === 'owner') {
+      const ok = await confirmDialog(`Delete "${s.title}"? Its notes move back to your private notes${later}.`, {
+        confirmLabel: 'Delete space',
+        danger: true,
+      });
+      if (!ok) return false;
+      action = 'delete';
+    } else {
+      const ok = await confirmDialog(
+        `Leave "${s.title}"? The notes you wrote in it stay there for the others, owned by the space's owner from now on.`,
+        { confirmLabel: 'Leave space', danger: true }
+      );
+      if (!ok) return false;
+      action = 'leave';
+    }
+    try {
+      if (action === 'delete') await api.dissolveShare(s.id);
+      else if (action === 'transfer') await api.transferShare(s.id, toUserId, true);
+      else await api.leaveShare(s.id);
+    } catch (e) {
+      toast(e.message || "Couldn't do that — try again.");
+      return false;
+    }
+    if (!forDeletion) {
+      toast(
+        action === 'delete'
+          ? `"${s.title}" deleted — its notes are back with whoever wrote them.`
+          : action === 'transfer'
+            ? `"${s.title}" handed over — you've left it.`
+            : `You left "${s.title}".`
+      );
+    }
+    if (currentSpace && currentSpace.id === s.id) {
+      // A dissolved space's notes are personal again, so the current one
+      // stays reachable; after leaving, nothing in it is.
+      if (action === 'delete') await goTo(currentId, 'tab');
+      else await switchSpace(null);
+    }
+    renderSharesSection();
+    renderSpacesbar();
+    return true;
+  }
+
   async function renderSharesSection() {
     if (!sharesList) return;
     sharesList.textContent = 'Loading…';
@@ -12814,39 +13051,27 @@
         });
         actions.append(linkBtn);
 
-        // "Remove space" — dissolves it outright (server/shares.js's
-        // dissolveShare): notes move back to private, every other member
-        // loses access. Owner-only, same as invite/viewer-link above.
+        // "Remove space…" — hand over to another member, or delete for
+        // everyone (exitSpace).
         const removeSpaceBtn = document.createElement('button');
         removeSpaceBtn.className = 'secondary danger';
-        removeSpaceBtn.textContent = 'Remove space';
+        removeSpaceBtn.textContent = 'Remove space…';
         removeSpaceBtn.addEventListener('click', async () => {
-          const otherMembers = s.memberCount - 1;
-          const warning = otherMembers > 0
-            ? ` The other ${otherMembers} member${otherMembers === 1 ? '' : 's'} will lose access to it.`
-            : '';
-          const ok = await confirmDialog(
-            `Remove "${s.title}"? Its notes move back to your private notes.${warning}`,
-            { confirmLabel: 'Remove space', danger: true }
-          );
-          if (!ok) return;
           removeSpaceBtn.disabled = true;
-          try {
-            await api.dissolveShare(s.id);
-            toast(`"${s.title}" removed — its notes are back in your private notes.`);
-            // If we're centered inside the space being removed, goTo
-            // re-fetches the (now personal) note and ensureScope notices the
-            // mismatch and resets scope/allNotesCache on its own — see
-            // ensureScope's doc comment.
-            if (currentSpace && currentSpace.id === s.id) await goTo(currentId, 'tab');
-            renderSharesSection();
-            renderSpacesbar();
-          } catch (e) {
-            toast(e.message || "Couldn't remove that space.");
-            removeSpaceBtn.disabled = false;
-          }
+          await exitSpace(s);
+          removeSpaceBtn.disabled = false;
         });
         actions.append(removeSpaceBtn);
+      } else {
+        const leaveBtn = document.createElement('button');
+        leaveBtn.className = 'secondary danger';
+        leaveBtn.textContent = 'Leave';
+        leaveBtn.addEventListener('click', async () => {
+          leaveBtn.disabled = true;
+          await exitSpace(s);
+          leaveBtn.disabled = false;
+        });
+        actions.append(leaveBtn);
       }
 
       sharesList.append(row);
@@ -12875,7 +13100,7 @@
           removeMemberBtn.className = 'secondary danger';
           removeMemberBtn.textContent = 'Remove';
           removeMemberBtn.addEventListener('click', async () => {
-            if (!(await confirmDialog(`Remove ${m.email} from "${s.title}"?`, { confirmLabel: 'Remove', danger: true }))) return;
+            if (!(await confirmDialog(`Remove ${m.email} from "${s.title}"? The notes they wrote stay in the space, owned by you.`, { confirmLabel: 'Remove', danger: true }))) return;
             removeMemberBtn.disabled = true;
             try {
               await api.removeShareMember(s.id, m.id);
@@ -13181,6 +13406,22 @@ Generated ${new Date().toISOString()}
   });
 
   accountDeleteBtn.addEventListener('click', async () => {
+    // Spaces first: the server refuses to delete an account still in one, so
+    // every space is handed over, deleted or left explicitly (exitSpace).
+    const spaces = await api.getMyShares();
+    if (spaces.length) {
+      const go = await confirmDialog(
+        `You're in ${spaces.length} shared space${spaces.length === 1 ? '' : 's'}. Before deleting your account, decide what happens to ${spaces.length === 1 ? 'it' : 'each one'}.`,
+        { confirmLabel: 'Continue' }
+      );
+      if (!go) return;
+      for (const sp of spaces) {
+        if (!(await exitSpace(sp, { forDeletion: true }))) {
+          toast('Account deletion stopped — spaces you already handled stay that way.', { duration: 5000 });
+          return;
+        }
+      }
+    }
     const ok = await confirmDialog(
       'Delete your account and every note, link, reminder and file in it? We’ll email you a link to confirm. This cannot be undone.',
       { confirmLabel: 'Email me the link', danger: true }
@@ -13191,6 +13432,8 @@ Generated ${new Date().toISOString()}
       const res = await fetch('/api/account/delete-request', { method: 'POST' });
       if (res.ok) {
         toast('Check your email for a link to confirm deletion.');
+      } else if (res.status === 409) {
+        toast("You're still in a shared space — try again.");
       } else {
         toast('Could not start account deletion.');
       }

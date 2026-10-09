@@ -2127,6 +2127,13 @@ button:hover { filter: brightness(1.05); }
   font-size: 0.85rem;
 }
 
+/* An address field + its Add button on one line (Integrate → mail-in aliases). */
+.settings-modal .settings-inline-row input[type='email'] {
+  flex: 1 1 12rem;
+  width: auto;
+  min-width: 0;
+}
+
 .settings-inline-row select,
 .settings-inline-row input[type='file'] {
   padding: 0.4rem 0.5rem;

@@ -585,10 +585,70 @@ function removeMember(db, userId, shareId, targetUserId) {
   if (Number(targetUserId) === Number(userId)) {
     throw new HttpError(409, 'the owner cannot remove themself');
   }
-  const info = db
-    .prepare('DELETE FROM share_members WHERE share_id = ? AND user_id = ?')
-    .run(shareId, targetUserId);
-  if (info.changes === 0) throw new HttpError(404, 'not found');
+  if (!db.prepare('SELECT 1 FROM share_members WHERE share_id = ? AND user_id = ?').get(shareId, targetUserId)) {
+    throw new HttpError(404, 'not found');
+  }
+  db.transaction(() => detachMember(db, shareId, Number(targetUserId)))();
+}
+
+// A member leaving a space (leaveShare, removeMember, transferShare's
+// "and leave"). What they wrote stays in the space: notes.user_id is creator
+// provenance, so their notes and in-space links are handed to the owner —
+// otherwise deleting the leaver's account later would rip them out of a
+// space they're no longer even in. What only made sense *for them* goes:
+// their refs from personal notes into the space, their tabs and reminders on
+// its notes. Invites they sent now count as the owner's. Caller holds the
+// transaction and has checked the leaver isn't the owner.
+function detachMember(db, shareId, leaverId) {
+  const owner = db
+    .prepare("SELECT user_id FROM share_members WHERE share_id = ? AND role = 'owner'")
+    .get(shareId);
+  if (!owner || owner.user_id === leaverId) throw new HttpError(409, 'the owner must hand the space over or delete it');
+  const inSpace = 'SELECT id FROM notes WHERE share_id = ?';
+  db.prepare('UPDATE notes SET user_id = ? WHERE share_id = ? AND user_id = ?').run(owner.user_id, shareId, leaverId);
+  db.prepare(`UPDATE links SET user_id = ? WHERE user_id = ? AND note_a IN (${inSpace})`).run(owner.user_id, leaverId, shareId);
+  db.prepare('DELETE FROM personal_refs WHERE user_id = ? AND share_id = ?').run(leaverId, shareId);
+  db.prepare(`DELETE FROM tabs WHERE user_id = ? AND note_id IN (${inSpace})`).run(leaverId, shareId);
+  db.prepare(`DELETE FROM reminders WHERE user_id = ? AND note_id IN (${inSpace})`).run(leaverId, shareId);
+  db.prepare(`UPDATE users SET root_note_id = NULL WHERE id = ? AND root_note_id IN (${inSpace})`).run(leaverId, shareId);
+  db.prepare('UPDATE share_invites SET invited_by = ? WHERE share_id = ? AND invited_by = ?').run(owner.user_id, shareId, leaverId);
+  db.prepare('DELETE FROM share_members WHERE share_id = ? AND user_id = ?').run(shareId, leaverId);
+}
+
+// A non-owner leaving on their own. The owner can't (someone has to hold
+// the space): they hand it over first (transferShare) or delete it
+// (dissolveShare).
+function leaveShare(db, userId, shareId) {
+  if (requireMember(shareId, userId) === 'owner') {
+    throw new HttpError(409, 'the owner must hand the space over or delete it');
+  }
+  const share = db.prepare('SELECT title FROM shares WHERE id = ?').get(shareId);
+  db.transaction(() => detachMember(db, shareId, userId))();
+  history.record(userId, 'create', { noteId: null }, `Left shared space "${share ? share.title : ''}"`);
+}
+
+// Owner hands the space to another member (who becomes owner; created_by
+// follows, it's what "whose space is this" checks read). With `leave`, the
+// old owner then leaves like any member, their notes staying in the space.
+function transferShare(db, userId, shareId, { toUserId, leave = false } = {}) {
+  requireOwnerOf(shareId, userId);
+  const to = Number(toUserId);
+  if (to === userId || !db.prepare('SELECT 1 FROM share_members WHERE share_id = ? AND user_id = ?').get(shareId, to)) {
+    throw new HttpError(400, 'pick another member of this space');
+  }
+  const share = db.prepare('SELECT title FROM shares WHERE id = ?').get(shareId);
+  db.transaction(() => {
+    db.prepare("UPDATE share_members SET role = 'owner' WHERE share_id = ? AND user_id = ?").run(shareId, to);
+    db.prepare("UPDATE share_members SET role = 'editor' WHERE share_id = ? AND user_id = ?").run(shareId, userId);
+    db.prepare('UPDATE shares SET created_by = ? WHERE id = ?').run(to, shareId);
+    if (leave) detachMember(db, shareId, userId);
+  })();
+  history.record(
+    userId,
+    'create',
+    { noteId: null },
+    `Handed shared space "${share ? share.title : ''}" over${leave ? ' and left it' : ''}`
+  );
 }
 
 // Owner-only: the inverse of createShare/addNoteToShare — dissolves the
@@ -845,6 +905,8 @@ module.exports = {
   getOrCreateViewerToken,
   revokeViewerToken,
   removeMember,
+  leaveShare,
+  transferShare,
   resolveViewerToken,
   listRefsForNote,
   listRefsForScope,

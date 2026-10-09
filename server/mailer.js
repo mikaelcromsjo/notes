@@ -33,11 +33,11 @@ if (host && user && pass) {
 
 const configured = () => Boolean(transporter);
 
-async function sendMail({ to, subject, text, html }) {
+async function sendMail({ to, subject, text, html, headers, inReplyTo, references }) {
   if (!transporter) {
     throw new Error(`mailer not configured (no ${cfgPath} and no SMTP_* env)`);
   }
-  return transporter.sendMail({ from: FROM, to, subject, text, html });
+  return transporter.sendMail({ from: FROM, to, subject, text, html, headers, inReplyTo, references });
 }
 
 // Same mailbox, read side — server/mail-ingest.js polls it over IMAP with the

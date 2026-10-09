@@ -1,5 +1,7 @@
 const express = require('express');
 const mailIngest = require('../mail-ingest');
+const mailAliases = require('../mail-aliases');
+const mailer = require('../mailer');
 
 // Confirm link for a mailed-in note whose sender couldn't be authenticated
 // (server/mail-ingest.js). Token-authed, so mounted above the cookie gate.
@@ -75,6 +77,77 @@ router.post('/confirm', express.urlencoded({ extended: false }), async (req, res
     );
   }
   return invalid(res);
+});
+
+// --- sender aliases (server/mail-aliases.js) ---------------------------------
+// The list/add/remove routes are cookie-authed (resolveSession has already run,
+// this router just sits above the 401 gate for the token links), so each
+// checks req.userId itself.
+
+function needUser(req, res, next) {
+  if (!req.userId) return res.status(401).json({ error: 'no active session' });
+  next();
+}
+
+// Also hands back the ingest address so Settings can show it.
+router.get('/aliases', needUser, (req, res) => {
+  const cfg = mailer.imapConfig();
+  res.json({
+    ingestAddress: cfg ? cfg.ingestAddress : null,
+    enabled: process.env.MAIL_INGEST === '1' && Boolean(cfg),
+    aliases: mailAliases.list(req.userId),
+  });
+});
+
+router.post('/aliases', needUser, express.json(), async (req, res) => {
+  const result = await mailAliases.add(req.userId, req.body && req.body.address);
+  if (result.error) return res.status(result.status || 400).json({ error: result.error });
+  res.json(result);
+});
+
+router.delete('/aliases/:address', needUser, (req, res) => {
+  if (!mailAliases.remove(req.userId, req.params.address)) return res.status(404).json({ error: 'not found' });
+  res.status(204).end();
+});
+
+// Verify link mailed to the alias address. Same GET-shows / POST-does split
+// as /confirm, for the same prefetch reason.
+const aliasInvalid = (res) =>
+  res
+    .status(400)
+    .send(
+      page(
+        'Link no longer valid',
+        `<p style="font-size:15px;line-height:1.55;margin:0 0 20px">This link is invalid, already used, or expired. Add the address again in Settings → Integrate to get a new one.</p>${appLink}`,
+        '⚠️'
+      )
+    );
+
+router.get('/alias/verify', (req, res) => {
+  const token = String(req.query.token || '');
+  const row = mailAliases.pendingByToken(token);
+  if (!row) return aliasInvalid(res);
+  res.send(
+    page(
+      'Accept notes from this address?',
+      `<p style="font-size:15px;line-height:1.55;margin:0 0 6px">Mail from <strong>${esc(row.address)}</strong></p>
+<p style="font-size:15px;line-height:1.55;margin:0 0 20px">will become notes in <strong>${esc(row.account_email)}</strong>'s account.</p>
+<form method="post" action="/api/mail-in/alias/verify"><input type="hidden" name="token" value="${esc(token)}">${button('Confirm address')}</form>`,
+      '✉️'
+    )
+  );
+});
+
+router.post('/alias/verify', express.urlencoded({ extended: false }), (req, res) => {
+  const row = mailAliases.verify(String((req.body && req.body.token) || ''));
+  if (!row) return aliasInvalid(res);
+  res.send(
+    page(
+      'Address confirmed',
+      `<p style="font-size:15px;line-height:1.55;margin:0 0 20px">Mail from <strong>${esc(row.address)}</strong> to the mail-in address now becomes notes in your account.</p>${appLink}`,
+      '✅'
+    )
+  );
 });
 
 module.exports = router;

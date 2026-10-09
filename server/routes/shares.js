@@ -189,6 +189,16 @@ router.get('/:id', requireSession, wrap((req) => sharesCore.getShare(db, req.use
 // comment.
 router.delete('/:id', requireSession, wrap((req) => sharesCore.dissolveShare(db, req.userId, Number(req.params.id)), 204));
 
+// A non-owner leaves; their notes stay in the space (sharesCore.detachMember).
+router.post('/:id/leave', requireSession, wrap((req) => sharesCore.leaveShare(db, req.userId, Number(req.params.id)), 204));
+
+// Owner hands the space to another member — body { toUserId, leave }.
+router.post(
+  '/:id/transfer',
+  requireSession,
+  wrap((req) => sharesCore.transferShare(db, req.userId, Number(req.params.id), req.body || {}), 204)
+);
+
 router.get('/:id/root', requireSession, wrap((req) => sharesCore.shareRootNote(db, req.userId, Number(req.params.id))));
 
 router.get('/:id/notes', requireSession, wrap((req) => sharesCore.listShareNotes(db, req.userId, Number(req.params.id))));
