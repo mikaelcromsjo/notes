@@ -166,15 +166,18 @@
   <div id="graph-overlay" class="overlay hidden">
     <div class="graph-fullscreen">
       <button id="graph-overlay-close" class="note-fullscreen-close" title="Close" aria-label="Close">✕</button>
-      <div class="map-modes" id="graph-layout-modes">
-        <button id="graph-layout-toggle" title="Switch to force layout">🎯 Radial</button>
-        <button id="graph-score-toggle" title="Switch to link-distance-only ranking">🔥 Heat</button>
-        <button id="graph-done-toggle" title="Show/hide done notes">✅ Done</button>
-      </div>
-      <div class="graph-level-row">
-        <label for="graph-level">Notes shown</label>
-        <input type="range" id="graph-level" min="6" max="60" value="20" />
-        <span id="graph-level-label">20</span>
+      <div class="graph-controls">
+        <div class="map-modes" id="graph-layout-modes">
+          <button id="graph-layout-toggle" title="Switch to force layout">🎯 Radial</button>
+          <button id="graph-score-toggle" title="Switch to link-distance-only ranking">🔥 Heat</button>
+          <button id="graph-done-toggle" title="Show/hide done notes">✅ Done</button>
+          <button id="graph-spaces-toggle" title="Include every shared space's notes, joined through your references">🔗 Spaces</button>
+        </div>
+        <div class="graph-level-row">
+          <label for="graph-level">Notes shown</label>
+          <input type="range" id="graph-level" min="6" max="60" value="20" />
+          <span id="graph-level-label">20</span>
+        </div>
       </div>
       <div id="graph-canvas-wrap" class="graph-canvas-wrap">
         <canvas id="graph-canvas"></canvas>

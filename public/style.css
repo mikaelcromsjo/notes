@@ -1714,34 +1714,53 @@ button:hover { filter: brightness(1.05); }
   overflow: hidden;
 }
 
-/* Unlike the geo map, the graph canvas has no on-canvas zoom control to
-   clear (zoom is pinch/wheel-only), so pull the button row in from
-   .map-modes' shared left:3.25rem all the way to the overlay's edge, and up
-   from top:2.75rem onto the same row as the close (✕) button. */
+/* All graph controls sit in one stack along the bottom — the button row
+   directly above the "Notes shown" slider — so nothing shares the top edge
+   with the close (✕) button. */
+.graph-controls {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 1rem;
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none; /* the gaps stay draggable canvas */
+}
+
+.graph-controls > * {
+  pointer-events: auto;
+}
+
 #graph-layout-modes {
-  top: 0.75rem;
-  left: 0.75rem;
+  position: static;
+  flex-wrap: nowrap;
 }
 
-/* Fixed width, sized to fit the wider of "🎯 Radial" / "🌀 Force", and
-   left-aligned content — otherwise the centred default button text shifts
-   the icon sideways every time the label swaps between the two words. */
-#graph-layout-toggle {
-  width: 5.75rem;
-  box-sizing: border-box;
-  text-align: left;
+/* One row always: the four buttons share the width equally instead of
+   wrapping (equal shares also keep them from resizing when a label swaps). */
+#graph-layout-modes button {
+  flex: 1 1 0;
+  min-width: 0;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+  white-space: nowrap;
+  overflow: hidden;
 }
 
-/* Same fixed-width treatment, sized for the wider "🔥 Heat" / "📏 Link". */
+/* Left-aligned content — otherwise the centred default button text shifts
+   the icon sideways every time the label swaps ("🎯 Radial" / "🌀 Force",
+   "🔥 Heat" / "📏 Link"). */
+#graph-layout-toggle,
 #graph-score-toggle {
-  width: 5.25rem;
-  box-sizing: border-box;
   text-align: left;
 }
 
 /* Coloured emoji read as "on" even in the unselected, non-accent button
    state — desaturate so "off" (the default) looks unmistakably off. */
-#graph-done-toggle:not(.active) {
+#graph-done-toggle:not(.active),
+#graph-spaces-toggle:not(.active) {
   filter: grayscale(1);
 }
 
@@ -1760,11 +1779,6 @@ button:hover { filter: brightness(1.05); }
 
 /* Full-width bar along the bottom, like the geo map's date-range slider. */
 .graph-level-row {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 1rem;
-  z-index: 500;
   display: flex;
   align-items: center;
   gap: 0.6rem;

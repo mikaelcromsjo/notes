@@ -25,6 +25,7 @@
   const graphLayoutToggleBtn = document.getElementById('graph-layout-toggle');
   const graphScoreToggleBtn = document.getElementById('graph-score-toggle');
   const graphDoneToggleBtn = document.getElementById('graph-done-toggle');
+  const graphSpacesToggleBtn = document.getElementById('graph-spaces-toggle');
   const insightsBtn = document.getElementById('insights-btn');
   const insightsOverlay = document.getElementById('insights-overlay');
   const insightsClose = document.getElementById('insights-close');
@@ -11667,11 +11668,23 @@
   let graphOriginalShareId = null;
   let graphLayoutMode = localStorage.getItem('nico-graph-layout') || 'radial';
   let graphLevel = parseInt(localStorage.getItem('nico-graph-level'), 10) || 20;
+  // What the user last set on the slider. graphLevel is this clamped to the
+  // current scope's bounds (syncGraphLevelBounds) — kept apart so a visit to
+  // a small space doesn't permanently shrink the remembered setting.
+  let graphLevelPref = graphLevel;
   let graphShowDone = localStorage.getItem('nico-graph-show-done') === '1'; // default off
   // 'heat' = the existing usage/proximity blend (weight grows with level);
   // 'link' = ranked purely by link-hop distance from the centred note,
   // ignoring usage entirely, regardless of the level slider.
   let graphScoreMode = localStorage.getItem('nico-graph-score-mode') || 'heat';
+  // 🔗 Spaces: graph every scope at once — personal notes plus every space
+  // you're in, joined where a personal note references a space note —
+  // instead of only the scope the centred note lives in. graphSpacesData is
+  // the merged snapshot ({notes, adj, scopeOf, refKeys, noAccessRefs}, see
+  // loadGraphSpaces), loaded once per open/toggle and null while the mode
+  // is off.
+  let graphShowSpaces = localStorage.getItem('nico-graph-show-spaces') === '1'; // default off
+  let graphSpacesData = null;
   const graphPointers = new Map(); // pointerId -> last-seen {x,y} in client coords
   let graphPanStart = null; // {x,y, camX, camY} while exactly one pointer is down
   let graphPinchStartDist = null;
@@ -11702,7 +11715,82 @@
   }
 
   function graphActiveNotes() {
-    return allNotesCache.filter((n) => n.status !== 'deleted');
+    return (graphSpacesData ? graphSpacesData.notes : allNotesCache).filter((n) => n.status !== 'deleted');
+  }
+
+  // Which scope a graphed note lives in (null = personal). Without 🔗 Spaces
+  // every node is in the scope being graphed.
+  function graphScopeOf(id) {
+    if (graphSpacesData) return graphSpacesData.scopeOf.get(id) ?? null;
+    return currentSpace ? currentSpace.id : null;
+  }
+
+  function graphEdgeKey(a, b) {
+    return a < b ? `${a}:${b}` : `${b}:${a}`;
+  }
+
+  // The merged, every-scope snapshot behind 🔗 Spaces. Personal notes/links
+  // come from the usual mirror-backed sources, each space's from its own
+  // online-only routes (so offline this degrades to the personal graph
+  // alone), and each of this user's personal_refs becomes a real edge
+  // between its two notes — that's what joins the scopes into one graph.
+  // A ref into a space you've lost access to has no far note to draw, so
+  // it's kept aside for computeGraphData's 🚫 pseudo-node instead.
+  async function loadGraphSpaces() {
+    const inSpace = currentSpace ? currentSpace.id : null;
+    const personal =
+      inSpace == null
+        ? allNotesCache
+        : await fetch('/api/notes')
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('notes'))))
+            .catch(() => cache.cachedList());
+    const notes = [...personal];
+    const scopeOf = new Map(personal.map((n) => [n.id, null]));
+    const adj = new Map();
+    const add = (a, b) => {
+      if (!adj.has(a)) adj.set(a, new Set());
+      adj.get(a).add(b);
+    };
+    const addLinks = (links) => {
+      for (const l of links) {
+        if (l._deleted) continue;
+        add(l.a, l.b);
+        add(l.b, l.a);
+      }
+    };
+    addLinks(await cache.cachedLinks());
+
+    const shares = await api.getMyShares();
+    await Promise.all(
+      shares.map(async (s) => {
+        const [rows, links] = await Promise.all([
+          s.id === inSpace ? allNotesCache : api.getShareNotes(s.id),
+          api.getShareLinks(s.id),
+        ]);
+        for (const n of rows) {
+          notes.push(n);
+          scopeOf.set(n.id, s.id);
+        }
+        addLinks(links);
+      })
+    );
+
+    const refs = await fetch('/api/shares/refs')
+      .then((r) => (r.ok ? r.json() : []))
+      .catch(() => []);
+    const refKeys = new Set();
+    const noAccessRefs = [];
+    for (const ref of refs) {
+      if (ref.noAccess) {
+        noAccessRefs.push(ref);
+        continue;
+      }
+      if (!scopeOf.has(ref.personal_note_id) || !scopeOf.has(ref.shared_note_id)) continue;
+      add(ref.personal_note_id, ref.shared_note_id);
+      add(ref.shared_note_id, ref.personal_note_id);
+      refKeys.add(graphEdgeKey(ref.personal_note_id, ref.shared_note_id));
+    }
+    graphSpacesData = { notes, adj, scopeOf, refKeys, noAccessRefs };
   }
 
   // Notes actually eligible to be shown — excludes done ones while the Done
@@ -11755,7 +11843,8 @@
   async function computeGraphData(centerId, level, showDone, scoreMode) {
     const notesById = new Map(graphActiveNotes().map((n) => [n.id, n]));
     if (!notesById.has(centerId)) return { nodes: [], edges: [] };
-    const adj = await buildGraphAdjacency();
+    const spaces = graphSpacesData;
+    const adj = spaces ? spaces.adj : await buildGraphAdjacency();
     const heat = (await api.getNoteHeat()) || {};
 
     // BFS distance walks through every active note (including done ones) so
@@ -11796,10 +11885,12 @@
     for (const c of chosen) {
       for (const nb of adj.get(c.id) || []) {
         if (!chosenIds.has(nb)) continue;
-        const key = c.id < nb ? `${c.id}:${nb}` : `${nb}:${c.id}`;
+        const key = graphEdgeKey(c.id, nb);
         if (seen.has(key)) continue;
         seen.add(key);
-        edges.push([c.id, nb]);
+        // Third slot = "this is a reference, not a link" (🔗 Spaces only) —
+        // drawGraph dashes it.
+        edges.push([c.id, nb, Boolean(spaces && spaces.refKeys.has(key))]);
       }
     }
 
@@ -11822,10 +11913,14 @@
     // reference: a ref's own share_id is the far scope when it's being
     // viewed from personal, but personal (null) when it's being viewed
     // from inside that same space.
-    const refs = await api.getAllRefs();
+    // With 🔗 Spaces on, the far end *is* in notesById and the ref is an
+    // ordinary edge already (loadGraphSpaces) — only the no-access ones are
+    // left to show this way, always seen from their personal end.
+    const fromSpace = spaces ? null : currentSpace;
+    const refs = spaces ? spaces.noAccessRefs : await api.getAllRefs();
     for (const ref of refs) {
-      const localId = currentSpace ? ref.shared_note_id : ref.personal_note_id;
-      const targetId = currentSpace ? ref.personal_note_id : ref.shared_note_id;
+      const localId = fromSpace ? ref.shared_note_id : ref.personal_note_id;
+      const targetId = fromSpace ? ref.personal_note_id : ref.shared_note_id;
       if (!chosenIds.has(localId)) continue;
       const localNode = chosen.find((c) => c.id === localId);
       const pseudoId = `ref:${ref.id}`;
@@ -11838,7 +11933,7 @@
         isRef: true,
         noAccess: Boolean(ref.noAccess),
         targetId,
-        targetShareId: currentSpace ? null : ref.share_id,
+        targetShareId: fromSpace ? null : ref.share_id,
       });
       edges.push([localId, pseudoId]);
     }
@@ -12080,9 +12175,10 @@
     ctx.scale(cam.scale, cam.scale);
 
     const posOf = (id) => graphVisual.get(id) || { x: 0, y: 0, opacity: 1 };
+    const centerScope = graphScopeOf(graphState.centerId);
     ctx.strokeStyle = border;
     ctx.lineWidth = 1.2 / cam.scale;
-    for (const [a, b] of graphAnimEdges) {
+    for (const [a, b, isRefEdge] of graphAnimEdges) {
       const pa = posOf(a);
       const pb = posOf(b);
       // A cross-scope reference edge is dashed — it's not a real `links`
@@ -12090,7 +12186,9 @@
       // another scope, so it reads visually different from an ordinary link.
       const nodeA = graphAnimNodesById.get(a);
       const nodeB = graphAnimNodesById.get(b);
-      ctx.setLineDash(nodeA && nodeA.isRef || (nodeB && nodeB.isRef) ? [4 / cam.scale, 3 / cam.scale] : []);
+      ctx.setLineDash(
+        isRefEdge || (nodeA && nodeA.isRef) || (nodeB && nodeB.isRef) ? [4 / cam.scale, 3 / cam.scale] : []
+      );
       ctx.globalAlpha = Math.min(pa.opacity, pb.opacity);
       ctx.beginPath();
       ctx.moveTo(pa.x, pa.y);
@@ -12115,6 +12213,12 @@
       if (isCenter) {
         ctx.lineWidth = 2.5 / cam.scale;
         ctx.strokeStyle = surface;
+        ctx.stroke();
+      } else if (graphSpacesData && !node.isRef && graphScopeOf(id) !== centerScope) {
+        // 🔗 Spaces: a note in another scope than the centred one gets a
+        // ring in the reference colour, so the scope boundary stays visible.
+        ctx.lineWidth = 2 / cam.scale;
+        ctx.strokeStyle = '#8a5fd8';
         ctx.stroke();
       }
     }
@@ -12204,8 +12308,10 @@
   // This is just a peek, not a commit: closeGraph restores the original
   // scope by default if the overlay closes without the user having
   // actually opened a note (see its own doc comment).
+  // With 🔗 Spaces on the graph doesn't depend on the app's scope at all, so
+  // it's left alone until a note is actually opened.
   async function recenterGraph(centerId, shareId) {
-    await ensureScope(shareId);
+    if (!graphSpacesData) await ensureScope(shareId);
     syncGraphLevelBounds(); // scope may just have changed — keep the slider honest about it
     await rebuildGraph(centerId);
   }
@@ -12231,7 +12337,7 @@
       await goTo(id, 'graph');
       await openNoteFullscreen('preview');
     } else {
-      await recenterGraph(hit.id, currentSpace ? currentSpace.id : null);
+      await recenterGraph(hit.id, graphScopeOf(hit.id));
     }
   }
 
@@ -12330,7 +12436,7 @@
     const max = graphMaxLevel();
     graphLevelInput.min = String(min);
     graphLevelInput.max = String(max);
-    graphLevel = Math.min(max, Math.max(min, graphLevel));
+    graphLevel = Math.min(max, Math.max(min, graphLevelPref));
     graphLevelInput.value = String(graphLevel);
     graphLevelLabel.textContent = String(graphLevel);
   }
@@ -12343,6 +12449,8 @@
     }
     graphOriginalShareId = currentSpace ? currentSpace.id : null;
     graphOverlay.classList.remove('hidden');
+    graphSpacesData = null;
+    if (graphShowSpaces) await loadGraphSpaces();
     syncGraphLevelBounds();
     graphLayoutToggleBtn.textContent = graphLayoutMode === 'force' ? '🌀 Force' : '🎯 Radial';
     graphLayoutToggleBtn.title = graphLayoutMode === 'force' ? 'Switch to radial layout' : 'Switch to force layout';
@@ -12350,6 +12458,7 @@
     graphScoreToggleBtn.title =
       graphScoreMode === 'link' ? 'Switch to usage-based ranking' : 'Switch to link-distance-only ranking';
     graphDoneToggleBtn.classList.toggle('active', graphShowDone);
+    graphSpacesToggleBtn.classList.toggle('active', graphShowSpaces);
     await rebuildGraph(startId);
   }
 
@@ -12366,6 +12475,7 @@
     cancelAnimationFrame(graphAnimHandle);
     graphAnimHandle = null;
     graphState = null;
+    graphSpacesData = null;
     graphVisual = new Map();
     graphAnimNodesById = new Map();
     graphAnimEdges = [];
@@ -12397,7 +12507,7 @@
   graphCanvas.addEventListener('wheel', graphWheel, { passive: false });
 
   graphLevelInput.addEventListener('input', () => {
-    graphLevel = Number(graphLevelInput.value);
+    graphLevel = graphLevelPref = Number(graphLevelInput.value);
     graphLevelLabel.textContent = String(graphLevel);
     localStorage.setItem('nico-graph-level', String(graphLevel));
     clearTimeout(graphLevelDebounce);
@@ -12438,6 +12548,26 @@
     graphDoneToggleBtn.classList.toggle('active', graphShowDone);
     syncGraphLevelBounds();
     if (graphState) rebuildGraph(graphState.centerId);
+  });
+
+  // Changes the whole note/link set being graphed. Turning it off while
+  // centred on a note in another scope first moves the app's scope there
+  // (same peek recenterGraph does; closeGraph restores it), since the
+  // single-scope graph is drawn from allNotesCache.
+  graphSpacesToggleBtn.addEventListener('click', async () => {
+    graphShowSpaces = !graphShowSpaces;
+    localStorage.setItem('nico-graph-show-spaces', graphShowSpaces ? '1' : '0');
+    graphSpacesToggleBtn.classList.toggle('active', graphShowSpaces);
+    const centerId = graphState && graphState.centerId;
+    if (graphShowSpaces) {
+      await loadGraphSpaces();
+    } else {
+      const scope = centerId != null ? graphScopeOf(centerId) : null;
+      graphSpacesData = null;
+      if (centerId != null) await ensureScope(scope);
+    }
+    syncGraphLevelBounds();
+    if (centerId != null) rebuildGraph(centerId);
   });
 
   insightsBtn.addEventListener('click', openInsights);
