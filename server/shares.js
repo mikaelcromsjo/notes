@@ -10,6 +10,7 @@ const db = require('./db');
 const history = require('./history');
 const mailer = require('./mailer');
 const {
+  buildHierarchy,
   subtreeIds,
   firstCreatedRoot,
   rootedDescendants,
@@ -232,6 +233,32 @@ function moveNotesIntoShare(db, userId, shareId, ids) {
     const sharedNoteId = idSet.has(note_a) ? note_a : note_b;
     addRefStmt.run(userId, personalNoteId, shareId, sharedNoteId, nowIso());
   }
+
+  // The other direction: a ref from a moved note into this same space (what
+  // moveNotesOutOfShare made of its in-space links when it was removed) now
+  // has both ends in the space, so it becomes a real link again.
+  const staleRefs = db
+    .prepare(
+      `SELECT pr.id, pr.user_id, pr.personal_note_id, pr.shared_note_id, pr.created_at, sn.share_id AS target_share
+       FROM personal_refs pr JOIN notes sn ON sn.id = pr.shared_note_id
+       WHERE pr.share_id = ? AND pr.personal_note_id IN (${placeholders})`
+    )
+    .all(shareId, ...ids);
+  const insertLink = db.prepare(
+    'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id, kind) VALUES (?, ?, ?, ?, NULL)'
+  );
+  const dropRef = db.prepare('DELETE FROM personal_refs WHERE id = ?');
+  for (const r of staleRefs) {
+    if (r.target_share === shareId) {
+      insertLink.run(
+        Math.min(r.personal_note_id, r.shared_note_id),
+        Math.max(r.personal_note_id, r.shared_note_id),
+        r.created_at,
+        r.user_id
+      );
+    }
+    dropRef.run(r.id);
+  }
   // What a 'share' undo needs to put these links back exactly as they were
   // (created_at feeds the hierarchy guess — see hierarchy.js).
   return straddling.map(({ note_a, note_b, created_at, kind }) => ({ a: note_a, b: note_b, created_at, kind }));
@@ -374,7 +401,8 @@ function listShareNotes(db, userId, shareId) {
   return db
     .prepare(
       `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo, mail,
-              created_from_note_id, done_with_note_id
+              created_from_note_id, done_with_note_id,
+              EXISTS (SELECT 1 FROM note_preview_tokens t WHERE t.note_id = notes.id) AS preview_link
        FROM notes WHERE share_id = ? AND status != 'deleted'
        ORDER BY updated_at DESC`
     )
@@ -578,6 +606,61 @@ function getOrCreateViewerToken(db, userId, shareId) {
 function revokeViewerToken(db, userId, shareId) {
   requireOwnerOf(shareId, userId);
   db.prepare('DELETE FROM share_viewer_tokens WHERE share_id = ?').run(shareId);
+}
+
+// --- Preview links (note_preview_tokens): a read-only link to one note and
+// everything under it. Who may hand one out: a personal note's owner, or —
+// like the whole-space viewer link — the owner of the space the note is in.
+// An encrypted account's personal notes are ciphertext the server can't
+// show: the link still works, minus their text (routes/shares.js's
+// viewerSnapshot).
+function requirePreviewAccess(db, userId, noteId) {
+  const { role, note } = resolveNoteAccess(db, userId, noteId);
+  if (!role) throw new HttpError(404, 'not found');
+  if (role !== 'owner') throw new HttpError(403, 'only the space owner can manage preview links');
+  return note;
+}
+
+function getPreviewLink(db, userId, noteId) {
+  const note = requirePreviewAccess(db, userId, Number(noteId));
+  const row = db.prepare('SELECT token FROM note_preview_tokens WHERE note_id = ?').get(note.id);
+  return { token: row ? row.token : null };
+}
+
+// Idempotent, like getOrCreateViewerToken: asking again never breaks a link
+// already handed out.
+function createPreviewLink(db, userId, noteId) {
+  const note = requirePreviewAccess(db, userId, Number(noteId));
+  const existing = db.prepare('SELECT token FROM note_preview_tokens WHERE note_id = ?').get(note.id);
+  if (existing) return { token: existing.token };
+  const token = crypto.randomBytes(24).toString('hex');
+  db.prepare('INSERT INTO note_preview_tokens (note_id, user_id, token, created_at) VALUES (?, ?, ?, ?)').run(
+    note.id,
+    userId,
+    token,
+    nowIso()
+  );
+  return { token };
+}
+
+function revokePreviewLink(db, userId, noteId) {
+  const note = requirePreviewAccess(db, userId, Number(noteId));
+  db.prepare('DELETE FROM note_preview_tokens WHERE note_id = ?').run(note.id);
+}
+
+// -> { root, scope, allowed } or null. `allowed` = the note and its whole
+// subtree in the inferred hierarchy of the scope it lives in *now* —
+// recomputed per request, so the link follows the tree as it grows or
+// shrinks, and never reaches a note outside it (a cross-reference out of
+// the subtree, a ref into another space).
+function previewScope(token) {
+  if (typeof token !== 'string' || token.length < 16) return null;
+  const row = db.prepare('SELECT note_id FROM note_preview_tokens WHERE token = ?').get(token);
+  const root = row && db.prepare("SELECT * FROM notes WHERE id = ? AND status != 'deleted'").get(row.note_id);
+  if (!root) return null;
+  const scope = scopeOf(root);
+  const { childrenOf } = buildHierarchy(scope);
+  return { root, scope, allowed: new Set([root.id, ...subtreeIds(childrenOf, root.id)]) };
 }
 
 function removeMember(db, userId, shareId, targetUserId) {
@@ -908,6 +991,10 @@ module.exports = {
   leaveShare,
   transferShare,
   resolveViewerToken,
+  getPreviewLink,
+  createPreviewLink,
+  revokePreviewLink,
+  previewScope,
   listRefsForNote,
   listRefsForScope,
   addRef,

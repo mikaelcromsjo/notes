@@ -4,6 +4,7 @@ const sharesCore = require('../shares');
 const sessions = require('../sessions');
 const { probableRoot } = require('../hierarchy');
 const { computeNeighbors } = require('../neighbors');
+const encryption = require('../encryption');
 const { HttpError } = require('../http-error');
 
 const router = express.Router();
@@ -95,14 +96,23 @@ function pickCenter(shareId, centerParam) {
   return root ? db.prepare('SELECT * FROM notes WHERE id = ?').get(root.id) : null;
 }
 
-function viewerSnapshot(shareId, note) {
+// `scope` = the graph the note lives in ({ shareId } for the whole-space
+// viewer link); `opts` passes computeNeighbors' `only`/`skipStructuralFallback`
+// through for a preview link's subtree.
+function viewerSnapshot(scope, note, opts = {}) {
   if (!note) return { center: null, parent: null, neighbors: [] };
   // rankUserId is deliberately omitted (null) — an anonymous viewer has no
   // nav_events of their own, so this always falls back to the same cold-start
   // link-recency order computeNeighbors already produces when fwdTotal === 0.
-  const result = computeNeighbors({ shareId }, note.id, null) || { parent: null, neighbors: [] };
+  const result = computeNeighbors(scope, note.id, null, opts) || { parent: null, neighbors: [] };
+  // An encrypted account's personal notes hold ciphertext only its own
+  // devices can read: the viewer gets everything that isn't encrypted
+  // (title, attachment, mail info, links) and `encrypted: true` in place of
+  // the text, which the page shows as a 🔒 notice.
+  const readable = (n) =>
+    n && encryption.isCipher(n.content) ? { ...n, content: '', encrypted: true } : n;
   return {
-    center: {
+    center: readable({
       id: note.id,
       title: note.title,
       content: note.content,
@@ -110,9 +120,14 @@ function viewerSnapshot(shareId, note) {
       status: note.status,
       attachment_path: note.attachment_path,
       updated_at: note.updated_at,
-    },
-    parent: result.parent,
-    neighbors: result.neighbors,
+      mail: note.mail,
+    }),
+    parent: readable(result.parent),
+    neighbors: result.neighbors.map(readable),
+    // Every link, not just the ones the grid has room for — the viewer's
+    // fullscreen note lists them all, like the app's own editor does.
+    linkCount: result.linkCount || 0,
+    links: result.links || [],
   };
 }
 
@@ -132,7 +147,7 @@ router.get('/:id/viewer', (req, res) => {
   const shareId = Number(req.params.id);
   if (!requireViewerToken(req, res, shareId)) return;
   const note = pickCenter(shareId, req.query.center ? Number(req.query.center) : null);
-  res.json(viewerSnapshot(shareId, note));
+  res.json(viewerSnapshot({ shareId }, note));
 });
 
 // id+title only, every note in the share — just enough for the fullscreen
@@ -157,7 +172,36 @@ router.get('/:id/viewer/notes/:noteId', (req, res) => {
     .prepare(`SELECT * FROM notes WHERE id = ? AND share_id = ? AND status != 'deleted'`)
     .get(Number(req.params.noteId), shareId);
   if (!note) return res.status(404).json({ error: 'not found' });
-  res.json(viewerSnapshot(shareId, note));
+  res.json(viewerSnapshot({ shareId }, note));
+});
+
+// --- Preview link: the same feed for one note and everything under it
+// (sharesCore.previewScope). The token alone names the subtree; `?center=`
+// outside it just lands on the subtree's root. The root never shows a
+// parent — whatever is above it is outside the link.
+router.get('/preview/:token', (req, res) => {
+  const p = sharesCore.previewScope(req.params.token);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const centerId = Number(req.query.center);
+  const note =
+    centerId && centerId !== p.root.id && p.allowed.has(centerId)
+      ? db.prepare("SELECT * FROM notes WHERE id = ? AND status != 'deleted'").get(centerId)
+      : p.root;
+  const center = note || p.root;
+  res.json(
+    viewerSnapshot(p.scope, center, { only: p.allowed, skipStructuralFallback: center.id === p.root.id })
+  );
+});
+
+router.get('/preview/:token/index', (req, res) => {
+  const p = sharesCore.previewScope(req.params.token);
+  if (!p) return res.status(404).json({ error: 'not found' });
+  const ids = JSON.stringify([...p.allowed]);
+  res.json(
+    db
+      .prepare(`SELECT id, title FROM notes WHERE id IN (SELECT value FROM json_each(?)) AND status != 'deleted'`)
+      .all(ids)
+  );
 });
 
 // --- Session-authed routes ---------------------------------------------
@@ -258,6 +302,24 @@ router.delete(
   '/:id/members/:userId',
   requireSession,
   wrap((req) => sharesCore.removeMember(db, req.userId, Number(req.params.id), Number(req.params.userId)), 204)
+);
+
+// A note's preview link: GET = is there one, POST = get or create (never
+// rotates), DELETE = turn it off.
+router.get(
+  '/preview-link/:noteId',
+  requireSession,
+  wrap((req) => sharesCore.getPreviewLink(db, req.userId, req.params.noteId))
+);
+router.post(
+  '/preview-link/:noteId',
+  requireSession,
+  wrap((req) => sharesCore.createPreviewLink(db, req.userId, req.params.noteId))
+);
+router.delete(
+  '/preview-link/:noteId',
+  requireSession,
+  wrap((req) => sharesCore.revokePreviewLink(db, req.userId, req.params.noteId), 204)
 );
 
 // Idempotent — "get me the link", never rotates an existing one. See

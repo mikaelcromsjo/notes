@@ -14,9 +14,9 @@ const WELCOME_CONTENT = `Hey! This is a graph of notes — the middle card is al
 [[🚀 Take the tour]] — a hands-on walkthrough, one step at a time.
 [[⏭️ Skip the intro]] — clear these practice notes and start blank.`;
 
-// A real "app link" attachment (the same type the 🔗 App link picker style
+// A real link attachment (the same type the 🔗 Link picker style
 // creates — server/routes/notes.js's POST /:id/attachments), not a markdown
-// link buried in text: the card itself renders a tappable "🚀 Launch" button
+// link buried in text: the card itself renders a tappable "🔗 Open" button
 // (buildAttachmentPreview in app.js). `/?ob=begin` is same-origin/relative so
 // it's a same-tab navigation, landing back in handleDeepLink's `ob=begin`
 // branch — see server/routes/onboarding.js POST /begin.
@@ -24,7 +24,7 @@ const CLEAR_DEMO_URI = '/?ob=begin';
 const SKIP_TITLE = '⏭️ Skip the intro';
 const SKIP_CONTENT = `No problem — you can always revisit the basics later.
 
-Tap 🚀 Launch to clear the demo and start fresh.`;
+Tap 🔗 Open to clear the demo and start fresh.`;
 
 // The tour chain — each note links only to the next (a straight line, not a
 // hub), title/content fixed once at seed time. `next` names the note whose
@@ -72,7 +72,7 @@ const CHAIN = [
   },
   {
     title: '💡 Tips: attachments & wikilinks',
-    body: `📎 **Attachments** — the ➕ picker can also add a photo, audio recording, file, contact, or app link (like the one at the end of this tour) — each becomes its own linked note.
+    body: `📎 **Attachments** — the ➕ picker can also add a photo, audio recording, file, contact, or link (like the one at the end of this tour) — each becomes its own linked note.
 
 🔗 **Wikilinks** — type [[Note title]] anywhere in a note to link to it inline, the way this tour has been getting you around.`,
   },
@@ -113,7 +113,7 @@ function seedSampleGraph(userId) {
     tick();
     const clearFd = insertNote.run(
       '🎉 Clear the demo',
-      'Tap 🚀 Launch to clear the demo notes and start fresh.',
+      'Tap 🔗 Open to clear the demo notes and start fresh.',
       ts, ts, 'app', CLEAR_DEMO_URI, prevId, userId
     );
     link(prevId, clearFd.lastInsertRowid, ts);

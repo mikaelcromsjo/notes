@@ -55,7 +55,8 @@ function list(db, userId) {
   return db
     .prepare(
       `SELECT id, title, created_at, updated_at, pinned, type, status, lat, lon, geo, theme, theme_children, mail,
-              created_from_note_id, done_with_note_id
+              created_from_note_id, done_with_note_id,
+              EXISTS (SELECT 1 FROM note_preview_tokens t WHERE t.note_id = notes.id) AS preview_link
        FROM notes WHERE user_id = ? AND share_id IS NULL AND status != 'deleted'
        ORDER BY updated_at DESC`
     )

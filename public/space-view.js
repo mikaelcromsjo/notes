@@ -10,6 +10,18 @@
   const params = new URLSearchParams(location.search);
   const shareId = Number(params.get('id'));
   const token = params.get('token') || '';
+  // A preview link (?preview=<token>) is the same page over one note and
+  // everything under it instead of a whole space — the token alone names
+  // it, so there's no id. See server/routes/shares.js's /preview/:token.
+  const previewToken = params.get('preview') || '';
+  function feedUrl(suffix = '') {
+    if (previewToken) {
+      return new URL(`/api/shares/preview/${encodeURIComponent(previewToken)}${suffix}`, location.origin);
+    }
+    const url = new URL(`/api/shares/${shareId}/viewer${suffix}`, location.origin);
+    url.searchParams.set('token', token);
+    return url;
+  }
 
   const statusEl = document.getElementById('space-status');
   const gridEl = document.getElementById('space-grid');
@@ -18,11 +30,11 @@
   const noteOverlayBody = document.getElementById('note-overlay-body');
   const noteOverlayCloseBtn = document.getElementById('note-overlay-close');
 
-  // Same 3x3 layout convention as public/app.js's render(): center is slot 4,
-  // the "probable parent" back-link takes the top-center slot, everything
-  // else fills the remaining outer slots in order.
+  // Same 3x3 layout as public/app.js's render(): center is slot 4, the
+  // "probable parent" back-link takes the top-center slot when there is one,
+  // the neighbours fill the other outer slots in order.
   const BACK_SLOT = 1;
-  const OUTER_SLOTS = [0, 2, 3, 5, 6, 7, 8];
+  const OUTER_SLOTS = [0, 1, 2, 3, 5, 6, 7, 8];
 
   function snippet(text) {
     return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -36,7 +48,7 @@
   // auth of its own (server/index.js) — so attachment_path is already a
   // directly fetchable URL, no resolveMediaUrl/lightbox indirection needed.
   // Returns null for a type/shape this page doesn't know how to show.
-  function buildAttachmentPreview(note) {
+  function buildAttachmentPreview(note, { compact = false } = {}) {
     if (note.type === 'image' && note.attachment_path) {
       const link = document.createElement('a');
       link.className = 'center-attachment-image-link';
@@ -80,22 +92,90 @@
         tel.textContent = `📞 ${contact.phone}`;
         box.appendChild(tel);
       }
+      // Grid cards get the call button only, like the app's compact preview.
+      if (compact) return box.childElementCount ? box : null;
       if (contact.email) {
         const mail = document.createElement('a');
         mail.href = `mailto:${contact.email}`;
         mail.textContent = `✉️ ${contact.email}`;
         box.appendChild(mail);
       }
-      return box.childElementCount ? box : null;
+      const vcard = [
+        'BEGIN:VCARD',
+        'VERSION:3.0',
+        `FN:${contact.name || note.title}`,
+        contact.phone ? `TEL:${contact.phone}` : '',
+        contact.email ? `EMAIL:${contact.email}` : '',
+        'END:VCARD',
+      ].filter(Boolean).join('\n');
+      const vcardLink = document.createElement('a');
+      vcardLink.href = `data:text/vcard;charset=utf-8,${encodeURIComponent(vcard)}`;
+      vcardLink.download = `${(contact.name || note.title || 'contact').replace(/[^\w.-]+/g, '_')}.vcf`;
+      vcardLink.textContent = '📇 Open in Contacts';
+      box.appendChild(vcardLink);
+      return box;
     }
     if (note.type === 'app' && note.attachment_path) {
+      const box = document.createElement('div');
+      box.className = 'center-attachment-link';
       const link = document.createElement('a');
       link.className = 'center-attachment-app';
       link.href = note.attachment_path;
-      link.textContent = '🚀 Launch';
-      return link;
+      link.textContent = '🔗 Open';
+      const url = document.createElement('span');
+      url.className = 'center-attachment-link-url';
+      url.textContent = note.attachment_path;
+      box.append(link, url);
+      return box;
     }
     return null;
+  }
+
+  // Stands in for a note's text when it's encrypted (`encrypted` in the
+  // feed): only its owner's devices hold the key, so a link can't show it —
+  // same idea as the app's own "🔒 Locked" on a device without the key.
+  function encryptedNotice(short) {
+    const el = document.createElement('div');
+    el.className = 'encrypted-notice';
+    el.textContent = short ? '🔒 Encrypted' : "🔒 This note's text is encrypted and isn't shown in a preview.";
+    return el;
+  }
+
+  // Lower-right icon row, same as public/app.js's buildCardInfoIcons minus
+  // what's per-account (pins, reminders).
+  const STATUS_INFO_ICON = { waiting: '⏳', todo: '📋', done: '✅' };
+  function buildCardInfoIcons(note) {
+    const parts = [];
+    if (TYPE_ICON[note.type]) parts.push([TYPE_ICON[note.type], note.type]);
+    if (note.mail) parts.push(['✉️', 'from email']);
+    if (STATUS_INFO_ICON[note.status]) parts.push([STATUS_INFO_ICON[note.status], note.status]);
+    if (!parts.length) return null;
+    const row = document.createElement('div');
+    row.className = 'card-info-icons';
+    row.textContent = parts.map((p) => p[0]).join('');
+    row.title = parts.map((p) => p[1]).join(' · ');
+    return row;
+  }
+
+  // The "✉️ sender · date" line of a mailed-in note (app.js's buildMailInfo,
+  // read-only form).
+  function buildMailInfo(note) {
+    let info = null;
+    try {
+      info = typeof note.mail === 'string' ? JSON.parse(note.mail) : note.mail;
+    } catch {}
+    if (!info || typeof info.from !== 'string' || !info.from) return null;
+    const row = document.createElement('div');
+    row.className = 'mail-info';
+    const name = info.from.replace(/<[^>]*>/, '').replace(/^["'\s]+|["'\s]+$/g, '') || info.from;
+    const when = /^\d{4}-\d\d-\d\dT/.test(info.date || '')
+      ? new Date(info.date).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      : info.date || '';
+    const text = document.createElement('span');
+    text.className = 'mail-info-text';
+    text.textContent = `✉️ ${name}${when ? ` · ${when}` : ''}`;
+    row.appendChild(text);
+    return row;
   }
 
   // id+title of every note in the space (GET /:id/viewer/index — a separate,
@@ -113,9 +193,7 @@
   let lastData = null;
   async function loadNoteIndex() {
     try {
-      const url = new URL(`/api/shares/${shareId}/viewer/index`, location.origin);
-      url.searchParams.set('token', token);
-      const res = await fetch(url);
+      const res = await fetch(feedUrl('/index'));
       noteIndex = res.ok ? await res.json() : [];
     } catch {
       noteIndex = [];
@@ -234,7 +312,8 @@
     noteOverlayBody.innerHTML = '';
   }
 
-  function openNotePreview(note) {
+  function openNotePreview(data) {
+    const note = data.center;
     noteOverlayBody.innerHTML = '';
     const inner = document.createElement('div');
     inner.className = 'cell center' + (note.status === 'done' ? ' dimmed' : '');
@@ -244,20 +323,52 @@
     title.textContent = note.title || 'Untitled';
     inner.appendChild(title);
 
+    const mailRow = buildMailInfo(note);
+    if (mailRow) inner.appendChild(mailRow);
+
     if (note.type && note.type !== 'text') {
       const preview = buildAttachmentPreview(note);
       if (preview) inner.appendChild(preview);
     }
 
-    const content = document.createElement('div');
-    const hasContent = Boolean(note.content && note.content.trim());
-    content.className = 'preview-content' + (hasContent ? '' : ' placeholder');
-    if (hasContent) {
+    if (note.content && note.content.trim()) {
+      const content = document.createElement('div');
+      content.className = 'preview-content';
       renderMarkdownInto(content, note.content, note.id);
-    } else {
-      content.textContent = note.type && note.type !== 'text' ? '' : '(Empty note)';
+      inner.appendChild(content);
+    } else if (note.encrypted) {
+      inner.appendChild(encryptedNotice(false));
     }
-    inner.appendChild(content);
+
+    // Every linked note, like the app editor's Links list — the only way to
+    // reach the ones the 3x3 grid has no room for.
+    const links = data.links || [];
+    if (links.length) {
+      const panel = document.createElement('div');
+      panel.className = 'center-links';
+      const heading = document.createElement('div');
+      heading.className = 'center-links-heading';
+      heading.textContent = `Links (${links.length})`;
+      panel.appendChild(heading);
+      const list = document.createElement('div');
+      list.className = 'center-links-list';
+      for (const link of links) {
+        const row = document.createElement('div');
+        row.className = 'center-links-row' + (link.status === 'done' ? ' dimmed' : '');
+        const name = document.createElement('button');
+        name.className = 'center-links-name';
+        const icon = TYPE_ICON[link.type];
+        name.textContent = icon ? `${icon} ${link.title || 'Untitled'}` : link.title || 'Untitled';
+        name.addEventListener('click', () => {
+          closeNotePreview();
+          load(link.id);
+        });
+        row.appendChild(name);
+        list.appendChild(row);
+      }
+      panel.appendChild(list);
+      inner.appendChild(panel);
+    }
 
     noteOverlayBody.appendChild(inner);
     noteOverlay.classList.remove('hidden');
@@ -287,24 +398,36 @@
     const cell = document.createElement('div');
     cell.className =
       'cell neighbor' +
-      (isParent ? ' is-parent' : '') +
+      (isParent ? ' back' : '') +
       (note.status === 'done' ? ' dimmed' : '');
     const title = document.createElement('div');
     title.className = 'neighbor-title';
-    const icon = TYPE_ICON[note.type];
-    const base = icon ? `${icon} ${note.title || 'Untitled'}` : note.title || 'Untitled';
-    title.textContent = (isParent ? '⤴ ' : '') + base;
+    title.textContent = (isParent ? '↩ ' : '') + (note.title || 'Untitled');
     cell.appendChild(title);
-    // A small thumbnail for an image neighbor, same as public/app.js's own
-    // compact neighbor preview — every other type just gets the icon above.
-    if (note.type === 'image' && note.attachment_path) {
-      const img = document.createElement('img');
-      img.className = 'center-attachment-image';
-      img.src = note.attachment_path;
-      img.alt = '';
-      cell.appendChild(img);
+    // Same card as public/app.js's makeNeighborCell in its "neighbour text"
+    // view: the attachment, the note's text, the info icons.
+    const preview = buildAttachmentPreview(note, { compact: true });
+    if (preview) cell.appendChild(preview);
+    if (note.content && note.content.trim()) {
+      const text = document.createElement('div');
+      text.className = 'neighbor-content';
+      renderMarkdownInto(text, note.content, note.id);
+      cell.appendChild(text);
+    } else if (note.encrypted) {
+      cell.appendChild(encryptedNotice(true));
     }
-    cell.addEventListener('click', () => load(note.id));
+    const info = buildCardInfoIcons(note);
+    if (info) {
+      const corner = document.createElement('div');
+      corner.className = 'card-corner';
+      corner.appendChild(info);
+      cell.appendChild(corner);
+    }
+    cell.addEventListener('click', (e) => {
+      // The attachment's own link/player takes the tap.
+      if (e.target.closest('a, audio, input, label')) return;
+      load(note.id);
+    });
     return cell;
   }
 
@@ -314,7 +437,8 @@
     return cell;
   }
 
-  function makeCenterCell(note) {
+  function makeCenterCell(data) {
+    const note = data.center;
     const cell = document.createElement('div');
     cell.className = 'cell center' + (note.status === 'done' ? ' dimmed' : '');
     // .center-title/.center-content(.readonly) — the same classes and same
@@ -326,9 +450,11 @@
     title.className = 'center-title readonly';
     title.textContent = note.title || 'Untitled';
     cell.appendChild(title);
+    const mailRow = buildMailInfo(note);
+    if (mailRow) cell.appendChild(mailRow);
 
     if (note.type && note.type !== 'text') {
-      const preview = buildAttachmentPreview(note);
+      const preview = buildAttachmentPreview(note, { compact: true });
       if (preview) {
         cell.appendChild(preview);
       } else {
@@ -351,20 +477,33 @@
       content.className = 'center-content readonly';
       renderMarkdownInto(content, note.content, note.id);
       cell.appendChild(content);
-    } else if (!note.type || note.type === 'text') {
-      const empty = document.createElement('div');
-      empty.className = 'center-content readonly placeholder';
-      empty.textContent = 'Empty note';
-      cell.appendChild(empty);
+    } else if (note.encrypted) {
+      cell.appendChild(encryptedNotice(true));
     }
 
     // The grid cell is clipped to card height — tap it (outside a wikilink/
     // attachment control, which handle their own click) to read the note in
     // full, same as the main app's own top-half-of-center-card tap.
+    // Lower-right corner: info icons, then "+N" for the links the grid has
+    // no room for (they're listed in the fullscreen view).
+    const corner = document.createElement('div');
+    corner.className = 'card-corner';
+    const info = buildCardInfoIcons(note);
+    if (info) corner.appendChild(info);
+    const hidden = (data.linkCount || 0) - OUTER_SLOTS.length;
+    if (hidden > 0) {
+      const badge = document.createElement('div');
+      badge.className = 'center-link-badge';
+      badge.textContent = `+${hidden}`;
+      badge.title = `${data.linkCount} links — open the note to see them all`;
+      corner.appendChild(badge);
+    }
+    if (corner.children.length) cell.appendChild(corner);
+
     cell.style.cursor = 'pointer';
     cell.addEventListener('click', (e) => {
       if (e.target.closest('a, audio, input, label')) return;
-      openNotePreview(note);
+      openNotePreview(data);
     });
     return cell;
   }
@@ -391,7 +530,7 @@
 
     for (let idx = 0; idx < 9; idx++) {
       if (idx === 4) {
-        gridEl.appendChild(makeCenterCell(data.center));
+        gridEl.appendChild(makeCenterCell(data));
         continue;
       }
       const slot = slots[idx];
@@ -410,8 +549,7 @@
   async function load(centerId, attempt = 0) {
     showStatus('Loading…');
     if (centerId) setUrl(centerId);
-    const url = new URL(`/api/shares/${shareId}/viewer`, location.origin);
-    url.searchParams.set('token', token);
+    const url = feedUrl();
     if (centerId) url.searchParams.set('center', centerId);
 
     let res;
@@ -451,7 +589,7 @@
     render(data);
   }
 
-  if (!shareId || !token) {
+  if (!previewToken && (!shareId || !token)) {
     showStatus('This link is missing its share id or token.');
   } else {
     const initialCenter = params.get('center') ? Number(params.get('center')) : null;

@@ -104,6 +104,15 @@ body.header-hidden .pinbar { display: none; }
   border-bottom: 1px solid var(--border);
 }
 
+/* A phone in Chrome's "Desktop site" mode (app.js applyDesktopSiteMode): the
+   page is laid out ~980px wide, so everything is tiny. Scale every top-level
+   element back up to phone size (#grid's inline zoom from applyZoom carries
+   the factor itself); app.js also answers the size media queries below for
+   the phone-sized viewport, and --vh/--vw replace the viewport units. Leaflet
+   can't track pointers under zoom, so the map itself is scaled back down. */
+html.desktop-site body > *:not(.theme-bg) { zoom: var(--desktop-site-zoom, 1); }
+html.desktop-site #map { zoom: calc(1 / var(--desktop-site-zoom, 1)); }
+
 .topbar h1:empty { display: none; }
 #new-note-btn { padding: 0.35rem 0.6rem; }
 .topbar h1 {
@@ -638,7 +647,7 @@ button:hover { filter: brightness(1.05); }
   align-items: center;
   gap: 0.6rem;
   text-align: left;
-  max-width: calc(100vw - 32px);
+  max-width: calc(var(--vw, 1vw) * 100 - 32px);
 }
 .toast-buttons {
   display: flex;
@@ -724,7 +733,6 @@ button:hover { filter: brightness(1.05); }
   grid-template-rows: repeat(3, minmax(0, 1fr));
   gap: 1rem;
   padding: 1.5rem;
-  max-width: 1100px;
   width: 100%;
   box-sizing: border-box;
   margin: 0 auto;
@@ -853,6 +861,15 @@ button:hover { filter: brightness(1.05); }
 }
 .cell .edit-pen:hover { color: var(--accent); }
 .cell .card-corner .center-link-badge { position: static; }
+/* 👁 = the note has a live preview link (app.js buildPreviewEye). */
+.cell .card-corner .preview-eye {
+  border: none;
+  background: transparent;
+  padding: 0 0.15rem;
+  font-size: 0.8rem;
+  line-height: 1;
+  z-index: 1;
+}
 .cell .card-info-icons {
   font-size: 0.8rem;
   line-height: 1;
@@ -1245,6 +1262,20 @@ button:hover { filter: brightness(1.05); }
   border-color: var(--accent);
 }
 
+.center-attachment-link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.center-attachment-link-url {
+  font-size: 0.72rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .center-attachment-contact-edit {
   display: flex;
   flex-direction: column;
@@ -1481,7 +1512,7 @@ button:hover { filter: brightness(1.05); }
   z-index: 100;
   pointer-events: none;
   width: max-content;
-  max-width: 90vw;
+  max-width: calc(var(--vw, 1vw) * 90);
 }
 
 .toast {
@@ -1556,7 +1587,7 @@ button:hover { filter: brightness(1.05); }
 /* Sync panel (opened from the pill) */
 .sync-panel { max-width: 460px; }
 .sync-hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.5rem; }
-.sync-list { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.9rem; max-height: 50vh; overflow-y: auto; }
+.sync-list { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.9rem; max-height: calc(var(--vh, 1vh) * 50); overflow-y: auto; }
 .sync-row {
   display: flex;
   align-items: center;
@@ -1578,7 +1609,7 @@ button:hover { filter: brightness(1.05); }
   box-shadow: var(--shadow);
   width: 92%;
   max-width: 900px;
-  height: 88vh;
+  height: calc(var(--vh, 1vh) * 88);
   padding: 2rem;
   display: flex;
   flex-direction: column;
@@ -1622,7 +1653,7 @@ button:hover { filter: brightness(1.05); }
   position: relative;
   width: 92%;
   max-width: 1100px;
-  height: 88vh;
+  height: calc(var(--vh, 1vh) * 88);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1822,7 +1853,7 @@ button:hover { filter: brightness(1.05); }
 .map-stack-list {
   margin: 0.35rem 0 0;
   padding-left: 1.1rem;
-  max-height: 40vh;
+  max-height: calc(var(--vh, 1vh) * 40);
   overflow-y: auto;
 }
 
@@ -2058,7 +2089,7 @@ button:hover { filter: brightness(1.05); }
   box-shadow: var(--shadow);
   width: 92%;
   max-width: 680px;
-  max-height: 88vh;
+  max-height: calc(var(--vh, 1vh) * 88);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2400,7 +2431,7 @@ button:hover { filter: brightness(1.05); }
 
 .insights-panel {
   max-width: 560px;
-  max-height: 82vh;
+  max-height: calc(var(--vh, 1vh) * 82);
   overflow-y: auto;
   position: relative;
 }
@@ -2442,7 +2473,7 @@ button:hover { filter: brightness(1.05); }
 .nudge-stats-panel {
   max-width: 560px;
   width: 100%;
-  max-height: 86vh;
+  max-height: calc(var(--vh, 1vh) * 86);
   overflow-y: auto;
   position: relative;
 }
@@ -3046,7 +3077,7 @@ html.has-bg body { background: transparent; }
 .action-menu-item.active:hover { background: var(--accent); filter: brightness(1.08); }
 /* Foldable section (openActionMenu `children`): header with a chevron, its
    items indented below while open. */
-.action-menu { max-height: calc(100vh - 16px); overflow-y: auto; }
+.action-menu { max-height: calc(var(--vh, 1vh) * 100 - 16px); overflow-y: auto; }
 .action-menu-section::after { content: '▸'; float: right; margin-left: 1rem; color: var(--muted); }
 .action-menu-section.open::after { content: '▾'; }
 .action-menu-section.open { background: var(--bg); }
@@ -3060,7 +3091,7 @@ html.has-bg body { background: transparent; }
 
 /* --- Done-cascade dialog (openStatusCascadeDialog) --- */
 .cascade-list {
-  max-height: 45vh;
+  max-height: calc(var(--vh, 1vh) * 45);
   overflow-y: auto;
   margin: 0 0 1rem;
   border: 1px solid var(--border);

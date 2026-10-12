@@ -607,6 +607,19 @@ db.exec(`
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_share_viewer_tokens_token ON share_viewer_tokens(token);
 
+  -- Preview link: the same kind of read-only token, but for one note and
+  -- everything under it (personal or in a space) instead of a whole space —
+  -- see server/shares.js's previewScope. One live link per note; deleting
+  -- the row revokes it. Deliberately not in backups (snapshots.js), like
+  -- share_viewer_tokens: a restore must not bring a public link back.
+  CREATE TABLE IF NOT EXISTS note_preview_tokens (
+    note_id    INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token      TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_note_preview_tokens_token ON note_preview_tokens(token);
+
   -- Editor invite links: a parallel table to login_tokens (not a new
   -- login_tokens "purpose", unlike account.js's 'delete-account') because an
   -- invite needs share_id + role, which don't belong on every other purpose.
@@ -775,6 +788,32 @@ if (db.pragma('user_version', { simple: true }) < 3) {
     }
   })();
   db.pragma('user_version = 3');
+}
+
+// One-time: refs whose "personal" end sits in the very space they point into
+// (a note removed from a space and added back, before moveNotesIntoShare
+// learned to convert them) become the in-space links they should be.
+if (db.pragma('user_version', { simple: true }) < 4) {
+  const rows = db
+    .prepare(
+      `SELECT pr.id, pr.user_id, pr.personal_note_id AS p, pr.shared_note_id AS s, pr.created_at
+       FROM personal_refs pr
+       JOIN notes pn ON pn.id = pr.personal_note_id
+       JOIN notes sn ON sn.id = pr.shared_note_id
+       WHERE pn.share_id = pr.share_id AND sn.share_id = pr.share_id`
+    )
+    .all();
+  const addLink = db.prepare(
+    'INSERT OR IGNORE INTO links (note_a, note_b, created_at, user_id, kind) VALUES (?, ?, ?, ?, NULL)'
+  );
+  const dropRef = db.prepare('DELETE FROM personal_refs WHERE id = ?');
+  db.transaction(() => {
+    for (const r of rows) {
+      addLink.run(Math.min(r.p, r.s), Math.max(r.p, r.s), r.created_at, r.user_id);
+      dropRef.run(r.id);
+    }
+  })();
+  db.pragma('user_version = 4');
 }
 
 module.exports = db;

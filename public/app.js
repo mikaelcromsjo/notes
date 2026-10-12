@@ -274,6 +274,7 @@
     host.appendChild(el);
     requestAnimationFrame(() => el.classList.add('show'));
     setTimeout(dismiss, duration);
+    return dismiss;
   }
 
   // "<msg> [Undo]" for an action the server recorded as history entry
@@ -332,6 +333,101 @@
       document.addEventListener('keydown', onKey);
       ok.focus();
     });
+  }
+
+  // Chrome on Android remembers "Desktop site" per site, and an installed
+  // PWA has no menu to untick it: the page is then laid out ~980px wide on a
+  // phone-sized screen, so everything is tiny. The app can't override that.
+  // Tell: a touch phone whose layout is much wider than its screen; the
+  // factor (0 when not in that mode) is how much the page has been shrunk.
+  function desktopSiteFactor() {
+    const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    const phone = Math.min(screen.width, screen.height) <= 600;
+    const factor = window.innerWidth / screen.width;
+    return coarse && phone && factor >= 1.3 ? Math.min(factor, 3) : 0;
+  }
+
+  // In that mode the whole UI is scaled back up to phone size: every
+  // top-level element is zoomed by the factor (style.css, html.desktop-site;
+  // the grid through applyZoom), --vh/--vw stand in for the viewport units
+  // (which don't shrink with zoom), and the stylesheet's width/height media
+  // queries are answered for the phone-sized viewport instead of the 980px
+  // one. On a real desktop the factor is 0 and nothing is touched.
+  // Scripted positions on a zoomed element are in its own (unzoomed) px while
+  // getBoundingClientRect / pointer coordinates are on-screen px — divide by
+  // uiScale() to convert.
+  const uiScale = () => desktopSiteFactor() || 1;
+
+  const mediaOriginal = new Map(); // CSSMediaRule → its own condition text
+  const SIZE_QUERY = /^\(\s*(max|min)-(width|height)\s*:\s*([\d.]+)px\s*\)$/;
+  function applyEffectiveMedia(factor) {
+    const size = { width: window.innerWidth / (factor || 1), height: window.innerHeight / (factor || 1) };
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try {
+        rules = sheet.cssRules;
+      } catch {
+        continue; // cross-origin sheet
+      }
+      for (const rule of rules) {
+        if (!(rule instanceof CSSMediaRule)) continue;
+        if (!mediaOriginal.has(rule)) mediaOriginal.set(rule, rule.media.mediaText);
+        const original = mediaOriginal.get(rule);
+        let want = original;
+        if (factor) {
+          const parts = original.split(',').map((q) => q.trim().match(SIZE_QUERY));
+          // Anything but plain size queries (pointer, print…) is left alone.
+          if (parts.every(Boolean)) {
+            const hit = parts.some(([, bound, dim, px]) =>
+              bound === 'max' ? size[dim] <= Number(px) : size[dim] >= Number(px)
+            );
+            want = hit ? 'all' : 'not all';
+          }
+        }
+        if (rule.media.mediaText !== want) rule.media.mediaText = want;
+      }
+    }
+  }
+
+  function applyDesktopSiteMode() {
+    const factor = desktopSiteFactor();
+    const root = document.documentElement;
+    root.classList.toggle('desktop-site', factor > 0);
+    root.style.setProperty('--desktop-site-zoom', String(factor || 1));
+    if (factor) {
+      root.style.setProperty('--vh', `${window.innerHeight / factor / 100}px`);
+      root.style.setProperty('--vw', `${window.innerWidth / factor / 100}px`);
+    } else {
+      root.style.removeProperty('--vh');
+      root.style.removeProperty('--vw');
+    }
+    applyEffectiveMedia(factor);
+  }
+  applyDesktopSiteMode();
+  window.addEventListener('resize', applyDesktopSiteMode);
+
+  // Startup hint.
+  function warnDesktopSiteMode() {
+    if (!desktopSiteFactor()) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    const box = document.createElement('div');
+    box.className = 'picker';
+    const p = document.createElement('p');
+    p.className = 'confirm-message';
+    p.textContent =
+      'Chrome is showing Notes in "Desktop site" mode, so everything looks very small.\n\n' +
+      'To fix it: Chrome → Settings → Site settings → Desktop site — turn it off and remove ' +
+      `${location.hostname} from the list — then close Notes completely and open it again.`;
+    const actions = document.createElement('div');
+    actions.className = 'picker-actions';
+    const ok = document.createElement('button');
+    ok.textContent = 'OK';
+    actions.appendChild(ok);
+    box.append(p, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    ok.addEventListener('click', () => overlay.remove());
   }
 
   // Owner leaving a space that has other members: hand it to one of them, or
@@ -2523,8 +2619,9 @@
     menu.className = 'action-menu';
     const place = () => {
       const r = anchor.getBoundingClientRect();
-      menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`;
-      menu.style.top = `${Math.max(8, Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8))}px`;
+      const s = uiScale();
+      menu.style.left = `${Math.max(8, Math.min(r.left / s, window.innerWidth / s - menu.offsetWidth - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(r.bottom / s + 4, window.innerHeight / s - menu.offsetHeight - 8))}px`;
     };
     const itemButton = ({ label, onClick, active }) => {
       const btn = document.createElement('button');
@@ -2639,9 +2736,10 @@
         document.body.appendChild(menu);
       }
       const r = textarea.getBoundingClientRect();
-      menu.style.left = `${r.left}px`;
-      menu.style.top = `${Math.min(r.bottom + 2, window.innerHeight - 200)}px`;
-      menu.style.width = `${r.width}px`;
+      const s = uiScale();
+      menu.style.left = `${r.left / s}px`;
+      menu.style.top = `${Math.min(r.bottom / s + 2, window.innerHeight / s - 200)}px`;
+      menu.style.width = `${r.width / s}px`;
       menu.innerHTML = '';
       items.forEach((it, i) => {
         const row = document.createElement('div');
@@ -4093,6 +4191,11 @@
     // must never invalidate copies already handed out); mintShareViewerLink
     // is the explicit, always-rotates "regenerate" action.
     getShareViewerLink: (shareId) => reqJson(`/api/shares/${shareId}/viewer-token`, 'GET'),
+    // A note's own preview link (read-only: the note + everything under it).
+    // create is idempotent — it returns the live link if there is one.
+    getPreviewLink: (noteId) => reqJson(`/api/shares/preview-link/${noteId}`, 'GET'),
+    createPreviewLink: (noteId) => postJson(`/api/shares/preview-link/${noteId}`, {}),
+    revokePreviewLink: (noteId) => reqJson(`/api/shares/preview-link/${noteId}`, 'DELETE'),
     mintShareViewerLink: (shareId) => postJson(`/api/shares/${shareId}/viewer-token`, {}),
     revokeShareViewerLink: (shareId) => reqJson(`/api/shares/${shareId}/viewer-token`, 'DELETE'),
     getShare: (shareId) => reqJson(`/api/shares/${shareId}`, 'GET'),
@@ -4354,6 +4457,22 @@
     api.logNav(from, id, via);
   }
 
+  // Deleting the centred note lands on its parent in the inferred hierarchy,
+  // or on the scope's root note (home / the space's root) when it has none.
+  // landingAfterDelete is read *before* the delete — the hierarchy map still
+  // has the note then — and goAfterDelete runs once the tabs are refreshed.
+  function landingAfterDelete(id) {
+    const parent = hierarchyParents[String(id)];
+    if (parent != null) return parent;
+    const root = pinRootId();
+    return root != null && root !== id ? root : null;
+  }
+  async function goAfterDelete(target) {
+    if (target == null || target === currentId) return;
+    if (!allNotesCache.some((n) => n.id === target)) return;
+    await goTo(target, 'delete');
+  }
+
   // Used by "jump to note": switch to an existing tab already open on that
   // note instead of recentering the active tab onto it.
   async function jumpTo(id, via = 'search') {
@@ -4482,8 +4601,89 @@
           }
         },
       })),
+      previewLinkItem(anchor, note),
     ];
     openActionMenu(anchor, items);
+  }
+
+  // "Preview link": a read-only link to this note and everything under it —
+  // no account needed, nothing else in your notes or the space is reachable
+  // through it (server/shares.js's previewScope). The first tap makes the
+  // link and copies it; once there is one, the same item opens Copy / Open /
+  // Turn off. Online-only.
+  const previewLinkItem = (anchor, note) => ({
+    label: '👁️ Preview link…',
+    onClick: () => previewLinkFlow(anchor, note),
+  });
+
+  async function copyPreviewLink(url, msg) {
+    try {
+      await navigator.clipboard.writeText(url);
+      toast(msg, { duration: 6000 });
+    } catch {
+      // No clipboard without a fresh tap (the request took too long) — the
+      // toast's own button is one.
+      toast(msg.replace('copied', 'ready'), {
+        action: 'Copy',
+        duration: 10000,
+        onClick: () => navigator.clipboard.writeText(url).catch(() => {}),
+      });
+    }
+  }
+
+  // The 👁 on the cards comes from the note list's `preview_link` flag.
+  async function refreshPreviewEyes() {
+    try {
+      allNotesCache = await api.listNotes();
+      await render();
+    } catch {
+      /* the next list refresh picks it up */
+    }
+  }
+
+  async function previewLinkFlow(anchor, note) {
+    const urlFor = (token) => `${location.origin}/space-view.html?preview=${token}`;
+    const name = note.title || 'Untitled';
+    try {
+      const { token } = await api.getPreviewLink(note.id);
+      if (!token) {
+        const made = await api.createPreviewLink(note.id);
+        refreshPreviewEyes();
+        await copyPreviewLink(
+          urlFor(made.token),
+          `Preview link copied — anyone with it can read “${name}” and everything under it.`
+        );
+        return;
+      }
+      openActionMenu(anchor, [
+        { label: '📋 Copy preview link', onClick: () => copyPreviewLink(urlFor(token), 'Preview link copied.') },
+        { label: '👁️ Open preview', onClick: () => window.open(urlFor(token), '_blank', 'noopener') },
+        {
+          label: '🚫 Turn off preview link',
+          onClick: async () => {
+            const ok = await confirmDialog(
+              `Turn off the preview link for "${name}"?\n\nIt stops working for everyone who has it.`,
+              { confirmLabel: 'Turn off' }
+            );
+            if (!ok) return;
+            try {
+              await api.revokePreviewLink(note.id);
+              refreshPreviewEyes();
+              toast('Preview link turned off.');
+            } catch (e) {
+              toast(e.message || "Couldn't turn off the preview link.");
+            }
+          },
+        },
+      ]);
+    } catch (e) {
+      // reqJson only carries the status, so spell out the known refusals.
+      const why = {
+        0: 'Preview links need a connection.',
+        403: 'Only the space owner can manage preview links.',
+      }[e.httpStatus];
+      toast(why || "Couldn't get the preview link.");
+    }
   }
 
   // The "Share this note" checklist — same look as the done-cascade dialog.
@@ -5804,6 +6004,7 @@
     });
     handleDeepLink();
     offerRestoreUndo();
+    warnDesktopSiteMode();
   }
 
   // Right after a backup restore reloads the page: the restore's own undo.
@@ -6158,11 +6359,17 @@
       return box;
     }
     if (note.type === 'app' && note.attachment_path) {
+      const box = document.createElement('div');
+      box.className = 'center-attachment-link';
       const link = document.createElement('a');
       link.className = 'center-attachment-app';
       link.href = note.attachment_path;
-      link.textContent = '🚀 Launch';
-      return link;
+      link.textContent = '🔗 Open';
+      const url = document.createElement('span');
+      url.className = 'center-attachment-link-url';
+      url.textContent = note.attachment_path;
+      box.append(link, url);
+      return box;
     }
     return null;
   }
@@ -7121,10 +7328,12 @@
     deleteBtn.addEventListener('click', async () => {
       if (currentNote.pinned) return;
       if (!(await confirmDialog(`Delete "${currentNote.title}"?`, { confirmLabel: 'Delete', danger: true }))) return;
+      const landing = landingAfterDelete(currentId);
       const deleted = await api.setStatus(currentId, 'deleted');
       allNotesCache = await api.listNotes();
       renderPinbar();
       await afterDelete();
+      await goAfterDelete(landing);
       undoToast('Note deleted', deleted && deleted.historyId);
     });
 
@@ -7191,6 +7400,8 @@
     corner.className = 'card-corner';
     const info = buildCardInfoIcons(currentNote);
     if (info) corner.appendChild(info);
+    const eye = buildPreviewEye(currentNote);
+    if (eye) corner.appendChild(eye);
     if (linkCount > LINK_LIST_THRESHOLD) {
       const badge = document.createElement('div');
       badge.className = 'center-link-badge';
@@ -7246,7 +7457,7 @@
     // and would otherwise pin it `position: relative` at the end of <body>.
     ghost.style.cssText +=
       `;position:fixed;margin:0;z-index:60;pointer-events:none;` +
-      `width:${r.width}px;height:${r.height}px;`;
+      `width:${r.width / uiScale()}px;height:${r.height / uiScale()}px;`;
     // Offset so the card holds its grab point under the pointer.
     ghost._ox = Math.min(Math.max(grabX - r.left, 0), r.width);
     ghost._oy = Math.min(Math.max(grabY - r.top, 0), r.height);
@@ -7256,8 +7467,8 @@
 
   function moveGhost(ghost, x, y) {
     if (!ghost) return;
-    ghost.style.left = `${x - ghost._ox}px`;
-    ghost.style.top = `${y - ghost._oy}px`;
+    ghost.style.left = `${(x - ghost._ox) / uiScale()}px`;
+    ghost.style.top = `${(y - ghost._oy) / uiScale()}px`;
   }
 
   function dropTargetAt(x, y, sourceCell) {
@@ -7416,6 +7627,26 @@
     return row;
   }
 
+  // 👁 in the card's lower-right corner while the note has a live preview
+  // link (`preview_link` on the list rows). A button, unlike the info icons:
+  // tapping it opens the link's Copy / Open / Turn off menu.
+  function buildPreviewEye(note) {
+    const cached = allNotesCache.find((n) => n.id === note.id);
+    if (!cached || !cached.preview_link) return null;
+    const eye = document.createElement('button');
+    eye.type = 'button';
+    eye.className = 'preview-eye';
+    eye.textContent = '👁️';
+    eye.title = 'Has a preview link — tap to copy, open or turn it off';
+    eye.addEventListener('click', (e) => {
+      e.stopPropagation();
+      previewLinkFlow(eye, cached);
+    });
+    // Not the card's long-press menu / drag.
+    eye.addEventListener('pointerdown', (e) => e.stopPropagation());
+    return eye;
+  }
+
   // subNeighbors, when given, renders this cell as its own nested 3x3
   // (that neighbor as sub-center + up to 8 of its own neighbors).
   // isBack marks the "probable parent" slot.
@@ -7541,10 +7772,12 @@
           cell.appendChild(text);
         }
         const info = buildCardInfoIcons(neighbor);
-        if (info) {
+        const eye = buildPreviewEye(neighbor);
+        if (info || eye) {
           const corner = document.createElement('div');
           corner.className = 'card-corner';
-          corner.appendChild(info);
+          if (info) corner.appendChild(info);
+          if (eye) corner.appendChild(eye);
           cell.appendChild(corner);
         }
       }
@@ -7915,13 +8148,18 @@
   // --- Orphan bar: every note outside its scope's home tree — orphans (no
   // links), notes linked but under nothing (e.g. only cross links), and the
   // top of each disconnected tree — across personal and every space, as
-  // server/notes.js's inbox orders them (personal first, then spaces by name). ---
+  // server/notes.js's inbox orders them (personal first, then spaces by name);
+  // while viewing a space, just that space's. ---
   let orphanbarGen = 0;
   async function renderOrphanbar() {
     if (!orphanbar) return;
     const gen = ++orphanbarGen;
-    const items = await api.getInbox().catch(() => []);
+    const all = await api.getInbox().catch(() => []);
     if (gen !== orphanbarGen) return; // a newer call already landed — drop this one
+    // Inside a space the row is that space's own lost notes only — one-way,
+    // like the to-do/alarm bars: personal reaches into spaces, never back.
+    const space = currentSpace;
+    const items = space ? all.filter((o) => o.shareId === space.id) : all;
 
     orphanbar.innerHTML = '';
     orphanbar.classList.toggle('hidden', items.length === 0 || !barPrefs.orphans);
@@ -7935,7 +8173,7 @@
 
       const title = document.createElement('span');
       title.className = 'tab-title';
-      title.textContent = `🔌 ${o.title}` + (o.shareTitle ? ` 🔗${o.shareTitle}` : '');
+      title.textContent = `🔌 ${o.title}` + (o.shareTitle && !space ? ` 🔗${o.shareTitle}` : '');
 
       chip.appendChild(title);
       chip.addEventListener('click', () => jumpTo(o.noteId, 'orphan'));
@@ -8143,7 +8381,7 @@
         onClick: async () => {
           try {
             await api.rateAlarm(a.id, at, n);
-            toast('★'.repeat(n) + '☆'.repeat(5 - n));
+            toast(`Rated ${n} of 5 ★`);
           } catch {
             toast("Couldn't save the rating.");
           }
@@ -9125,7 +9363,13 @@
       // search spans your spaces and makes a cross-space reference.
       ...(!currentSpace
         ? [{ label: '🔗 Share this note…', onClick: async () => openShareFlow(anchor(), await focus()) }]
-        : [{ label: '📤 Remove from space', onClick: async () => removeFromSpaceFlow(await focus()) }]),
+        : [
+            { label: '📤 Remove from space', onClick: async () => removeFromSpaceFlow(await focus()) },
+            // Owner-only, like the whole-space viewer link.
+            ...(currentSpace.role === 'owner'
+              ? [{ label: '👁️ Preview link…', onClick: async () => previewLinkFlow(anchor(), await focus()) }]
+              : []),
+          ]),
     ];
   }
 
@@ -9232,11 +9476,13 @@
           if (n.pinned) return toast('Unpin before deleting.');
           if (!(await confirmDialog(`Delete "${n.title}"?`, { confirmLabel: 'Delete', danger: true }))) return;
           try {
+            const landing = n.id === currentId ? landingAfterDelete(n.id) : null;
             const r = await api.setStatus(n.id, 'deleted');
             if (n.id === currentId) {
               allNotesCache = await api.listNotes();
               renderPinbar();
               await refreshFromTabs(await api.listTabs());
+              await goAfterDelete(landing);
             } else {
               await refreshAfterCardAction(n.id);
             }
@@ -9745,7 +9991,7 @@
     } else if (style === 'app') {
       const uri = pickerAppUri.value.trim();
       if (!uri) {
-        toast('App link is required.');
+        toast('Link is required.');
         return null;
       }
       formData.set('type', 'app');
@@ -10147,6 +10393,10 @@
     }, 180);
   });
 
+  // Shown the moment Create/Save is tapped — an upload can take a while —
+  // and taken down (the returned function) as soon as the server answers.
+  const savingToast = () => toast('Saving…', { duration: 120000 });
+
   let pickerCreating = false;
   pickerCreateBtn.addEventListener('click', async () => {
     if (pickerCreating) return;
@@ -10156,8 +10406,10 @@
       if (!formData) return;
       pickerCreating = true;
       pickerCreateBtn.disabled = true;
+      const saved = savingToast();
       try {
         const note = await api.setNoteAttachment(pickerAttachTarget, formData);
+        saved();
         if (note.id === currentId) currentNote = note;
         closePicker();
         undoToast('Attachment saved', note.historyId);
@@ -10165,6 +10417,7 @@
       } catch (e) {
         if (e.httpStatus) toast(e.message || "Couldn't save the attachment.");
       } finally {
+        saved();
         pickerCreating = false;
         pickerCreateBtn.disabled = false;
       }
@@ -10180,6 +10433,7 @@
 
     pickerCreating = true;
     pickerCreateBtn.disabled = true;
+    const saved = savingToast();
     try {
       if (pickerCrossScope()) {
         const fromId = pendingLinkTarget;
@@ -10191,6 +10445,7 @@
           if (title) formData.set('title', title);
           note = await api.createAttachment(null, formData, scope);
         }
+        saved();
         closePicker();
         if (fromId != null && note && note.id != null) await linkAcrossScopes(fromId, note);
         undoToast('Created', note && note.historyId);
@@ -10202,6 +10457,7 @@
           pendingLinkTarget ? { title, linkTo: pendingLinkTarget } : { title }
         );
         const hadTarget = !!pendingLinkTarget;
+        saved();
         closePicker();
         undoToast('Created', note && note.historyId);
         if (hadTarget) {
@@ -10218,11 +10474,13 @@
       } else {
         if (title) formData.set('title', title);
         const added = await api.createAttachment(pendingLinkTarget, formData);
+        saved();
         closePicker();
         undoToast('Added', added && added.historyId);
         await afterAttach();
       }
     } finally {
+      saved();
       pickerCreating = false;
       pickerCreateBtn.disabled = false;
     }
@@ -10251,7 +10509,8 @@
 
   function applyZoom() {
     zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
-    grid.style.zoom = zoom;
+    // A phone in "Desktop site" mode: scaled back up to phone size as well.
+    grid.style.zoom = zoom * (desktopSiteFactor() || 1);
     // The fullscreen editor isn't inside #grid, so it reads the same level as
     // a font-size multiplier on its title/text (style.css, #note-overlay).
     document.documentElement.style.setProperty('--note-zoom', String(zoom));
@@ -10273,6 +10532,7 @@
   });
 
   applyZoom();
+  window.addEventListener('resize', applyZoom); // the desktop-site factor follows rotation
 
   // --- Grid view cycle button: titles only → neighbour text → nested 3x3 ---
   // The icon shows the current view: the same square outline, empty / with
@@ -10821,7 +11081,10 @@
     statsTip.classList.remove('hidden');
     const w = statsTip.offsetWidth;
     const h = statsTip.offsetHeight;
-    statsTip.style.left = `${Math.max(8, Math.min(x - w / 2, window.innerWidth - w - 8))}px`;
+    const s = uiScale();
+    x /= s;
+    y /= s;
+    statsTip.style.left = `${Math.max(8, Math.min(x - w / 2, window.innerWidth / s - w - 8))}px`;
     statsTip.style.top = `${y - h - 12 < 8 ? y + 16 : y - h - 12}px`;
   }
   for (const root of [nudgeStatsBody, insightsBody]) {
@@ -11691,7 +11954,10 @@
   let graphPinchStartScale = 1;
   let graphPinchMid = null; // {x,y,camX,camY} anchor for two-pointer pinch/pan
   let graphTapCandidate = null; // {x,y} — cleared once movement exceeds the tap slop
+  let graphPendingTap = null; // a finished tap, waiting for its click event (graphClick)
   let graphLevelDebounce = null;
+  let graphBuildSeq = 0; // bumped per rebuildGraph and on close — see rebuildGraph
+  let graphWantCenter = null;
   const GRAPH_TAP_SLOP = 8; // px of movement still counted as a tap, not a drag
 
   // Animated transitions between rebuilds (recentring, level change, layout
@@ -12126,9 +12392,19 @@
     }
   }
 
+  // Rebuilds are async (links/refs may be fetched), so two can be in flight
+  // at once — a tap on A then B, or a tap while a slider/toggle rebuild is
+  // still loading. Only the newest may land: an older one finishing last
+  // used to put the graph back on a centre the user had already left, and
+  // the next "tap the centre" then went to the wrong note. graphWantCenter
+  // is the centre most recently asked for, which slider/toggle rebuilds
+  // reuse (refreshGraph) instead of the possibly stale graphState.centerId.
   async function rebuildGraph(centerId) {
     if (graphOverlay.classList.contains('hidden')) return;
+    const seq = ++graphBuildSeq;
+    graphWantCenter = centerId;
     const { nodes, edges } = await computeGraphData(centerId, graphLevel, graphShowDone, graphScoreMode);
+    if (seq !== graphBuildSeq) return; // superseded, or the overlay was closed meanwhile
     if (nodes.length === 0) {
       // Only happens if centerId itself no longer exists — the level slider
       // already shows "notes shown" for the normal case, so this is the one
@@ -12141,6 +12417,11 @@
     const newState = { centerId, nodes, edges, camera };
     resizeGraphCanvas(); // sizes the canvas before the first animated frame draws
     transitionGraphTo(newState, layoutFor(nodes, edges));
+  }
+
+  // Same centre, new settings (level slider, score mode, Done toggle).
+  function refreshGraph() {
+    if (graphState && graphWantCenter != null) rebuildGraph(graphWantCenter);
   }
 
   function graphCssVar(name, fallback) {
@@ -12299,9 +12580,6 @@
     return best;
   }
 
-  // Tapping the already-centred node opens it for editing (same "open a note"
-  // path as everywhere else, so it does log a nav event); tapping any other
-  // visible node just recentres the map on it.
   // Recentre the graph on `centerId`, switching the app's scope first if it
   // lives somewhere other than the one currently graphed (ensureScope is a
   // no-op when it's already the right scope — the common, same-scope case).
@@ -12311,15 +12589,23 @@
   // With 🔗 Spaces on the graph doesn't depend on the app's scope at all, so
   // it's left alone until a note is actually opened.
   async function recenterGraph(centerId, shareId) {
-    if (!graphSpacesData) await ensureScope(shareId);
+    graphWantCenter = centerId;
+    if (!graphSpacesData) {
+      await ensureScope(shareId);
+      // Closed, or another node tapped, while the scope was loading.
+      if (!graphState || graphWantCenter !== centerId) return;
+    }
     syncGraphLevelBounds(); // scope may just have changed — keep the slider honest about it
     await rebuildGraph(centerId);
   }
 
   // A tap always centres the graph on whatever it hit — including a 🔗
   // reference, which recentres across the scope boundary it points into —
-  // except the already-centred node, which opens it for real instead (same
-  // as tapping the centre of the 3x3 grid).
+  // except the already-centred node, which leaves the graph for the 3x3
+  // grid centred on that note (logged as a nav event; the note itself isn't
+  // opened). While a recentre is still loading or easing in, "centred" is
+  // the node being centred on (graphWantCenter), not the one still drawn in
+  // the middle.
   async function handleGraphTap(clientX, clientY) {
     const hit = graphHitTest(clientX, clientY);
     if (!hit) return;
@@ -12331,17 +12617,17 @@
       await recenterGraph(hit.targetId, hit.targetShareId);
       return;
     }
-    if (hit.id === graphState.centerId) {
+    if (hit.id === graphWantCenter) {
       const id = hit.id;
       await closeGraph({ restoreScope: false }); // goTo below sets the real scope itself
       await goTo(id, 'graph');
-      await openNoteFullscreen('preview');
     } else {
       await recenterGraph(hit.id, graphScopeOf(hit.id));
     }
   }
 
   function graphPointerDown(e) {
+    graphPendingTap = null;
     if (!graphState) return;
     try {
       graphCanvas.setPointerCapture(e.pointerId);
@@ -12389,6 +12675,13 @@
     }
   }
 
+  // A cancelled pointer (the browser took the gesture over) ends the
+  // gesture like a lift does, but is never a tap.
+  function graphPointerCancel(e) {
+    graphTapCandidate = null;
+    graphPointerUp(e);
+  }
+
   function graphPointerUp(e) {
     const wasTap = graphPointers.size === 1 && graphTapCandidate;
     const tap = graphTapCandidate;
@@ -12401,8 +12694,25 @@
       graphPinchMid = null;
     }
     if (graphPointers.size === 0) graphPanStart = null;
+    // One finger of a pinch lifted: re-anchor the pan on the finger still
+    // down, from where the camera is now — the old anchor predates the
+    // pinch, so the next move would jump the graph back by the whole pinch.
+    if (graphPointers.size === 1 && graphState) {
+      const [rest] = graphPointers.values();
+      graphPanStart = { x: rest.x, y: rest.y, camX: graphState.camera.x, camY: graphState.camera.y };
+    }
     graphTapCandidate = null;
-    if (wasTap) handleGraphTap(tap.x, tap.y);
+    graphPendingTap = wasTap ? tap : null;
+  }
+
+  // The tap is acted on at `click`, not at pointerup: tapping the centred
+  // node hides the overlay, and the browser hit-tests the click that follows
+  // a pointerup afresh — with the overlay already gone it landed on whatever
+  // grid card lay underneath (opening or centring that note instead).
+  function graphClick() {
+    const tap = graphPendingTap;
+    graphPendingTap = null;
+    if (tap) handleGraphTap(tap.x, tap.y);
   }
 
   function graphWheel(e) {
@@ -12467,11 +12777,13 @@
   // user ever having actually opened a note there — it's just a peek, not
   // a commit. Closing any other way (✕, Escape, outside-tap) should leave
   // the app exactly where it was, so this restores the scope active when
-  // the graph was opened. handleGraphTap's "open the centred note" branch
+  // the graph was opened. handleGraphTap's "go to the centred note" branch
   // passes false, since goTo (called right after) is about to set the
   // correct scope for real.
   async function closeGraph({ restoreScope = true } = {}) {
     graphOverlay.classList.add('hidden');
+    graphBuildSeq++; // drop any rebuild still loading
+    graphWantCenter = null;
     cancelAnimationFrame(graphAnimHandle);
     graphAnimHandle = null;
     graphState = null;
@@ -12503,7 +12815,8 @@
   graphCanvas.addEventListener('pointerdown', graphPointerDown);
   graphCanvas.addEventListener('pointermove', graphPointerMove);
   graphCanvas.addEventListener('pointerup', graphPointerUp);
-  graphCanvas.addEventListener('pointercancel', graphPointerUp);
+  graphCanvas.addEventListener('pointercancel', graphPointerCancel);
+  graphCanvas.addEventListener('click', graphClick);
   graphCanvas.addEventListener('wheel', graphWheel, { passive: false });
 
   graphLevelInput.addEventListener('input', () => {
@@ -12512,7 +12825,7 @@
     localStorage.setItem('nico-graph-level', String(graphLevel));
     clearTimeout(graphLevelDebounce);
     graphLevelDebounce = setTimeout(() => {
-      if (graphState) rebuildGraph(graphState.centerId);
+      refreshGraph();
     }, 150);
   });
 
@@ -12536,7 +12849,7 @@
     localStorage.setItem('nico-graph-score-mode', mode);
     graphScoreToggleBtn.textContent = mode === 'link' ? '📏 Link' : '🔥 Heat';
     graphScoreToggleBtn.title = mode === 'link' ? 'Switch to usage-based ranking' : 'Switch to link-distance-only ranking';
-    if (graphState) rebuildGraph(graphState.centerId);
+    refreshGraph();
   }
   graphScoreToggleBtn.addEventListener('click', () =>
     setGraphScoreMode(graphScoreMode === 'link' ? 'heat' : 'link')
@@ -12547,7 +12860,7 @@
     localStorage.setItem('nico-graph-show-done', graphShowDone ? '1' : '0');
     graphDoneToggleBtn.classList.toggle('active', graphShowDone);
     syncGraphLevelBounds();
-    if (graphState) rebuildGraph(graphState.centerId);
+    refreshGraph();
   });
 
   // Changes the whole note/link set being graphed. Turning it off while
@@ -12558,7 +12871,7 @@
     graphShowSpaces = !graphShowSpaces;
     localStorage.setItem('nico-graph-show-spaces', graphShowSpaces ? '1' : '0');
     graphSpacesToggleBtn.classList.toggle('active', graphShowSpaces);
-    const centerId = graphState && graphState.centerId;
+    const centerId = graphState ? graphWantCenter : null;
     if (graphShowSpaces) {
       await loadGraphSpaces();
     } else {

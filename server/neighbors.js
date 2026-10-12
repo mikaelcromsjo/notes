@@ -48,7 +48,12 @@ const decaySum = `SUM(pow(0.5, (julianday('now') - julianday(created_at)) / ${HA
 // suppressed. Never set for the auto-*inferred* root (no explicit marking):
 // that's itself a heuristic, and suppressing its guess too would compound
 // one heuristic's mistake with another.
-function computeNeighbors(scope, id, rankUserId = scope.userId ?? null, { skipStructuralFallback = false } = {}) {
+//
+// `only` (a Set of note ids; server/routes/shares.js's preview-link feed):
+// links to any note outside it are left out entirely — not just hidden
+// after ranking, so they neither take one of the NEIGHBOR_LIMIT slots nor
+// show up in linkCount/links.
+function computeNeighbors(scope, id, rankUserId = scope.userId ?? null, { skipStructuralFallback = false, only = null } = {}) {
   const centerClause = scopeClause(scope);
   const center = db
     .prepare(`SELECT id, created_from_note_id FROM notes WHERE id = ? AND ${centerClause.sql}`)
@@ -66,7 +71,8 @@ function computeNeighbors(scope, id, rankUserId = scope.userId ?? null, { skipSt
        WHERE (l.note_a = ? OR l.note_b = ?) AND ${linkedClause.sql} AND n.status != 'deleted'
        ORDER BY l.created_at DESC`
     )
-    .all(id, id, id, ...linkedClause.params);
+    .all(id, id, id, ...linkedClause.params)
+    .filter((r) => !only || only.has(r.id));
 
   if (linked.length === 0) return { parent: null, neighbors: [], linkCount: 0, links: [] };
 
