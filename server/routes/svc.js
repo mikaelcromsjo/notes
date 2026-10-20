@@ -6,7 +6,8 @@
 // A token acts as one user (`user`) and is narrowed further by
 //   spaces:   share ids it may touch (absent = every space that user is in)
 //   personal: true = also that user's personal notes (default false)
-// Scopes: read, write (create/edit/append), attach (file notes). No delete.
+// Scopes: read, write (create/edit/append), attach (file notes), ingest (mail-in,
+// for service:mailrouter; the mail itself decides the account). No delete.
 // Everything goes through server/notes.js, so links, history and undo work
 // exactly as for an edit in the app.
 const path = require('path');
@@ -18,6 +19,7 @@ const { resolveNoteAccess } = require('../note-access');
 const { HttpError } = require('../http-error');
 const { writeUpload, IMAGE_EXT, AUDIO_EXT, FILE_EXT, uploadsDir } = require('../upload-config');
 const { svcAuth, requireScope } = require('../svc-auth');
+const { ingestFromRequest } = require('./mail-in');
 
 const dataDir = path.dirname(db.name);
 const router = express.Router();
@@ -76,7 +78,10 @@ function shape(note, withContent) {
   return out;
 }
 
-router.get('/whoami', wrap((req) => ({ principal: req.svc.principal, scopes: [...req.svc.scopes], ...who(req) })));
+router.get(
+  '/whoami',
+  wrap((req) => ({ principal: req.svc.principal, scopes: [...req.svc.scopes], ...(req.svc.token.user ? who(req) : {}) }))
+);
 
 router.get(
   '/spaces',
@@ -215,6 +220,10 @@ router.post(
     }
   }, 201)
 );
+
+// Raw RFC 822 mail from the mailrouter (+notes@), same headers as /api/mail-in/ingest:
+// X-Gm-Msgid, X-Gm-Labels, X-Internal-Date. The sender lookup is mail-ingest's own.
+router.post('/mail-in', requireScope('ingest'), express.raw({ type: () => true, limit: '40mb' }), ingestFromRequest);
 
 router.use((req, res) => res.status(404).json({ error: 'not found' }));
 

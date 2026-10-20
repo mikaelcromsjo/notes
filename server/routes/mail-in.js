@@ -162,8 +162,9 @@ function tokenOk(got) {
   return want.length >= 16 && got.length === want.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want));
 }
 
-router.post('/ingest', express.raw({ type: () => true, limit: '40mb' }), async (req, res) => {
-  if (req.get('x-forwarded-for') || !tokenOk(req.get('x-ingest-token'))) return res.status(403).json({ error: 'forbidden' });
+// The raw mail + Gmail facts from the request -> mailIngest. Shared by this route and
+// /_svc/mail-in (routes/svc.js, token scope "ingest"), which replaces it.
+async function ingestFromRequest(req, res) {
   if (!mailIngest.receivesFromRouter()) return res.status(409).json({ error: 'MAIL_INGEST_SOURCE is not mailrouter' });
   const key = String(req.get('x-gm-msgid') || '').trim();
   if (!/^\d+$/.test(key) || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'bad request' });
@@ -179,9 +180,16 @@ router.post('/ingest', express.raw({ type: () => true, limit: '40mb' }), async (
       receivedAt: isNaN(date) ? null : new Date(date).toISOString(),
     }));
   } catch (err) {
-    console.error('[mail-ingest] /ingest failed:', err && err.message);
+    console.error('[mail-ingest] ingest failed:', err && err.message);
     res.status(500).json({ error: 'ingest failed' });
   }
+}
+
+// Old path, kept until the mailrouter only uses /_svc/mail-in.
+router.post('/ingest', express.raw({ type: () => true, limit: '40mb' }), (req, res) => {
+  if (req.get('x-forwarded-for') || !tokenOk(req.get('x-ingest-token'))) return res.status(403).json({ error: 'forbidden' });
+  return ingestFromRequest(req, res);
 });
 
 module.exports = router;
+module.exports.ingestFromRequest = ingestFromRequest;
