@@ -1,6 +1,6 @@
 // /_svc/: the machine API (scripts, Claude Code sessions, the mailrouter acting for a
 // client). Bearer tokens from data/svc-tokens.json via the shared guard in
-// ../svc-auth.js (copied from /srv/svc, see /srv/svc/README.md); localhost only,
+// ../svc-auth.js (copied from /srv/platform/svc, see /srv/platform/svc/README.md); localhost only,
 // never through nginx, never with a cookie. Calls are logged to data/svc.log.
 //
 // A token acts as one user (`user`) and is narrowed further by

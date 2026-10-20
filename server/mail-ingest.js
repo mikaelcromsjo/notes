@@ -29,7 +29,7 @@
 //
 // Opt-in: only runs with MAIL_INGEST=1, so a second checkout sharing this
 // Gmail account can't double-import. MAIL_INGEST_SOURCE picks who reads Gmail:
-// `imap` (default) = poll() below; `mailrouter` = /srv/mailrouter polls the
+// `imap` (default) = poll() below; `mailrouter` = /srv/platform/mailrouter polls the
 // inbox and POSTs each +notes/+note mail to routes/mail-in.js `/ingest`
 // (→ ingestRaw). Same pipeline and same message_key (Gmail X-GM-MSGID) either
 // way, so switching modes never double-imports.
@@ -655,7 +655,7 @@ async function confirm(token) {
   }
 }
 
-// --- mail handed over by /srv/mailrouter (MAIL_INGEST_SOURCE=mailrouter) ----
+// --- mail handed over by /srv/platform/mailrouter (MAIL_INGEST_SOURCE=mailrouter) ----
 
 function receivesFromRouter() {
   return process.env.MAIL_INGEST === '1' && process.env.MAIL_INGEST_SOURCE === 'mailrouter';
@@ -689,7 +689,7 @@ function start() {
   }
   if (receivesFromRouter()) {
     if (!process.env.MAIL_INGEST_TOKEN) console.warn('[mail-ingest] MAIL_INGEST_SOURCE=mailrouter but no MAIL_INGEST_TOKEN — /ingest refuses everything');
-    console.log(`[mail-ingest] ${cfg.ingestAddresses.join(', ')} delivered by /srv/mailrouter (POST /api/mail-in/ingest), not polling`);
+    console.log(`[mail-ingest] ${cfg.ingestAddresses.join(', ')} delivered by /srv/platform/mailrouter (POST /api/mail-in/ingest), not polling`);
     return;
   }
   console.log(`[mail-ingest] polling ${cfg.ingestAddresses.join(', ')} every ${TICK_MS / 1000}s`);

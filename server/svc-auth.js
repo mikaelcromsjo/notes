@@ -1,5 +1,5 @@
-// svc-auth.js: the /_svc/ guard for Node apps. Source of truth: /srv/svc/node/svc-auth.js
-// (copy it into the app, don't edit the copy; see /srv/svc/README.md). No dependencies,
+// svc-auth.js: the /_svc/ guard for Node apps. Source of truth: /srv/platform/svc/node/svc-auth.js
+// (copy it into the app, don't edit the copy; see /srv/platform/svc/README.md). No dependencies,
 // works as Express middleware or with plain http: svc(req, res, next).
 //
 // Tokens live in a JSON store written only by the `svc token` CLI:

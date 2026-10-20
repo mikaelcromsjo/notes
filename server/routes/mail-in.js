@@ -151,7 +151,7 @@ router.post('/alias/verify', express.urlencoded({ extended: false }), (req, res)
   );
 });
 
-// MAIL_INGEST_SOURCE=mailrouter: /srv/mailrouter (handler `notes`) hands over each
+// MAIL_INGEST_SOURCE=mailrouter: /srv/platform/mailrouter (handler `notes`) hands over each
 // +notes/+note mail as raw RFC 822, with Gmail's X-GM-MSGID / X-GM-LABELS /
 // INTERNALDATE in headers. Shared-secret MAIL_INGEST_TOKEN, and only straight from
 // this box — nginx always adds X-Forwarded-For, so a proxied request is refused.

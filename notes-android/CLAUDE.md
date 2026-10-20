@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Native Android companion for the notes PWA one level up (`/srv/notes`, server repo,
+Native Android companion for the notes PWA one level up (`/srv/apps/notes`, server repo,
 port 8050, notes.ia-ai.se) — a sub-project in the same git repo, not a separate
 checkout. Package `se.iaai.notes`, plain framework APIs only — **no
 AndroidX/Jetpack deps**.
@@ -120,7 +120,7 @@ WebView, no note content ever rendered here.
   To rebuild and redeploy the download link:
   ```
   JAVA_HOME=/home/devuser/android-tools/jdk17 PATH="$JAVA_HOME/bin:$PATH" ./gradlew assembleDebug
-  cp app/build/outputs/apk/debug/app-debug.apk /srv/notes/public/downloads/notes.apk
+  cp app/build/outputs/apk/debug/app-debug.apk /srv/apps/notes/public/downloads/notes.apk
   ```
   No `release` signing config exists — `assembleDebug`'s output, signed with
   `~/.android/debug.keystore`, *is* what's shipped at `/downloads/notes.apk`
@@ -133,7 +133,7 @@ WebView, no note content ever rendered here.
   and regenerate `public/downloads/notes-version.json` to match — it's
   gitignored the same as `notes.apk`, so this is a manual step every time:
   ```
-  echo '{"versionCode": <N>, "versionName": "<X.Y>"}' > /srv/notes/public/downloads/notes-version.json
+  echo '{"versionCode": <N>, "versionName": "<X.Y>"}' > /srv/apps/notes/public/downloads/notes-version.json
   ```
   Forgetting this doesn't break anything — installed devices just won't see
   the new release until it's published.

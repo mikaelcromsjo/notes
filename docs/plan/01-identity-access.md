@@ -156,7 +156,7 @@ to the real domain (Domain 7 owns the domain).
    `POST /api/auth/request-link` (uniform 202, no enumeration) +
    `GET /api/auth/callback` (consume → upsert user → session → redirect),
    `server/mailer.js` (nodemailer → **Gmail SMTP**, creds in gitignored
-   `data/mail.json`, reused from `/srv/ai_bot`; env-var overrides; logs the link
+   `data/mail.json`, reused from `/srv/sandbox/ai_bot`; env-var overrides; logs the link
    when unconfigured). `POST /api/session` legacy email login now returns 410.
    `#login-overlay` reworked to "Email me a link" + inbox confirmation +
    `?login=invalid` handling. Verified: real Gmail send (250 OK), token
