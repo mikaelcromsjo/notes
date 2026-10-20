@@ -35,6 +35,7 @@ const alarmScheduler = require('./alarm-scheduler');
 const digestScheduler = require('./digest-scheduler');
 const mailIngest = require('./mail-ingest');
 const mailInRouter = require('./routes/mail-in');
+const svcRouter = require('./routes/svc');
 
 const app = express();
 const PORT = process.env.PORT || 8040;
@@ -148,6 +149,10 @@ app.use('/api/shares', sharesRouter);
 // Mail-in confirm link (server/mail-ingest.js) — authed by its emailed
 // one-time token, so it sits above the cookie gate like accountRouter.
 app.use('/api/mail-in', mailInRouter);
+
+// Machine API for scripts and the mailrouter: bearer tokens, localhost only, its
+// own guard (server/svc-auth.js), no cookies. See routes/svc.js.
+app.use('/_svc', svcRouter);
 
 // Everything below the session endpoint needs a user.
 app.use('/api', (req, res, next) => {
