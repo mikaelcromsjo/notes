@@ -12166,22 +12166,41 @@
   // Full-size image viewer: an in-app overlay (with its own close button)
   // instead of `target="_blank"`, which — in an installed/standalone PWA —
   // can open a bare window with no back/close affordance at all.
-  // `note` (an image attachment note) adds ✂️ Crop beside the ✕.
+  // `note` (an image attachment note) adds 🔎 Read text and ✂️ Crop beside the ✕.
   let lightboxNote = null;
   const imageOverlayCrop = document.getElementById('image-overlay-crop');
+  const imageOverlayOcr = document.getElementById('image-overlay-ocr');
   function openImageLightbox(url, alt, note) {
     imageOverlayImg.src = url;
     imageOverlayImg.alt = alt || '';
+    lightboxNote = note && note.type === 'image' && note.attachment_path ? note : null;
     // Not a GIF: the canvas would keep only its first frame.
-    lightboxNote =
-      note && note.type === 'image' && note.attachment_path && !/\.gif$/i.test(note.attachment_path) ? note : null;
-    imageOverlayCrop.classList.toggle('hidden', !lightboxNote);
+    const canCrop = Boolean(lightboxNote) && !/\.gif$/i.test(lightboxNote.attachment_path);
+    imageOverlayCrop.classList.toggle('hidden', !canCrop);
+    imageOverlayOcr.classList.toggle('hidden', !lightboxNote);
+    imageOverlayOcr.classList.toggle('beside-crop', canCrop);
     imageOverlay.classList.remove('hidden');
   }
   imageOverlayCrop.addEventListener('click', () => {
     const note = lightboxNote;
     closeImageLightbox();
     if (note) cropAttachmentImage(note);
+  });
+  imageOverlayOcr.addEventListener('click', () => {
+    const note = lightboxNote;
+    if (!note) return;
+    // Same menu as the editor's 🔎 Read text; picking a mode closes the
+    // close-up so the toast and the appended text are visible.
+    openActionMenu(
+      imageOverlayOcr,
+      OCR_MODES.map(([mode, label]) => ({
+        label,
+        onClick: () => {
+          closeImageLightbox();
+          runOcr(note, mode);
+        },
+      }))
+    );
   });
 
   function closeImageLightbox() {
@@ -12535,14 +12554,14 @@
   // Every document found is appended to the note's text as its own block:
   // text → Markdown under a heading, a receipt/invoice → a ```receipt /
   // ```invoice JSON fence (drawn as a table by renderDocFence).
+  const OCR_MODES = [
+    ['auto', '✨ Auto-detect'],
+    ['text', '📄 All text'],
+    ['receipt', '🧾 Receipt'],
+    ['invoice', '📑 Invoice'],
+  ];
   function ocrAttachmentImage(note, anchor) {
-    const run = (mode) => () => runOcr(note, mode);
-    openActionMenu(anchor, [
-      { label: '✨ Auto-detect', onClick: run('auto') },
-      { label: '📄 All text', onClick: run('text') },
-      { label: '🧾 Receipt', onClick: run('receipt') },
-      { label: '📑 Invoice', onClick: run('invoice') },
-    ]);
+    openActionMenu(anchor, OCR_MODES.map(([mode, label]) => ({ label, onClick: () => runOcr(note, mode) })));
   }
 
   // The image as JPEGs Claude reads well (≤ ~1500 px). A tall one — a long

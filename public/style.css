@@ -1747,6 +1747,10 @@ button:hover { filter: brightness(1.05); }
 /* Just left of the ✕. */
 #image-overlay .image-overlay-crop { right: 3.4rem; }
 #image-overlay .image-overlay-crop:hover { color: var(--accent); }
+/* 🔎 Read text: left of ✂️, or in its place on a GIF (no crop there). */
+#image-overlay .image-overlay-ocr { right: 3.4rem; }
+#image-overlay .image-overlay-ocr.beside-crop { right: 6.05rem; }
+#image-overlay .image-overlay-ocr:hover { color: var(--accent); }
 
 .map-fullscreen {
   position: relative;
