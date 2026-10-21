@@ -347,7 +347,54 @@
     if (hue !== undefined) out.hue = hue;
     const dim = clampInt(raw.dim, 0, 90);
     if (dim !== undefined) out.dim = dim;
+    const crop = cleanCrop(raw.crop);
+    if (crop) out.crop = crop;
     return Object.keys(out).length ? out : null;
+  }
+
+  // Safe area + focus point of an uploaded image, in per-mille of the image:
+  // {src, x, y, w, h, fx, fy}. Nothing outside x/y/w/h is ever shown; when the
+  // box's shape needs less than all of it, the cut is centred on fx/fy. `src` is
+  // the image it was drawn on — styles merge field by field, so a crop inherited
+  // past a different image must not apply to it (cssVars checks).
+  function cleanCrop(raw) {
+    if (!raw || typeof raw !== 'object' || typeof raw.src !== 'string' || !IMG_UPLOAD.test(raw.src)) return null;
+    const x = clampInt(raw.x, 0, 980);
+    const y = clampInt(raw.y, 0, 980);
+    if (x === undefined || y === undefined) return null;
+    const w = clampInt(raw.w, 20, 1000 - x);
+    const h = clampInt(raw.h, 20, 1000 - y);
+    if (w === undefined || h === undefined) return null;
+    const fx = clampInt(raw.fx, x, x + w);
+    const fy = clampInt(raw.fy, y, y + h);
+    return {
+      src: raw.src,
+      x,
+      y,
+      w,
+      h,
+      fx: fx === undefined ? x + Math.round(w / 2) : fx,
+      fy: fy === undefined ? y + Math.round(h / 2) : fy,
+    };
+  }
+
+  // Background size/position for a crop in a cw×ch box, for an image of natural
+  // size W×H: cover the box using only the safe area, as close to the focus as
+  // the safe area allows. Pure maths, so app.js can rerun it on every resize.
+  function cropLayout(crop, W, H, cw, ch) {
+    if (!crop || !(W > 0 && H > 0 && cw > 0 && ch > 0)) return null;
+    const sx = (crop.x / 1000) * W;
+    const sy = (crop.y / 1000) * H;
+    const sw = (crop.w / 1000) * W;
+    const sh = (crop.h / 1000) * H;
+    const s = Math.max(cw / sw, ch / sh);
+    const vw = cw / s;
+    const vh = ch / s;
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const left = clamp((crop.fx / 1000) * W - vw / 2, sx, sx + sw - vw);
+    const top = clamp((crop.fy / 1000) * H - vh / 2, sy, sy + sh - vh);
+    const r = (n) => Math.round(n * 100) / 100;
+    return { size: `${r(W * s)}px ${r(H * s)}px`, pos: `${r(-left * s)}px ${r(-top * s)}px` };
   }
 
   // Whitelist-normalise untrusted input into a style. Anything unrecognised is
@@ -498,6 +545,10 @@
         }
       }
       vars[`--${k}-img`] = css;
+      // Read back per element by app.js (layoutCrop), which knows the box size.
+      const cr = im.crop;
+      vars[`--${k}-crop`] =
+        cr && cr.src === im.img && css !== 'none' ? [cr.x, cr.y, cr.w, cr.h, cr.fx, cr.fy].join(' ') : 'none';
       vars[`--${k}-hue`] = `${im.hue || 0}deg`;
       vars[`--${k}-dim`] = String((im.dim || 0) / 100);
     }
@@ -538,6 +589,8 @@
     DEFAULT_COLORS,
     BOOT_KEY,
     sanitizeStyle,
+    cleanCrop,
+    cropLayout,
     mergeStyles,
     effectiveColors,
     cssVars,

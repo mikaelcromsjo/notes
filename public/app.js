@@ -5409,6 +5409,7 @@
     // The fixed background layer shows whenever the note area's backdrop differs
     // from a plain app-coloured page: an image, or just a different colour.
     root.classList.toggle('has-bg', noteVars['--bg-img'] !== 'none' || noteVars['--bg'] !== appVars['--bg']);
+    if (themeBgEl) layoutCrop(themeBgEl);
     if (themeMeta) themeMeta.setAttribute('content', appVars['--surface']);
     if (navigator.onLine) {
       try {
@@ -5423,6 +5424,63 @@
     }
   }
 
+  // Cropped theme images: the safe-area/focus maths needs the box's real size
+  // and the image's natural size, so it runs per element (and again on every
+  // resize) rather than living in the theme's vars. `kind` = 'bg' | 'card'.
+  const cropImgSizes = new Map(); // url -> Promise<{w, h} | null>
+  function imageNaturalSize(url) {
+    if (!cropImgSizes.has(url)) {
+      cropImgSizes.set(
+        url,
+        new Promise((res) => {
+          const im = new Image();
+          im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight });
+          im.onerror = () => {
+            cropImgSizes.delete(url);
+            res(null);
+          };
+          im.src = url;
+        })
+      );
+    }
+    return cropImgSizes.get(url);
+  }
+  const cropObserver =
+    typeof ResizeObserver === 'function'
+      ? new ResizeObserver((entries) => entries.forEach((e) => layoutCrop(e.target)))
+      : null;
+  async function layoutCrop(el) {
+    const kind = el === themeBgEl ? 'bg' : 'card';
+    const clear = () => {
+      el.style.removeProperty(`--${kind}-size`);
+      el.style.removeProperty(`--${kind}-pos`);
+    };
+    const unobserve = () => {
+      if (cropObserver && el._cropObserved) cropObserver.unobserve(el);
+      el._cropObserved = false;
+    };
+    if (!el.isConnected) return unobserve();
+    const cs = getComputedStyle(el);
+    const raw = cs.getPropertyValue(`--${kind}-crop`).trim();
+    const m = /^url\("(.+)"\)$/.exec(cs.getPropertyValue(`--${kind}-img`).trim());
+    if (!raw || raw === 'none' || !m) {
+      clear();
+      return unobserve();
+    }
+    if (cropObserver && !el._cropObserved) {
+      el._cropObserved = true;
+      cropObserver.observe(el); // its first callback lands here again with a size
+    }
+    const [x, y, w, h, fx, fy] = raw.split(/\s+/).map(Number);
+    const size = await imageNaturalSize(m[1]);
+    // Restyled meanwhile? That pass lays itself out.
+    if (cs.getPropertyValue(`--${kind}-crop`).trim() !== raw) return;
+    const lay = size && Themes.cropLayout({ x, y, w, h, fx, fy }, size.w, size.h, el.clientWidth, el.clientHeight);
+    if (!lay) return clear();
+    el.style.setProperty(`--${kind}-size`, lay.size);
+    el.style.setProperty(`--${kind}-pos`, lay.pos);
+  }
+
   // A card inherits the screen's vars unless its own note's style differs.
   function applyCellTheme(cell, noteId) {
     cell._themeNoteId = noteId;
@@ -5433,6 +5491,8 @@
       Themes.applyVars(cell, vars);
     }
     cell.classList.toggle('has-card-img', vars['--card-img'] !== 'none');
+    // Usually called before the cell is in the grid — measure once it is.
+    requestAnimationFrame(() => layoutCrop(cell));
   }
 
   function restyleAll() {
@@ -5689,6 +5749,33 @@
         });
         drow.append(tmk('label', null, 'Fade to colour'), dim, dv);
         sec.append(hrow, drow);
+
+        // Safe area + focus — uploads only (presets are gradients that
+        // scale to any box anyway).
+        if (eff.img.startsWith('/uploads/')) {
+          const crow = tmk('div', 'theme-row');
+          const cropped = eff.crop && eff.crop.src === eff.img;
+          const cb = tmk('button', null, cropped ? '✂️ Edit crop' : '✂️ Crop / focus');
+          cb.type = 'button';
+          cb.addEventListener('click', async () => {
+            const url = themeUrl(eff.img);
+            if (!url) return toast('Not available offline.');
+            const c = await openImageCropper(url, cropped ? eff.crop : null, { title: title + ' — crop' });
+            if (c) update(withField(cur, kind, 'crop', { src: eff.img, ...c }), true);
+          });
+          crow.append(tmk('label', null, 'Crop'), cb);
+          if (cropped) {
+            const rm = tmk('button', null, 'Show whole image');
+            rm.type = 'button';
+            // An explicit full-image crop (not just deleting ours), so a crop
+            // inherited from an ancestor's same image is overridden too.
+            rm.addEventListener('click', () =>
+              update(withField(cur, kind, 'crop', { src: eff.img, x: 0, y: 0, w: 1000, h: 1000, fx: 500, fy: 500 }), true)
+            );
+            crow.appendChild(rm);
+          }
+          sec.appendChild(crow);
+        }
       }
       return sec;
     }
@@ -6286,9 +6373,29 @@
       viewLink.addEventListener('click', (e) => {
         if (!resolvedUrl) return;
         e.preventDefault();
-        openImageLightbox(resolvedUrl, note.title);
+        openImageLightbox(resolvedUrl, note.title, note);
       });
-      if (!compact) frag.appendChild(buildDownloadLink(note));
+      if (!compact) {
+        const download = buildDownloadLink(note);
+        // Not a GIF: the canvas would keep only its first frame.
+        if (editable && !/\.gif$/i.test(note.attachment_path)) {
+          // Same element + classes as Download, so it looks the same.
+          const crop = document.createElement('a');
+          crop.className = 'center-attachment-file center-attachment-download';
+          crop.href = '#';
+          crop.textContent = '✂️ Crop / rotate';
+          crop.addEventListener('click', (e) => {
+            e.preventDefault();
+            cropAttachmentImage(note);
+          });
+          const row = document.createElement('div');
+          row.className = 'center-attachment-actions';
+          row.append(download, crop);
+          frag.appendChild(row);
+        } else {
+          frag.appendChild(download);
+        }
+      }
       return frag;
     }
     if (note.type === 'audio' && note.attachment_path) {
@@ -7104,6 +7211,7 @@
       content.hidden = true;
       previewBtn.textContent = '✏️ Edit';
     }
+
 
     frag.appendChild(title);
     const mailRow = buildMailInfo(currentNote, onRerender);
@@ -9810,7 +9918,7 @@
     if (n.shareId !== undefined && n.shareId !== (currentSpace ? currentSpace.id : null)) {
       const where = document.createElement('span');
       where.className = 'result-scope';
-      where.textContent = n.shareId == null ? ' · 👤 Personal' : ` · 🔗 ${n.shareTitle || 'Shared space'}`;
+      where.textContent = n.shareId == null ? ' 👤 Personal' : ` 🔗 ${n.shareTitle || 'Shared space'}`;
       title.appendChild(where);
     }
     div.appendChild(title);
@@ -10336,11 +10444,28 @@
       ? linkCrossCandidates.filter((n) => (n.title || '').toLowerCase().includes(q))
       : linkCrossCandidates
     ).filter((n) => n.id !== linkTarget);
-    const matches = sinkDone([...sameScope, ...crossScope]).slice(0, 8);
+    // Best title match first, whichever scope it's in — otherwise a handful
+    // of same-scope text hits fills the 8 rows and the note you actually
+    // typed the name of (in the other scope) never shows. Stable sort.
+    const titleRank = (n) => {
+      const t = (n.title || '').toLowerCase();
+      return !q || t === q ? 0 : t.startsWith(q) ? 1 : t.includes(q) ? 2 : 3;
+    };
+    const matches = sinkDone([...sameScope, ...crossScope].sort((x, y) => titleRank(x) - titleRank(y))).slice(0, 8);
+    // Both scopes in one list (e.g. "work" in this space next to your
+    // personal "Work"): say where the plain-link rows live too, not only
+    // the reference ones.
+    const mixed = matches.some((n) => n.isCross) && matches.some((n) => !n.isCross);
 
     linkResults.innerHTML = '';
     matches.forEach((n) => {
       const div = buildResultRow(n);
+      if (mixed && !n.isCross) {
+        const where = document.createElement('span');
+        where.className = 'result-scope';
+        where.textContent = currentSpace ? ` 🔗 ${currentSpace.title}` : ' 👤 Personal';
+        div.querySelector('.result-title').appendChild(where);
+      }
       div.addEventListener('click', async () => {
         try {
           if (n.isCross) {
@@ -11858,16 +11983,369 @@
   // Full-size image viewer: an in-app overlay (with its own close button)
   // instead of `target="_blank"`, which — in an installed/standalone PWA —
   // can open a bare window with no back/close affordance at all.
-  function openImageLightbox(url, alt) {
+  // `note` (an image attachment note) adds ✂️ Crop beside the ✕.
+  let lightboxNote = null;
+  const imageOverlayCrop = document.getElementById('image-overlay-crop');
+  function openImageLightbox(url, alt, note) {
     imageOverlayImg.src = url;
     imageOverlayImg.alt = alt || '';
+    // Not a GIF: the canvas would keep only its first frame.
+    lightboxNote =
+      note && note.type === 'image' && note.attachment_path && !/\.gif$/i.test(note.attachment_path) ? note : null;
+    imageOverlayCrop.classList.toggle('hidden', !lightboxNote);
     imageOverlay.classList.remove('hidden');
   }
+  imageOverlayCrop.addEventListener('click', () => {
+    const note = lightboxNote;
+    closeImageLightbox();
+    if (note) cropAttachmentImage(note);
+  });
 
   function closeImageLightbox() {
     imageOverlay.classList.add('hidden');
     // Not `src = ''` — that re-requests the current page in some browsers.
     imageOverlayImg.removeAttribute('src');
+  }
+
+  // Draw `src` (an <img> or ImageBitmap) turned `rot` degrees clockwise (a
+  // multiple of 90) onto a new canvas.
+  function rotatedCanvas(src, rot) {
+    const w = src.naturalWidth || src.width;
+    const h = src.naturalHeight || src.height;
+    const side = rot === 90 || rot === 270;
+    const cv = document.createElement('canvas');
+    cv.width = side ? h : w;
+    cv.height = side ? w : h;
+    const ctx = cv.getContext('2d');
+    ctx.translate(cv.width / 2, cv.height / 2);
+    ctx.rotate((rot * Math.PI) / 180);
+    ctx.drawImage(src, -w / 2, -h / 2);
+    return cv;
+  }
+
+  // Image cropper: drag the safe area's corners (or the box itself) and, with
+  // `focus`, the focus dot. Resolves {x, y, w, h, fx, fy} in per-mille of the
+  // image, or null on cancel. With `rotate`, ⟲/⟳ buttons too, and the result
+  // carries `rot` (0/90/180/270 clockwise) — the crop is then in the rotated
+  // image's coordinates. Theme images keep it as a mask (Themes.cropLayout);
+  // an image attachment is cut to the safe area for real (cropAttachmentImage).
+  function openImageCropper(url, initial, { focus = true, rotate = false, title = 'Crop image' } = {}) {
+    return new Promise((resolve) => {
+      const MIN = 0.05;
+      const c0 = initial || {};
+      const st = {
+        x: (c0.x || 0) / 1000,
+        y: (c0.y || 0) / 1000,
+        w: (c0.w || 1000) / 1000,
+        h: (c0.h || 1000) / 1000,
+      };
+      st.fx = c0.fx != null ? c0.fx / 1000 : st.x + st.w / 2;
+      st.fy = c0.fy != null ? c0.fy / 1000 : st.y + st.h / 2;
+
+      const ov = tmk('div', 'crop-overlay');
+      const head = tmk('div', 'crop-head', title);
+      const stage = tmk('div', 'crop-stage');
+      const frame = tmk('div', 'crop-frame');
+      const img = tmk('img');
+      img.alt = '';
+      img.draggable = false;
+      const box = tmk('div', 'crop-box');
+      for (const k of ['nw', 'ne', 'sw', 'se']) {
+        const hd = tmk('div', `crop-handle crop-${k}`);
+        hd.dataset.handle = k;
+        box.appendChild(hd);
+      }
+      const dot = tmk('div', 'crop-focus');
+      dot.hidden = !focus;
+      // The shade lives in its own clipped layer, so the frame itself needn't
+      // clip — corner handles at the image's edge stay whole and grabbable.
+      const clip = tmk('div', 'crop-clip');
+      const shade = tmk('div', 'crop-shade');
+      clip.appendChild(shade);
+      frame.append(img, clip, box, dot);
+      stage.appendChild(frame);
+      const hint = tmk(
+        'p',
+        'crop-hint',
+        focus
+          ? 'The box is the safe area — nothing outside it is ever shown. The dot is the focus: kept in view when a screen or card needs less than the whole box. Drag a corner, drag across the picture to draw a new box, or span one with two fingers.'
+          : `Drag a corner or the box, drag across the picture to draw a new box, or span one with two fingers${rotate ? '; ⟲/⟳ turns it' : ''}. Undo brings the original back.`
+      );
+      const bar = tmk('div', 'crop-bar');
+      const rotL = tmk('button', null, '⟲');
+      const rotR = tmk('button', null, '⟳');
+      rotL.title = 'Rotate left';
+      rotR.title = 'Rotate right';
+      for (const b of [rotL, rotR]) {
+        b.type = 'button';
+        b.hidden = !rotate;
+      }
+      const reset = tmk('button', null, 'Reset');
+      const cancel = tmk('button', null, 'Cancel');
+      const save = tmk('button', 'primary', 'Save');
+      for (const b of [reset, cancel, save]) b.type = 'button';
+      bar.append(rotL, rotR, reset, cancel, save);
+      ov.append(head, stage, hint, bar);
+      document.body.appendChild(ov);
+
+      const pct = (v) => `${v * 100}%`;
+      const paint = () => {
+        for (const el of [box, shade]) {
+          el.style.left = pct(st.x);
+          el.style.top = pct(st.y);
+          el.style.width = pct(st.w);
+          el.style.height = pct(st.h);
+        }
+        dot.style.left = pct(st.fx);
+        dot.style.top = pct(st.fy);
+      };
+      const clampFocus = () => {
+        st.fx = Math.min(st.x + st.w, Math.max(st.x, st.fx));
+        st.fy = Math.min(st.y + st.h, Math.max(st.y, st.fy));
+      };
+      const fit = () => {
+        if (!img.naturalWidth) return;
+        // Room round the image for the corner handles.
+        const pad = 48;
+        const s = Math.min(
+          (stage.clientWidth - pad) / img.naturalWidth,
+          (stage.clientHeight - pad) / img.naturalHeight
+        );
+        frame.style.width = `${Math.floor(img.naturalWidth * s)}px`;
+        frame.style.height = `${Math.floor(img.naturalHeight * s)}px`;
+      };
+      img.onload = () => {
+        fit();
+        paint();
+      };
+      img.onerror = () => {
+        hint.textContent = "Couldn't load the image.";
+        save.disabled = true;
+      };
+      // Rotation redraws the original (`base`) turned by the total angle, so
+      // repeated turns never stack up quality loss in the preview.
+      let rot = 0;
+      let base = null;
+      let rotUrl = null;
+      const showRotated = () => {
+        const cv = rotatedCanvas(base, rot);
+        cv.toBlob((b) => {
+          if (!b) return;
+          if (rotUrl) URL.revokeObjectURL(rotUrl);
+          rotUrl = URL.createObjectURL(b);
+          img.src = rotUrl;
+        }, 'image/jpeg', 0.85);
+      };
+      const turn = (dir) => {
+        if (!base) return;
+        rot = (rot + (dir > 0 ? 90 : 270)) % 360;
+        // Carry the safe area (and focus) round with the picture.
+        const { x, y, w, h, fx, fy } = st;
+        if (dir > 0) Object.assign(st, { x: 1 - (y + h), y: x, w: h, h: w, fx: 1 - fy, fy: fx });
+        else Object.assign(st, { x: y, y: 1 - (x + w), w: h, h: w, fx: fy, fy: 1 - fx });
+        if (rot === 0) img.src = url;
+        else showRotated();
+      };
+      rotL.addEventListener('click', () => turn(-1));
+      rotR.addEventListener('click', () => turn(1));
+      if (rotate) {
+        const b = new Image();
+        b.onload = () => (base = b);
+        b.src = url;
+      }
+      img.src = url;
+      window.addEventListener('resize', fit);
+
+      // Pointer maths in fractions of the frame: getBoundingClientRect ratios
+      // stay right under the desktop-site zoom too.
+      const at = (e) => {
+        const r = frame.getBoundingClientRect();
+        return {
+          px: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+          py: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+        };
+      };
+      // One finger: a corner resizes, the box moves, the dot (or a tap inside
+      // the box) sets the focus. Two fingers anywhere: the box spans between
+      // them, live — lift both to keep it. Listens on the stage, so a finger
+      // just off the image still counts (at() clamps to its edge).
+      let drag = null;
+      const touches = new Map(); // pointerId -> {px, py}
+      const spanTouches = () => {
+        const [a, b] = [...touches.values()];
+        const x0 = Math.min(a.px, b.px);
+        const y0 = Math.min(a.py, b.py);
+        st.w = Math.max(MIN, Math.abs(a.px - b.px));
+        st.h = Math.max(MIN, Math.abs(a.py - b.py));
+        st.x = Math.min(x0, 1 - st.w);
+        st.y = Math.min(y0, 1 - st.h);
+        st.fx = st.x + st.w / 2;
+        st.fy = st.y + st.h / 2;
+      };
+      stage.addEventListener('pointerdown', (e) => {
+        const p = at(e);
+        touches.set(e.pointerId, p);
+        stage.setPointerCapture(e.pointerId);
+        e.preventDefault();
+        if (touches.size >= 2) {
+          drag = { mode: 'span' };
+          spanTouches();
+          paint();
+          return;
+        }
+        const handle = e.target.dataset && e.target.dataset.handle;
+        // A box covering the whole image can't move anyway, so dragging on
+        // it draws a new one — as does dragging anywhere outside the box.
+        const whole = st.w > 0.995 && st.h > 0.995;
+        if (handle) drag = { mode: handle };
+        else if (e.target === dot) drag = { mode: 'focus' };
+        else if (e.target === box && !whole)
+          drag = focus ? { mode: 'tap', p, s: { ...st } } : { mode: 'move', p, s: { ...st } };
+        else drag = { mode: 'draw', p, tap: e.target === box && focus };
+      });
+      stage.addEventListener('pointermove', (e) => {
+        if (!touches.has(e.pointerId)) return;
+        const { px, py } = at(e);
+        touches.set(e.pointerId, { px, py });
+        if (!drag) return;
+        if (drag.mode === 'span') {
+          if (touches.size >= 2) spanTouches();
+        } else if (drag.mode === 'draw') {
+          // Corner to opposite corner: the box spans from where the drag began.
+          if (!drag.moved && Math.hypot(px - drag.p.px, py - drag.p.py) < 0.02) return;
+          drag.moved = true;
+          const { px: ax, py: ay } = drag.p;
+          st.w = Math.max(MIN, Math.abs(px - ax));
+          st.h = Math.max(MIN, Math.abs(py - ay));
+          st.x = Math.min(Math.min(px, ax), 1 - st.w);
+          st.y = Math.min(Math.min(py, ay), 1 - st.h);
+          st.fx = st.x + st.w / 2;
+          st.fy = st.y + st.h / 2;
+        } else if (drag.mode === 'tap') {
+          // Inside the box with a focus dot: a drag moves the box, a tap
+          // (pointerup without moving) sets the focus.
+          if (Math.hypot(px - drag.p.px, py - drag.p.py) > 0.01) drag.mode = 'move';
+          else return;
+        }
+        if (drag.mode === 'focus') {
+          st.fx = px;
+          st.fy = py;
+        } else if (drag.mode === 'move') {
+          const s0 = drag.s;
+          st.x = Math.min(1 - s0.w, Math.max(0, s0.x + px - drag.p.px));
+          st.y = Math.min(1 - s0.h, Math.max(0, s0.y + py - drag.p.py));
+          st.fx = s0.fx + st.x - s0.x;
+          st.fy = s0.fy + st.y - s0.y;
+        } else if (drag.mode !== 'span' && drag.mode !== 'draw') {
+          const right = st.x + st.w;
+          const bottom = st.y + st.h;
+          if (drag.mode.includes('w')) st.x = Math.min(px, right - MIN);
+          if (drag.mode.includes('e')) st.w = Math.max(MIN, px - st.x);
+          else st.w = right - st.x;
+          if (drag.mode.includes('n')) st.y = Math.min(py, bottom - MIN);
+          if (drag.mode.includes('s')) st.h = Math.max(MIN, py - st.y);
+          else st.h = bottom - st.y;
+        }
+        clampFocus();
+        paint();
+      });
+      const endDrag = (e) => {
+        touches.delete(e.pointerId);
+        const tapped = drag && e.type === 'pointerup' && (drag.mode === 'tap' || (drag.mode === 'draw' && drag.tap && !drag.moved));
+        if (tapped) {
+          st.fx = drag.p.px;
+          st.fy = drag.p.py;
+          clampFocus();
+          paint();
+        }
+        // A span ends with both fingers up — the last one lifting mustn't
+        // turn into a one-finger move.
+        if (!drag || drag.mode !== 'span' || touches.size === 0) drag = null;
+      };
+      stage.addEventListener('pointerup', endDrag);
+      stage.addEventListener('pointercancel', endDrag);
+
+      const done = (result) => {
+        if (rotUrl) URL.revokeObjectURL(rotUrl);
+        window.removeEventListener('resize', fit);
+        document.removeEventListener('keydown', onKey, true);
+        ov.remove();
+        resolve(result);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          done(null);
+        }
+      };
+      document.addEventListener('keydown', onKey, true);
+      reset.addEventListener('click', () => {
+        Object.assign(st, { x: 0, y: 0, w: 1, h: 1, fx: 0.5, fy: 0.5 });
+        if (rot) {
+          rot = 0;
+          img.src = url;
+        }
+        paint();
+      });
+      cancel.addEventListener('click', () => done(null));
+      save.addEventListener('click', () => {
+        const m = (v) => Math.round(v * 1000);
+        const out = { x: m(st.x), y: m(st.y), w: m(st.w), h: m(st.h), fx: m(st.fx), fy: m(st.fy) };
+        out.w = Math.min(out.w, 1000 - out.x);
+        out.h = Math.min(out.h, 1000 - out.y);
+        if (rotate) out.rot = rot;
+        done(out);
+      });
+      paint();
+    });
+  }
+
+  // Cut an image attachment to a safe area for real: a new file through the
+  // ordinary replace route, so Undo restores the original (which stays on disk).
+  async function cropAttachmentImage(note) {
+    const url = await resolveMediaUrl(note.attachment_path);
+    if (!url) return toast('Not available offline.');
+    if (!navigator.onLine) return toast('Cropping an image needs a connection.');
+    const c = await openImageCropper(url, null, { focus: false, rotate: true, title: 'Crop / rotate image' });
+    if (!c || (!c.rot && c.x === 0 && c.y === 0 && c.w === 1000 && c.h === 1000)) return;
+    let blob;
+    try {
+      const src = await fetch(url).then((r) => r.blob());
+      const bmp = await createImageBitmap(src);
+      // Rotate first: the crop is in the rotated picture's coordinates.
+      const turned = c.rot ? rotatedCanvas(bmp, c.rot) : bmp;
+      const sx = Math.round((c.x / 1000) * turned.width);
+      const sy = Math.round((c.y / 1000) * turned.height);
+      const sw = Math.max(1, Math.round((c.w / 1000) * turned.width));
+      const sh = Math.max(1, Math.round((c.h / 1000) * turned.height));
+      const cv = document.createElement('canvas');
+      cv.width = sw;
+      cv.height = sh;
+      cv.getContext('2d').drawImage(turned, sx, sy, sw, sh, 0, 0, sw, sh);
+      if (bmp.close) bmp.close();
+      const type = ['image/png', 'image/webp'].includes(src.type) ? src.type : 'image/jpeg';
+      blob = await new Promise((res, rej) =>
+        cv.toBlob((b) => (b ? res(b) : rej(new Error('encode'))), type, 0.92)
+      );
+    } catch {
+      return toast("Couldn't crop that image.");
+    }
+    const fd = new FormData();
+    fd.set('type', 'image');
+    const ext = { 'image/png': 'png', 'image/webp': 'webp' }[blob.type] || 'jpg';
+    fd.set('file', blob, `cropped.${ext}`);
+    const saved = savingToast();
+    try {
+      const updated = await api.setNoteAttachment(note.id, fd);
+      saved();
+      if (updated.id === currentId) currentNote = updated;
+      undoToast(c.rot ? 'Image updated' : 'Image cropped', updated.historyId);
+      await afterAttach();
+    } catch (e) {
+      if (e.httpStatus) toast(e.message || "Couldn't save the cropped image.");
+    } finally {
+      saved();
+    }
   }
 
   imageOverlayClose.addEventListener('click', closeImageLightbox);
