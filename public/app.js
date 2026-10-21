@@ -4740,6 +4740,7 @@
           const picked = await openShareDialog(note, candidates, null);
           if (!picked) return;
           try {
+            forgetMovedPersonal(picked.ids);
             const share = await api.createShare(picked.title, picked.ids, await plaintextForShare(picked.ids));
             await finish({ id: share.id, title: share.title, role: 'owner' }, share.historyId, picked.ids.length);
           } catch (e) {
@@ -4753,6 +4754,7 @@
           const picked = await openShareDialog(note, candidates, s);
           if (!picked) return;
           try {
+            forgetMovedPersonal(picked.ids);
             const res = await api.addNoteToShare(s.id, picked.ids, await plaintextForShare(picked.ids));
             await finish({ id: s.id, title: s.title, role: s.role }, res.historyId, picked.ids.length);
           } catch (e) {
@@ -8399,9 +8401,29 @@
   // Where the spaces bar's 👤 Personal chip returns to: the last personal
   // note centred (set in goTo), else the graph root.
   let lastPersonalNoteId = null;
+  // Notes about to leave the personal graph (moved into a space): if the
+  // remembered note is one of them, step up its personal parents to the
+  // first one staying behind, else forget it (→ the root). Call before the
+  // move, while hierarchyParents is still the personal map.
+  function forgetMovedPersonal(ids) {
+    const moving = new Set(ids.map(Number));
+    let id = lastPersonalNoteId;
+    const seen = new Set();
+    while (id != null && moving.has(Number(id)) && !seen.has(id)) {
+      seen.add(id);
+      id = hierarchyParents[String(id)] ?? null;
+    }
+    lastPersonalNoteId = id;
+  }
   async function backToPersonal() {
     if (!currentSpace) return;
     let id = lastPersonalNoteId;
+    // It may have moved into a space (or been deleted) by another route
+    // since — then goTo would follow it there instead of coming home.
+    if (id != null) {
+      const note = await api.getNote(id).catch(() => null);
+      if (!note || note.share_id != null) id = lastPersonalNoteId = null;
+    }
     if (id == null) {
       const root = await api.getRootNote().catch(() => null);
       id = root && root.note ? root.note.id : null;
