@@ -10,6 +10,7 @@
 // for service:mailrouter; the mail itself decides the account). No delete.
 // Everything goes through server/notes.js, so links, history and undo work
 // exactly as for an edit in the app.
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
@@ -98,30 +99,36 @@ router.get(
   })
 );
 
+// SQL for "notes this token may list" in ?space=<id>|personal (absent = all), or null if none.
+function spaceScope(w, space) {
+  const args = [];
+  const memberOf = db.prepare('SELECT share_id FROM share_members WHERE user_id = ?').all(w.userId).map((r) => r.share_id);
+  const spaces = memberOf.filter((id) => spaceAllowed(w, id));
+  const scope = [];
+  if (space === 'personal' || space == null) {
+    if (w.personal) {
+      scope.push('(share_id IS NULL AND user_id = ?)');
+      args.push(w.userId);
+    }
+  }
+  if (space !== 'personal') {
+    const want = space == null ? spaces : spaces.filter((id) => id === Number(space));
+    if (want.length) scope.push(`share_id IN (${want.map(() => '?').join(',')})`);
+    args.push(...want);
+  }
+  return scope.length ? { sql: `(${scope.join(' OR ')})`, args } : null;
+}
+
 // ?space=<id>|personal  ?q=<text in title or content>  ?limit=  (default 500)
 router.get(
   '/notes',
   requireScope('read'),
   wrap((req) => {
     const w = who(req);
-    const where = ["status != 'deleted'"];
-    const args = [];
-    const memberOf = db.prepare('SELECT share_id FROM share_members WHERE user_id = ?').all(w.userId).map((r) => r.share_id);
-    const spaces = memberOf.filter((id) => spaceAllowed(w, id));
-    const scope = [];
-    if (req.query.space === 'personal' || req.query.space == null) {
-      if (w.personal) {
-        scope.push('(share_id IS NULL AND user_id = ?)');
-        args.push(w.userId);
-      }
-    }
-    if (req.query.space !== 'personal') {
-      const want = req.query.space == null ? spaces : spaces.filter((id) => id === Number(req.query.space));
-      if (want.length) scope.push(`share_id IN (${want.map(() => '?').join(',')})`);
-      args.push(...want);
-    }
-    if (!scope.length) return [];
-    where.push(`(${scope.join(' OR ')})`);
+    const scope = spaceScope(w, req.query.space);
+    if (!scope) return [];
+    const where = ["status != 'deleted'", scope.sql];
+    const args = [...scope.args];
     if (req.query.q) {
       where.push('(title LIKE ? OR content LIKE ?)');
       args.push(`%${req.query.q}%`, `%${req.query.q}%`);
@@ -148,6 +155,51 @@ router.get(
       .filter((n) => resolveNoteAccess(db, w.userId, n.id).role && spaceAllowed(w, n.share_id))
       .map((n) => ({ id: n.id, title: n.title, type: n.type, parent: n.created_from_note_id }));
     return { ...shape(note, true), links };
+  })
+);
+
+// The ```receipt / ```invoice fences (🔎 Read text, server/ocr.js) in notes, one entry per
+// fence: { id: "<note id>:<hash>", note_id, index, kind, hash, document, note, parent }.
+// hash = sha256 of the parsed JSON, so an importer can tell a fence apart from its
+// position in the note. ?space=<id>|personal (absent = all). Encrypted notes and
+// fences that don't parse are left out.
+const FENCE_RE = /```(receipt|invoice)\n([\s\S]*?)\n```/g;
+
+router.get(
+  '/documents',
+  requireScope('read'),
+  wrap((req) => {
+    const w = who(req);
+    const scope = spaceScope(w, req.query.space);
+    if (!scope) return [];
+    const notes = db
+      .prepare(
+        `SELECT * FROM notes WHERE status != 'deleted' AND ${scope.sql}
+         AND (content LIKE '%\`\`\`receipt%' OR content LIKE '%\`\`\`invoice%') ORDER BY updated_at DESC`
+      )
+      .all(...scope.args);
+    const out = [];
+    for (const note of notes) {
+      if (isEncrypted(note.content)) continue;
+      let parent = null;
+      if (note.created_from_note_id) {
+        const p = resolveNoteAccess(db, w.userId, note.created_from_note_id);
+        if (p.role && p.note.status !== 'deleted' && spaceAllowed(w, p.note.share_id)) parent = { id: p.note.id, title: p.note.title };
+      }
+      let index = 0;
+      for (const m of note.content.matchAll(FENCE_RE)) {
+        let document;
+        try {
+          document = JSON.parse(m[2]);
+        } catch {
+          continue;
+        }
+        if (!document || typeof document !== 'object' || Array.isArray(document)) continue;
+        const hash = crypto.createHash('sha256').update(JSON.stringify(document)).digest('hex').slice(0, 16);
+        out.push({ id: `${note.id}:${hash}`, note_id: note.id, index: index++, kind: m[1], hash, document, note: shape(note, false), parent });
+      }
+    }
+    return out;
   })
 );
 
