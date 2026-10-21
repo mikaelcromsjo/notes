@@ -6250,6 +6250,7 @@
     });
     handleDeepLink();
     consumeOpenedFiles();
+    syncCompanionManifest();
     offerRestoreUndo();
     warnDesktopSiteMode();
   }
@@ -6342,6 +6343,31 @@
       // after replacing all account data wholesale.
       api.onboardingBegin().finally(() => location.reload());
     }
+  }
+
+  // With the companion APK (se.iaai.notes) on this phone, its own "Notes"
+  // share / "Open with" entry replaces ours (Chrome can lose a shared file on
+  // the way to a web app): link the manifest variant without share_target /
+  // file_handlers, and back again once the APK is gone. Remembered for the
+  // inline script in index.html, so the right manifest is linked from the
+  // first byte; Chrome rewrites the installed app on its next manifest check.
+  async function syncCompanionManifest() {
+    if (!navigator.getInstalledRelatedApps) return;
+    let has = false;
+    try {
+      has = (await navigator.getInstalledRelatedApps()).some((a) => a.id === 'se.iaai.notes');
+    } catch {
+      return;
+    }
+    try {
+      if (has) localStorage.setItem('nico-companion', '1');
+      else localStorage.removeItem('nico-companion');
+    } catch {
+      /* storage blocked — the swap below still holds for this page */
+    }
+    const link = document.getElementById('manifest-link');
+    const href = has ? '/manifest-companion.webmanifest' : '/manifest.webmanifest';
+    if (link && link.getAttribute('href') !== href) link.setAttribute('href', href);
   }
 
   // "Open with" (manifest `file_handlers`, action /?opened=1): the files come

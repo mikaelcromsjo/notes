@@ -91,11 +91,12 @@ function createFromFiles(userId, files, { title, content }) {
 // POST /share — target of the manifest `share_target`. multipart/form-data with
 // title / text / url text parts and any number of `media` files (any type the
 // upload allowlist takes). `?json=1` (the service worker replaying a share
-// made offline — see sw.js) answers {id} instead of redirecting.
+// made offline — see sw.js) answers {id} instead of redirecting; so does the
+// companion APK's token-authed mount of this router (routes/widget.js).
 router.post('/', acceptShare, (req, res) => {
   const body = req.body || {};
   const files = Array.isArray(req.files) ? req.files : [];
-  const json = req.query.json === '1';
+  const json = req.query.json === '1' || req.shareJson === true;
   let sharedText = String(body.text || '').trim();
   const sharedUrl = String(body.url || '').trim();
   logShare(req, files);

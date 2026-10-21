@@ -65,6 +65,16 @@ app.get('/app', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 
+// The manifest a phone with the companion APK installed links instead
+// (index.html / syncCompanionManifest in app.js): no share target and no file
+// handlers, so the share sheet and "Open with" list only the APK's "Notes".
+app.get('/manifest-companion.webmanifest', (req, res) => {
+  const m = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', 'manifest.webmanifest'), 'utf8'));
+  delete m.share_target;
+  delete m.file_handlers;
+  res.type('application/manifest+json').send(JSON.stringify(m));
+});
+
 app.use(express.static(path.join(__dirname, '..', 'public')));
 // Defence in depth for user uploads: forbid MIME sniffing and load any file
 // that is opened top-level as a scriptless, opaque-origin document.

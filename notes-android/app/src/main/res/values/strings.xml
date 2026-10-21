@@ -5,4 +5,5 @@
     <string name="widget_agenda_label">Notes: Agenda</string>
     <string name="widget_grid_label">Notes: Grid</string>
     <string name="widget_nudge_label">Notes: Nudge</string>
+    <string name="asset_statements" translatable="false">[{\"relation\": [\"delegate_permission/common.handle_all_urls\"], \"target\": {\"namespace\": \"web\", \"site\": \"https://notes.ia-ai.se\"}}]</string>
 </resources>

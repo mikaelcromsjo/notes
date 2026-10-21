@@ -105,6 +105,9 @@ function diskUpload() {
       },
     }),
     limits: { fileSize: 50 * 1024 * 1024 },
+    // Browsers and the companion APK send filename="…" as raw UTF-8; busboy's
+    // latin1 default turned "Möte.pdf" into "MÃ¶te.pdf".
+    defParamCharset: 'utf8',
     fileFilter: (req, file, cb) => {
       if (IMAGE_EXT[file.mimetype] || AUDIO_EXT[file.mimetype] || FILE_EXT[file.mimetype]) {
         return cb(null, true);

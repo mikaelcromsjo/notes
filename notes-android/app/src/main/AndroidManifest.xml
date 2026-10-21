@@ -46,6 +46,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@android:style/Theme.DeviceDefault.Light">
 
+        <!-- Lets the web app see this app is installed
+             (navigator.getInstalledRelatedApps, matched against the PWA
+             manifest's related_applications) — a statement about the site,
+             not an App Links claim: no autoVerify filter goes with it. -->
+        <meta-data
+            android:name="asset_statements"
+            android:resource="@string/asset_statements" />
+
         <!-- The only screen: paste the widget feed URL (copied from the web
              app's Account -> Integrate section) to connect the widgets below.
              Nothing here ever signs in or shows note content itself. A plain
@@ -79,6 +87,34 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="iaainotes" android:host="alarm" />
+            </intent-filter>
+        </activity>
+
+        <!-- "Notes" in the share sheet and in "Open with" for any file:
+             uploads it to the account (ShareActivity) and opens the new
+             note in the web app. Labelled "Notes", not the app's "Notes
+             Widgets" — it stands in for the PWA's own share entry, which the
+             web app drops from its manifest on a phone with this installed
+             (getInstalledRelatedApps; see asset_statements below). -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:label="Notes"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 

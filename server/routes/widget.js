@@ -317,4 +317,20 @@ router.post('/location', (req, res) => {
   res.json({ ok: true });
 });
 
+// The companion APK's share sheet / "Open with" target (notes-android
+// ShareActivity): the same multipart body and note shapes as the PWA's
+// POST /share, authed by the widget token since that app has no session.
+// Always answers JSON ({id}).
+router.use(
+  '/share',
+  (req, res, next) => {
+    const user = userForToken(req.query.token);
+    if (!user) return res.status(401).json({ error: 'invalid or missing widget token' });
+    req.userId = user.id;
+    req.shareJson = true;
+    next();
+  },
+  require('./share')
+);
+
 module.exports = router;

@@ -80,6 +80,19 @@ WebView, no note content ever rendered here.
   can't be updated/removed later. Needs `SET_ALARM` (normal permission). If
   the APK (or a pre-0.22 build) is missing, Chrome follows the intent's
   `browser_fallback_url` to the web app's Integrate section instead.
+- `ShareActivity` — the second non-widget exception: "Notes" in the share
+  sheet and in "Open with" (`SEND`/`SEND_MULTIPLE`/`VIEW`, `*/*`). Streams
+  the shared files (+ subject/text) as one multipart POST to
+  `/api/widget/share?token=` (widget token; `server/routes/widget.js` mounts
+  the PWA's own `routes/share.js` behind it, so note shapes and titles are
+  identical), then opens `{base_url}/#<id>`. Translucent, not `NoDisplay`: the
+  read grant on a shared `content://` Uri only lives as long as the receiving
+  activity, so it stays up for the upload. Exists because Chrome can drop the
+  file from a PWA share, and has no Android "Open with" for web apps. The
+  `asset_statements` meta-data (a statement about the site, no App Links
+  claim) lets the web app's `getInstalledRelatedApps` see this app; it then
+  links `/manifest-companion.webmanifest` (no `share_target`/`file_handlers`)
+  so only this entry shows in the share sheet (`syncCompanionManifest`).
 - `WidgetTheme` — approximates the account's live app theme (server's
   `theme.colors`/`theme.font`, i.e. `public/themes.js`'s `effectiveColors`) onto
   the two `RemoteViews` widgets — flat colours carry over exactly, fonts
