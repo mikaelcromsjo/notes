@@ -6249,6 +6249,7 @@
       }
     });
     handleDeepLink();
+    consumeOpenedFiles();
     offerRestoreUndo();
     warnDesktopSiteMode();
   }
@@ -6278,6 +6279,9 @@
   //   a `nico_share` cookie      — text handed over by POST /share while logged
   //                                out (see server/routes/share.js)
   //   /?shared=queued            — sw.js parked an offline share (flushPendingShares)
+  //   /?shared=nofile[&name=]    — a share whose file never arrived, only its
+  //                                name (server/routes/share.js); offer the
+  //                                picker's file chooser instead
   //   /?d=integrate              — "Add phone alarm"'s fallback when the Android
   //                                companion app isn't installed (alarmIntentUrl)
   // Consume whatever we act on so a reload is clean.
@@ -6286,6 +6290,7 @@
     const d = params.get('d');
     const handledD = d === 'agenda' || d === 'insights' || d === 'integrate';
     const sharedQueued = params.get('shared') === 'queued';
+    const sharedNoFile = params.get('shared') === 'nofile';
     const wantsCompose = params.get('compose') === '1';
     const isFresh = params.get('fresh') === '1';
     const wantsBegin = params.get('ob') === 'begin';
@@ -6299,7 +6304,7 @@
 
     if (
       !handledD && !wantsCompose && !isFresh && !wantsBegin && !wantsPreview && !shared && !spaceParam &&
-      !sharedQueued
+      !sharedQueued && !sharedNoFile
     )
       return;
 
@@ -6310,7 +6315,10 @@
     if (wantsBegin) url.searchParams.delete('ob');
     if (wantsPreview) url.searchParams.delete('preview');
     if (spaceParam != null) url.searchParams.delete('space');
-    if (sharedQueued) url.searchParams.delete('shared');
+    if (sharedQueued || sharedNoFile) {
+      url.searchParams.delete('shared');
+      url.searchParams.delete('name');
+    }
     history.replaceState(null, '', url.pathname + url.search + url.hash);
 
     if (d === 'agenda') openAgenda();
@@ -6321,6 +6329,7 @@
       toast('Phone alarms need the Android companion app — download it below.', { duration: 6000 });
     }
     if (sharedQueued) toast("You're offline — the shared item will be added once you're back online.", { duration: 5000 });
+    if (sharedNoFile) offerSharedFilePick(params.get('name'));
 
     if (wantsSpace) switchSpace(Number(spaceParam));
     else if (shared) createSharedNote(shared);
@@ -6333,6 +6342,55 @@
       // after replacing all account data wholesale.
       api.onboardingBegin().finally(() => location.reload());
     }
+  }
+
+  // "Open with" (manifest `file_handlers`, action /?opened=1): the files come
+  // through the launch queue, not the URL. They go to the same POST /share as
+  // the share sheet, so a file becomes the same note either way (one file =
+  // its own image/audio/contact/file note, several = one .zip note).
+  function consumeOpenedFiles() {
+    if (new URLSearchParams(location.search).has('opened')) {
+      const url = new URL(location.href);
+      url.searchParams.delete('opened');
+      history.replaceState(null, '', url.pathname + url.search + url.hash);
+    }
+    if (!('launchQueue' in window)) return;
+    window.launchQueue.setConsumer(async (params) => {
+      if (!params.files || !params.files.length) return;
+      if (!navigator.onLine) {
+        toast("You're offline — open the file again once you're back online.", { duration: 5000 });
+        return;
+      }
+      const saved = savingToast();
+      try {
+        const fd = new FormData();
+        for (const handle of params.files) fd.append('media', await handle.getFile());
+        const res = await fetch('/share?json=1', { method: 'POST', body: fd });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.id == null) throw new Error(body.error || `HTTP ${res.status}`);
+        saved();
+        allNotesCache = await api.listNotes();
+        await goTo(body.id, 'new');
+        toast('Saved as a note');
+      } catch (e) {
+        saved();
+        toast(`Couldn't save the file: ${e.message}`);
+      }
+    });
+  }
+
+  // The phone handed over a share without its file (just the name, if that).
+  // The dialog's button is a fresh tap, so the file chooser may open from it.
+  async function offerSharedFilePick(name) {
+    const what = name ? `"${name}"` : 'the file';
+    const ok = await confirmDialog(
+      `The share arrived without ${what} itself, so nothing was saved. Choose it here to add it as a note.`,
+      { confirmLabel: 'Choose file' }
+    );
+    if (!ok) return;
+    openPicker({ standalone: true });
+    pickerStyleRow.querySelector('.picker-style-btn[data-style="file"]').click();
+    pickerFileInput.click();
   }
 
   // Read + clear the `nico_share` cookie left by a logged-out POST /share.

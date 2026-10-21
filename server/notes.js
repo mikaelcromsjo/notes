@@ -8,6 +8,7 @@ const path = require('path');
 const history = require('./history');
 const { uploadsDir } = require('./upload-config');
 const { uploadedFileType } = require('./attachment-kind');
+const { describeFile } = require('./file-title');
 const {
   buildHierarchy,
   hierarchyParentsMap,
@@ -749,7 +750,7 @@ function createAttachmentNote(db, userId, parentId, body, file) {
     }
     attachmentPath = `/uploads/${file.filename}`;
     attachmentSize = file.size;
-    defaultTitle = type === 'image' ? 'Photo' : type === 'audio' ? 'Recording' : file.originalname || 'File';
+    defaultTitle = describeFile(type, file);
   } else if (type === 'contact') {
     if (!contactName || !contactName.trim()) {
       throw new HttpError(400, 'contactName is required for contact attachments');

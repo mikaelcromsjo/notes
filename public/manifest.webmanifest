@@ -9,9 +9,22 @@
   "background_color": "#f4f5f7",
   "theme_color": "#4f6df5",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
-    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
   ],
   "shortcuts": [
     {
@@ -30,8 +43,122 @@
       "text": "text",
       "url": "url",
       "files": [
-        { "name": "media", "accept": ["image/*", "audio/*", "video/*", "application/*", "text/*", "text/vcard", "text/x-vcard", "text/directory", ".vcf"] }
+        {
+          "name": "media",
+          "accept": [
+            "*/*"
+          ]
+        }
       ]
     }
-  }
+  },
+  "file_handlers": [
+    {
+      "action": "/?opened=1",
+      "accept": {
+        "image/*": [
+          ".jpg",
+          ".jpeg",
+          ".png",
+          ".gif",
+          ".webp",
+          ".heic",
+          ".heif"
+        ],
+        "audio/*": [
+          ".mp3",
+          ".m4a",
+          ".aac",
+          ".ogg",
+          ".oga",
+          ".opus",
+          ".wav",
+          ".webm",
+          ".amr"
+        ],
+        "video/*": [
+          ".mp4",
+          ".mov",
+          ".webm",
+          ".mkv",
+          ".3gp"
+        ],
+        "application/pdf": [
+          ".pdf"
+        ],
+        "application/zip": [
+          ".zip"
+        ],
+        "application/x-7z-compressed": [
+          ".7z"
+        ],
+        "application/gzip": [
+          ".gz",
+          ".tgz"
+        ],
+        "application/x-tar": [
+          ".tar"
+        ],
+        "application/msword": [
+          ".doc"
+        ],
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [
+          ".docx"
+        ],
+        "application/vnd.ms-excel": [
+          ".xls"
+        ],
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [
+          ".xlsx"
+        ],
+        "application/vnd.ms-powerpoint": [
+          ".ppt"
+        ],
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": [
+          ".pptx"
+        ],
+        "application/vnd.oasis.opendocument.text": [
+          ".odt"
+        ],
+        "application/vnd.oasis.opendocument.spreadsheet": [
+          ".ods"
+        ],
+        "application/vnd.oasis.opendocument.presentation": [
+          ".odp"
+        ],
+        "application/rtf": [
+          ".rtf"
+        ],
+        "application/epub+zip": [
+          ".epub"
+        ],
+        "application/json": [
+          ".json"
+        ],
+        "text/plain": [
+          ".txt",
+          ".log"
+        ],
+        "text/markdown": [
+          ".md"
+        ],
+        "text/csv": [
+          ".csv"
+        ],
+        "text/calendar": [
+          ".ics"
+        ],
+        "text/vcard": [
+          ".vcf"
+        ],
+        "application/octet-stream": [
+          ".bin",
+          ".dat",
+          ".gpx",
+          ".kml",
+          ".kmz"
+        ]
+      }
+    }
+  ]
 }
