@@ -1176,6 +1176,50 @@ button:hover { filter: brightness(1.05); }
 .markdown-body th,
 .markdown-body td { border: 1px solid var(--border); padding: 0.3em 0.5em; }
 
+/* A ```receipt / ```invoice fence (🔎 Read text) — app.js's renderDocFence. */
+.markdown-body .doc-card {
+  margin: 0 0 0.8em;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6em 0.75em;
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.doc-card .doc-head { display: flex; align-items: baseline; gap: 0.5em; flex-wrap: wrap; }
+.doc-card .doc-kind { font-size: 0.75em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.doc-card .doc-name { font-weight: 600; flex: 1 1 auto; min-width: 0; }
+.doc-card .doc-sum { font-weight: 700; white-space: nowrap; margin-left: auto; }
+.doc-card .doc-copy {
+  background: none;
+  border: none;
+  padding: 0 0.2em;
+  font-size: 0.9em;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.doc-card .doc-copy:hover { opacity: 1; }
+.doc-card .doc-meta { font-size: 0.8em; color: var(--muted); margin-top: 0.15em; }
+.doc-card .doc-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9.5em, 1fr));
+  gap: 0.35em 0.9em;
+  margin: 0.5em 0 0;
+}
+.doc-card .doc-fields dt { font-size: 0.72em; color: var(--muted); }
+.doc-card .doc-fields dd { margin: 0; overflow-wrap: anywhere; }
+.doc-card .doc-due dd { font-weight: 700; color: var(--alarm, var(--accent)); }
+.doc-card .doc-table-wrap { overflow-x: auto; margin-top: 0.5em; }
+.markdown-body .doc-card .doc-table { width: 100%; font-size: 0.88em; }
+.markdown-body .doc-card .doc-table th,
+.markdown-body .doc-card .doc-table td {
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 0.25em 0.4em;
+  text-align: left;
+}
+.doc-card .doc-table th { font-size: 0.85em; color: var(--muted); font-weight: 500; }
+.markdown-body .doc-card .doc-table .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.markdown-body .doc-card .doc-table tfoot td { border-bottom: none; color: var(--muted); }
+.markdown-body .doc-card .doc-table tfoot tr.doc-total td { color: var(--text); font-weight: 700; }
 
 /* A mail-in note's sender line in the editor (app.js's buildMailInfo). */
 .mail-info {

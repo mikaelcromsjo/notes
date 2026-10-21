@@ -2404,6 +2404,8 @@
   // problem than either alone.
   let currentSpace = null;
   let saveTimer = null;
+  // The open note editor's "append to the text" hook — see ocrAttachmentImage.
+  let editorAppend = null;
   let currentUser = null;
   let widgetToken = null;
   // Calendar subscription feed (GET /calendar.ics?token=, server/routes/
@@ -2455,6 +2457,14 @@
       window.marked.use({
         gfm: true,
         breaks: true,
+        renderer: {
+          // ```receipt / ```invoice (🔎 Read text) → a table; anything else,
+          // or JSON that no longer parses, stays a plain code block.
+          code(code, lang) {
+            const kind = (lang || '').trim().split(/\s+/)[0];
+            return (kind === 'receipt' || kind === 'invoice') && renderDocFence(kind, code);
+          },
+        },
         extensions: [
           {
             name: 'wikilink',
@@ -2491,6 +2501,119 @@
     }
     return { ready };
   })();
+
+  // A ```receipt / ```invoice fence as a card + table. Every value carries
+  // data-field="<json key>" (item cells inside data-item="<index>") and the
+  // card keeps the fence's own JSON in data-json, so the 📋 button and any
+  // tool reading the page get the exact fields back. Returns false if the
+  // JSON doesn't parse (marked then falls back to a code block).
+  function renderDocFence(kind, src) {
+    let d;
+    try {
+      d = JSON.parse(src);
+    } catch {
+      return false;
+    }
+    if (!d || typeof d !== 'object' || Array.isArray(d)) return false;
+    const esc = (v) => escapeHtml(v == null ? '' : String(v));
+    const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+    const money = (v, cur) =>
+      isNum(v)
+        ? new Intl.NumberFormat(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v) +
+          (cur ? ` ${cur}` : '')
+        : esc(v);
+    const cur = typeof d.currency === 'string' ? d.currency : '';
+    const f = (key, html = esc(d[key])) => `<span data-field="${key}">${html}</span>`;
+    const has = (key) => d[key] != null && d[key] !== '';
+
+    const head = (icon, label, nameKey, sumKey) =>
+      `<div class="doc-head"><span class="doc-kind">${icon} ${label}</span>` +
+      (has(nameKey) ? `<span class="doc-name">${f(nameKey)}</span>` : '') +
+      (has(sumKey) ? `<span class="doc-sum">${f(sumKey, money(d[sumKey], cur))}</span>` : '') +
+      `<button type="button" class="doc-copy" title="Copy the ${label.toLowerCase()} data">📋</button></div>`;
+
+    const items = Array.isArray(d.items) ? d.items.filter((x) => x && typeof x === 'object') : [];
+    const showQty = items.some((x) => x.qty != null || x.unit);
+    const showPrice = items.some((x) => x.unit_price != null);
+    const cols = 2 + (showQty ? 1 : 0) + (showPrice ? 1 : 0);
+    const totals = [];
+    if (has('net')) totals.push(['Net', 'net', d.net]);
+    for (const [i, v] of (Array.isArray(d.vat) ? d.vat : []).entries()) {
+      if (v && v.amount != null) {
+        totals.push([`VAT${v.rate != null ? ` ${esc(v.rate)} %` : ''}`, `vat.${i}.amount`, v.amount]);
+      }
+    }
+    if (has('total')) totals.push(['Total', 'total', d.total, 'doc-total']);
+    if (has('to_pay')) totals.push(['To pay', 'to_pay', d.to_pay, 'doc-total']);
+    const table =
+      items.length || totals.length
+        ? '<div class="doc-table-wrap"><table class="doc-table">' +
+          (items.length
+            ? '<thead><tr><th>Item</th>' +
+              (showQty ? '<th class="num">Qty</th>' : '') +
+              (showPrice ? '<th class="num">Price</th>' : '') +
+              '<th class="num">Amount</th></tr></thead><tbody>' +
+              items
+                .map(
+                  (x, i) =>
+                    `<tr data-item="${i}"><td data-field="name">${esc(x.name)}</td>` +
+                    (showQty
+                      ? `<td class="num" data-field="qty">${esc(x.qty)}${x.unit ? ` ${esc(x.unit)}` : ''}</td>`
+                      : '') +
+                    (showPrice ? `<td class="num" data-field="unit_price">${money(x.unit_price)}</td>` : '') +
+                    `<td class="num" data-field="amount">${money(x.amount)}</td></tr>`
+                )
+                .join('') +
+              '</tbody>'
+            : '') +
+          (totals.length
+            ? '<tfoot>' +
+              totals
+                .map(
+                  ([label, key, v, cls]) =>
+                    `<tr${cls ? ` class="${cls}"` : ''}><td colspan="${cols - 1}">${label}</td>` +
+                    `<td class="num" data-field="${key}">${money(v, cur)}</td></tr>`
+                )
+                .join('') +
+              '</tfoot>'
+            : '') +
+          '</table></div>'
+        : '';
+
+    let body;
+    if (kind === 'receipt') {
+      const meta = [
+        [has('date') && f('date'), has('time') && f('time')].filter(Boolean).join(' '),
+        has('payment') ? f('payment') : '',
+        has('receipt_no') ? `No ${f('receipt_no')}` : '',
+        has('org_nr') ? `Org.nr ${f('org_nr')}` : '',
+        has('address') ? f('address') : '',
+      ].filter(Boolean);
+      body =
+        head('🧾', 'Receipt', 'merchant', 'total') +
+        (meta.length ? `<div class="doc-meta">${meta.join(' · ')}</div>` : '') +
+        table;
+    } else {
+      const rows = [
+        ['Invoice no', 'invoice_no'], ['Invoice date', 'invoice_date'], ['Due date', 'due_date'],
+        ['OCR', 'ocr_ref'], ['Bankgiro', 'bankgiro'], ['Plusgiro', 'plusgiro'], ['IBAN', 'iban'], ['BIC', 'bic'],
+        ['Customer no', 'customer_no'], ['Reference', 'reference'], ['Buyer', 'buyer'],
+        ['Buyer address', 'buyer_address'], ['Seller address', 'seller_address'],
+        ['Org.nr', 'seller_org_nr'], ['VAT no', 'seller_vat_nr'],
+      ].filter(([, k]) => has(k));
+      body =
+        head('📑', 'Invoice', 'seller', has('to_pay') ? 'to_pay' : 'total') +
+        (rows.length
+          ? '<dl class="doc-fields">' +
+            rows
+              .map(([label, k]) => `<div${k === 'due_date' ? ' class="doc-due"' : ''}><dt>${label}</dt><dd>${f(k)}</dd></div>`)
+              .join('') +
+            '</dl>'
+          : '') +
+        table;
+    }
+    return `<div class="doc-card doc-${kind}" data-doc="${kind}" data-json="${esc(src.trim())}">${body}</div>`;
+  }
 
   function mdToHtml(text) {
     if (!md.ready) return null;
@@ -2547,6 +2670,19 @@
         } else if (opts.onCreateWiki) {
           opts.onCreateWiki(a.dataset.wiki || a.textContent || '');
         }
+      });
+    });
+
+    el.querySelectorAll('.doc-card .doc-copy').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const card = btn.closest('.doc-card');
+        const fence = '```' + card.dataset.doc + '\n' + card.dataset.json + '\n```';
+        navigator.clipboard.writeText(fence).then(
+          () => toast('Copied.'),
+          () => toast("Couldn't copy.")
+        );
       });
     });
 
@@ -3557,6 +3693,29 @@
     // connection: there's no meaningful offline queue for "replace the file a
     // note already has" (nothing to show until the upload actually lands, and
     // a second offline edit before that would have no real file to diff against).
+    // 🔎 Read text (server/ocr.js): online-only, nothing to queue — the
+    // result is appended to the note as an ordinary edit.
+    ocrStart: async (noteId, mode, blobs) => {
+      const fd = new FormData();
+      fd.set('noteId', String(noteId));
+      fd.set('mode', mode);
+      blobs.forEach((b, i) => fd.append('images', b, `part-${i + 1}.jpg`));
+      let res;
+      try {
+        res = await fetch('/api/ocr', { method: 'POST', body: fd });
+      } catch {
+        throw httpErr(0, 'offline');
+      }
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw httpErr(res.status, j.error || `HTTP ${res.status}`);
+      return j.job;
+    },
+    ocrStatus: async (job) => {
+      const res = await fetch(`/api/ocr/${job}`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw httpErr(res.status, j.error || `HTTP ${res.status}`);
+      return j;
+    },
     setNoteAttachment: async (id, formData) => {
       if (!navigator.onLine || isTmp(id)) {
         toast('Changing an attachment needs a connection.');
@@ -6377,20 +6536,27 @@
       });
       if (!compact) {
         const download = buildDownloadLink(note);
-        // Not a GIF: the canvas would keep only its first frame.
-        if (editable && !/\.gif$/i.test(note.attachment_path)) {
-          // Same element + classes as Download, so it looks the same.
-          const crop = document.createElement('a');
-          crop.className = 'center-attachment-file center-attachment-download';
-          crop.href = '#';
-          crop.textContent = '✂️ Crop / rotate';
-          crop.addEventListener('click', (e) => {
-            e.preventDefault();
-            cropAttachmentImage(note);
-          });
+        if (editable) {
+          // Same element + classes as Download, so they look the same.
+          const action = (label, onClick) => {
+            const a = document.createElement('a');
+            a.className = 'center-attachment-file center-attachment-download';
+            a.href = '#';
+            a.textContent = label;
+            a.addEventListener('click', (e) => {
+              e.preventDefault();
+              onClick(a);
+            });
+            return a;
+          };
           const row = document.createElement('div');
           row.className = 'center-attachment-actions';
-          row.append(download, crop);
+          row.append(download);
+          // Not a GIF: the canvas would keep only its first frame.
+          if (!/\.gif$/i.test(note.attachment_path)) {
+            row.append(action('✂️ Crop / rotate', () => cropAttachmentImage(note)));
+          }
+          row.append(action('🔎 Read text', (a) => ocrAttachmentImage(note, a)));
           frag.appendChild(row);
         } else {
           frag.appendChild(download);
@@ -7212,6 +7378,23 @@
       previewBtn.textContent = '✏️ Edit';
     }
 
+    // 🔎 Read text lands here while this editor is open on the note, so it
+    // goes through the same autosave as typing (and can't race it).
+    if (contentCached) {
+      editorAppend = {
+        noteId: currentNote.id,
+        el: content,
+        // Saved right away, not debounced: closing the editor drops a
+        // pending autosave (closeNoteFullscreen clears saveTimer).
+        async append(text) {
+          content.value = appendBlock(content.value, text);
+          if (previewing) paintPreview();
+          clearTimeout(saveTimer);
+          currentNote = await api.updateNote(currentId, { title: title.value, content: content.value });
+          allNotesCache = await api.listNotes();
+        },
+      };
+    }
 
     frag.appendChild(title);
     const mailRow = buildMailInfo(currentNote, onRerender);
@@ -12346,6 +12529,138 @@
     } finally {
       saved();
     }
+  }
+
+  // --- 🔎 Read text: Claude reads an image note (server/ocr.js) ---
+  // Every document found is appended to the note's text as its own block:
+  // text → Markdown under a heading, a receipt/invoice → a ```receipt /
+  // ```invoice JSON fence (drawn as a table by renderDocFence).
+  function ocrAttachmentImage(note, anchor) {
+    const run = (mode) => () => runOcr(note, mode);
+    openActionMenu(anchor, [
+      { label: '✨ Auto-detect', onClick: run('auto') },
+      { label: '📄 All text', onClick: run('text') },
+      { label: '🧾 Receipt', onClick: run('receipt') },
+      { label: '📑 Invoice', onClick: run('invoice') },
+    ]);
+  }
+
+  // The image as JPEGs Claude reads well (≤ ~1500 px). A tall one — a long
+  // receipt — is cut into overlapping slices instead of being shrunk until
+  // the small print is gone; the server tells Claude they're one image.
+  async function ocrImagePieces(url) {
+    const src = await fetch(url).then((r) => r.blob());
+    const bmp = await createImageBitmap(src);
+    const MAX = 1500, SLICE = 1500, OVERLAP = 150, MAX_SLICES = 8, TALL_W = 1200;
+    const tall = bmp.height / bmp.width > 2;
+    let scale = Math.min(1, (tall ? TALL_W / bmp.width : MAX / Math.max(bmp.width, bmp.height)));
+    if (tall) {
+      const most = MAX_SLICES * (SLICE - OVERLAP) + OVERLAP;
+      scale = Math.min(scale, most / bmp.height);
+    }
+    const sw = Math.max(1, Math.round(bmp.width * scale));
+    const sh = Math.max(1, Math.round(bmp.height * scale));
+    const pieces = [];
+    for (let top = 0; ; top += SLICE - OVERLAP) {
+      const ph = tall ? Math.min(SLICE, sh - top) : sh;
+      const cv = document.createElement('canvas');
+      cv.width = sw;
+      cv.height = ph;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#fff'; // transparent PNGs: dark text on black reads badly
+      ctx.fillRect(0, 0, sw, ph);
+      ctx.drawImage(bmp, 0, top / scale, bmp.width, ph / scale, 0, 0, sw, ph);
+      pieces.push(
+        await new Promise((res, rej) => cv.toBlob((b) => (b ? res(b) : rej(new Error('encode'))), 'image/jpeg', 0.9))
+      );
+      if (!tall || top + ph >= sh) break;
+    }
+    if (bmp.close) bmp.close();
+    return pieces;
+  }
+
+  // JSON with one line per field and per item — readable in the textarea,
+  // still plain JSON for anything that parses it.
+  function docFenceJson(obj) {
+    const lines = Object.entries(obj).map(([k, v]) => {
+      const val =
+        Array.isArray(v) && v.length
+          ? `[\n${v.map((x) => '    ' + JSON.stringify(x)).join(',\n')}\n  ]`
+          : JSON.stringify(v);
+      return `  ${JSON.stringify(k)}: ${val}`;
+    });
+    return `{\n${lines.join(',\n')}\n}`;
+  }
+
+  function ocrBlock(doc) {
+    if (doc.kind === 'text') return `#### 📄 ${doc.title || 'Text from image'}\n\n${doc.markdown}`;
+    return '```' + doc.kind + '\n' + docFenceJson({ type: doc.kind, v: 1, ...doc.data }) + '\n```';
+  }
+
+  function appendBlock(text, block) {
+    const base = (text || '').replace(/\s+$/, '');
+    return (base ? base + '\n\n' : '') + block + '\n';
+  }
+
+  async function appendToNote(id, block) {
+    if (editorAppend && editorAppend.noteId === id && editorAppend.el.isConnected) {
+      return editorAppend.append(block);
+    }
+    // The editor was closed (or moved on) while Claude was reading.
+    const n = await api.getNote(id);
+    if (!n || n.content == null) throw new Error("Couldn't load the note's text.");
+    const updated = await api.updateNote(id, { title: n.title, content: appendBlock(n.content, block) });
+    if (id === currentId) currentNote = updated;
+    allNotesCache = await api.listNotes();
+    if (currentId) await render();
+  }
+
+  async function runOcr(note, mode) {
+    if (!navigator.onLine) return toast('Reading an image needs a connection.');
+    const url = await resolveMediaUrl(note.attachment_path);
+    if (!url) return toast('Not available offline.');
+    const busy = toast('🔎 Claude is reading the image…', { duration: 300000 });
+    let docs;
+    try {
+      let pieces;
+      try {
+        pieces = await ocrImagePieces(url);
+      } catch {
+        throw httpErr(415, "This image format can't be read here.");
+      }
+      const job = await api.ocrStart(note.id, mode, pieces);
+      const until = Date.now() + 5 * 60 * 1000;
+      while (!docs) {
+        if (Date.now() > until) throw httpErr(504, 'Reading the image took too long.');
+        await new Promise((r) => setTimeout(r, 1500));
+        let st;
+        try {
+          st = await api.ocrStatus(job);
+        } catch (e) {
+          if (e.httpStatus) throw e;
+          continue; // a dropped poll — the job keeps running server-side
+        }
+        if (st.status === 'error') throw httpErr(500, st.error || "Couldn't read the image.");
+        if (st.status === 'done') docs = st.documents || [];
+      }
+    } catch (e) {
+      busy();
+      return toast(e.httpStatus ? e.message : "Couldn't reach the server.");
+    }
+    busy();
+    if (!docs.length) return toast(mode === 'text' ? 'No text found in the image.' : 'Nothing found to extract.');
+    try {
+      await appendToNote(note.id, docs.map(ocrBlock).join('\n\n'));
+    } catch (e) {
+      return toast(e.message || "Couldn't save the text.");
+    }
+    const names = { text: 'text', receipt: 'receipt', invoice: 'invoice' };
+    const kinds = [...new Set(docs.map((d) => d.kind))];
+    toast(
+      docs.length === 1
+        ? `Added the ${names[docs[0].kind]} to the note.`
+        : `Added ${docs.length} ${kinds.length === 1 ? names[kinds[0]] + ' blocks' : 'blocks'} to the note.`
+    );
   }
 
   imageOverlayClose.addEventListener('click', closeImageLightbox);

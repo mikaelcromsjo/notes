@@ -27,6 +27,7 @@ const locationRouter = require('./routes/location');
 const historyRouter = require('./routes/history');
 const importRouter = require('./routes/import');
 const onboardingRouter = require('./routes/onboarding');
+const ocrRouter = require('./routes/ocr');
 const shareRouter = require('./routes/share');
 const calendarRouter = require('./routes/calendar');
 const sharesRouter = require('./routes/shares');
@@ -175,6 +176,7 @@ app.use('/api/location-log', locationRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/import', importRouter);
 app.use('/api/onboarding', onboardingRouter);
+app.use('/api/ocr', ocrRouter);
 
 // PWA share target — a top-level multipart POST from the OS share sheet, so it
 // lives outside /api (and its 401 gate); resolveSession above still runs.
